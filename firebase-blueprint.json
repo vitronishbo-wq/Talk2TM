@@ -1,0 +1,115 @@
+{
+  "entities": {
+    "Room": {
+      "title": "Room",
+      "description": "Sala textual com limite rígido de exatamente 2 participantes simultâneos.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "Identificador da sala alfanumérico e hífens.",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$"
+        },
+        "participantA": {
+          "type": "string",
+          "description": "Identificador único (UUID) do primeiro participante.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "participantB": {
+          "type": "string",
+          "description": "Identificador único (UUID) do segundo participante, vazio se não ocupado.",
+          "maxLength": 64
+        },
+        "participantAName": {
+          "type": "string",
+          "description": "Nome de exibição sanitizado do participante A.",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "participantBName": {
+          "type": "string",
+          "description": "Nome de exibição sanitizado do participante B.",
+          "maxLength": 30
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Data/hora ISO de criação da sala."
+        },
+        "lastActivity": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Data/hora ISO da última atividade da sala."
+        }
+      },
+      "required": ["roomId", "participantA", "participantAName", "createdAt", "lastActivity"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "Mensagem puramente textual para registro de chat 2P com idempotência por clientId.",
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "description": "Chave única composta para idempotência.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "room": {
+          "type": "string",
+          "description": "Identificador da sala correspondente.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "sender": {
+          "type": "string",
+          "description": "Nome textual sanitizado do remetente.",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "senderId": {
+          "type": "string",
+          "description": "Identificador único (UUID) do remetente.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "text": {
+          "type": "string",
+          "description": "Texto puro da mensagem sem tags HTML nem rich media.",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "clientId": {
+          "type": "string",
+          "description": "Identificador idempotente do lado do cliente.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Data/hora ISO de criação da mensagem."
+        },
+        "status": {
+          "type": "string",
+          "description": "Estado de entrega textual da mensagem.",
+          "enum": ["pending", "synced", "failed"]
+        }
+      },
+      "required": ["messageId", "room", "sender", "senderId", "text", "clientId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Coleção de salas Talk2TM limitadas a 2 participantes."
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Coleção linear de mensagens puramente textuais da sala."
+    }
+  }
+}

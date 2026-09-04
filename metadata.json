@@ -1,0 +1,6 @@
+{
+  "name": "Talk2TM",
+  "description": "Chat textual ultraleve 2P camuflado por calculadora funcional, mobile-first para Truman e Mãezinha com senha simplificada.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

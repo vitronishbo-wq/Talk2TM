@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="112" fill="#121214"/>
+  <!-- Calculator Screen -->
+  <rect x="72" y="72" width="368" height="96" rx="20" fill="#1e1e24" stroke="#2d2d38" stroke-width="4"/>
+  <rect x="330" y="110" width="70" height="20" rx="4" fill="#58a6ff"/>
+  <!-- Keypad Grid -->
+  <rect x="72" y="196" width="76" height="60" rx="16" fill="#262630"/>
+  <rect x="169" y="196" width="76" height="60" rx="16" fill="#262630"/>
+  <rect x="266" y="196" width="76" height="60" rx="16" fill="#262630"/>
+  <rect x="364" y="196" width="76" height="60" rx="16" fill="#ff9f0a"/>
+  
+  <rect x="72" y="272" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="169" y="272" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="266" y="272" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="364" y="272" width="76" height="60" rx="16" fill="#ff9f0a"/>
+  
+  <rect x="72" y="348" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="169" y="348" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="266" y="348" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="364" y="348" width="76" height="60" rx="16" fill="#ff9f0a"/>
+  
+  <rect x="72" y="424" width="173" height="60" rx="16" fill="#333340"/>
+  <rect x="266" y="424" width="76" height="60" rx="16" fill="#333340"/>
+  <rect x="364" y="424" width="76" height="60" rx="16" fill="#ff9f0a"/>
+</svg>

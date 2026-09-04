@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net (default deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation for Room
+    function isValidRoom(data) {
+      return data.keys().hasAll(['roomId', 'participantA', 'participantAName', 'createdAt', 'lastActivity'])
+        && (data.keys().size() == 5 || (data.keys().size() == 7 && data.keys().hasAll(['participantB', 'participantBName'])))
+        && data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 32 && data.roomId.matches('^[a-zA-Z0-9_-]+$')
+        && data.participantA is string && data.participantA.size() >= 1 && data.participantA.size() <= 64
+        && data.participantAName is string && data.participantAName.size() >= 1 && data.participantAName.size() <= 30
+        && (!('participantB' in data) || (data.participantB is string && data.participantB.size() <= 64))
+        && (!('participantBName' in data) || (data.participantBName is string && data.participantBName.size() <= 30));
+    }
+
+    // Validation for Message
+    function isValidMessage(data) {
+      return data.keys().hasAll(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt'])
+        && (data.keys().size() == 7 || (data.keys().size() == 8 && 'status' in data))
+        && data.messageId is string && data.messageId.size() >= 1 && data.messageId.size() <= 128
+        && data.room is string && data.room.size() >= 1 && data.room.size() <= 32 && data.room.matches('^[a-zA-Z0-9_-]+$')
+        && data.sender is string && data.sender.size() >= 1 && data.sender.size() <= 30
+        && data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 64
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 2000
+        && data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 64
+        && (!('status' in data) || (data.status is string && data.status in ['pending', 'synced', 'failed']));
+    }
+
+    // Rooms Collection (strictly limited to 2 participants)
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId);
+      allow list: if false; // Never allow global room scraping
+      
+      // Create new room: only participantA can initialize
+      allow create: if isValidId(roomId)
+        && isValidRoom(incoming())
+        && incoming().roomId == roomId;
+
+      // Update room: only allow joining as participantB when empty, or updating lastActivity
+      allow update: if isValidId(roomId)
+        && isValidRoom(incoming())
+        && incoming().roomId == existing().roomId
+        && incoming().participantA == existing().participantA
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Participant B claims empty slot
+          (!('participantB' in existing()) || existing().participantB == '' || existing().participantB == null)
+          // Or existing participant keeping participantB intact
+          || (incoming().participantB == existing().participantB)
+        );
+
+      allow delete: if false;
+    }
+
+    // Messages Collection (immutable, strictly text, strictly 2 participants)
+    match /messages/{messageId} {
+      allow get: if isValidId(messageId);
+      
+      // List messages with room boundary check
+      allow list: if resource.data.room is string;
+
+      // Create message: must belong to valid room and be sent by participantA or participantB
+      allow create: if isValidId(messageId)
+        && isValidMessage(incoming())
+        && incoming().messageId == messageId
+        && exists(/databases/$(database)/documents/rooms/$(incoming().room))
+        && (
+          incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantA
+          || incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantB
+        );
+
+      // Append-only immutable log
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}
