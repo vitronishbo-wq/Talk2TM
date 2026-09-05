@@ -177,7 +177,7 @@ export async function joinFirestoreRoom(
 
   try {
     const initPromise = initFirebase();
-    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000));
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000));
     const initRes = await Promise.race([initPromise, timeoutPromise]);
 
     if (!initRes || !initRes.db) {
@@ -248,7 +248,7 @@ export async function joinFirestoreRoom(
     const result = await Promise.race([
       fetchSnap(),
       new Promise<{ success: boolean; room: Room }>((resolve) =>
-        setTimeout(() => resolve({ success: true, room: fallbackRoom }), 2000)
+        setTimeout(() => resolve({ success: true, room: fallbackRoom }), 5000)
       ),
     ]);
 
@@ -290,32 +290,64 @@ export function subscribeToMessages(
 ): Unsubscribe | null {
   if (!firestoreDb) return null;
 
-  const q = query(
-    collection(firestoreDb, 'messages'),
-    where('room', '==', roomId),
-    orderBy('createdAt', 'desc'),
-    limit(50)
-  );
+  let activeUnsubscribe: Unsubscribe | null = null;
 
-  return onSnapshot(
-    q,
-    (snapshot) => {
-      const messages: Message[] = [];
-      snapshot.forEach((d) => {
-        const data = d.data() as Message;
-        messages.push({
-          ...data,
-          status: 'synced',
-        });
-      });
-      // Inverte para ordem cronológica de exibição
-      onNewMessages(messages.reverse());
-    },
-    (err) => {
-      console.warn('Erro no listener de mensagens:', err);
-      onError(err);
+  const startListening = (withOrderBy: boolean) => {
+    try {
+      const q = withOrderBy
+        ? query(
+            collection(firestoreDb!, 'messages'),
+            where('room', '==', roomId),
+            orderBy('createdAt', 'desc'),
+            limit(50)
+          )
+        : query(
+            collection(firestoreDb!, 'messages'),
+            where('room', '==', roomId),
+            limit(100)
+          );
+
+      activeUnsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          const messages: Message[] = [];
+          snapshot.forEach((d) => {
+            const data = d.data() as Message;
+            messages.push({
+              ...data,
+              status: 'synced',
+            });
+          });
+          // Garante ordem cronológica estável cliente-side
+          messages.sort((a, b) => (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
+          onNewMessages(messages);
+        },
+        (err) => {
+          if (withOrderBy) {
+            console.warn('Talk2TM: Query com índice composto pendente. Ativando listener resiliente...', err);
+            startListening(false);
+          } else {
+            console.warn('Erro no listener de mensagens:', err);
+            onError(err);
+          }
+        }
+      );
+    } catch (e) {
+      if (withOrderBy) {
+        startListening(false);
+      } else {
+        onError(e instanceof Error ? e : new Error(String(e)));
+      }
     }
-  );
+  };
+
+  startListening(true);
+
+  return () => {
+    if (activeUnsubscribe) {
+      activeUnsubscribe();
+    }
+  };
 }
 
 /**

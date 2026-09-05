@@ -32,15 +32,50 @@ service cloud.firestore {
 
     // Validation for Message
     function isValidMessage(data) {
-      return data.keys().hasAll(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt'])
-        && (data.keys().size() == 7 || (data.keys().size() == 8 && 'status' in data))
-        && data.messageId is string && data.messageId.size() >= 1 && data.messageId.size() <= 128
-        && data.room is string && data.room.size() >= 1 && data.room.size() <= 32 && data.room.matches('^[a-zA-Z0-9_-]+$')
-        && data.sender is string && data.sender.size() >= 1 && data.sender.size() <= 30
-        && data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 64
-        && data.text is string && data.text.size() >= 1 && data.text.size() <= 2000
-        && data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 64
-        && (!('status' in data) || (data.status is string && data.status in ['pending', 'synced', 'failed']));
+      return data.keys().hasAll([
+          'messageId',
+          'room',
+          'sender',
+          'senderId',
+          'text',
+          'clientId',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'messageId',
+          'room',
+          'sender',
+          'senderId',
+          'text',
+          'clientId',
+          'createdAt',
+          'status',
+          'createdAtServer'
+        ])
+        && data.messageId is string
+        && data.messageId.size() >= 1
+        && data.messageId.size() <= 128
+        && data.room is string
+        && data.room.size() >= 1
+        && data.room.size() <= 32
+        && data.room.matches('^[a-zA-Z0-9_-]+$')
+        && data.sender is string
+        && data.sender.size() >= 1
+        && data.sender.size() <= 30
+        && data.senderId is string
+        && data.senderId.size() >= 1
+        && data.senderId.size() <= 64
+        && data.text is string
+        && data.text.size() >= 1
+        && data.text.size() <= 2000
+        && data.clientId is string
+        && data.clientId.size() >= 1
+        && data.clientId.size() <= 64
+        && (!('status' in data)
+            || (data.status is string
+                && data.status in ['pending', 'synced', 'failed']))
+        && (!('createdAtServer' in data)
+            || data.createdAtServer is timestamp);
     }
 
     // Rooms Collection (strictly limited to 2 participants)
@@ -80,10 +115,15 @@ service cloud.firestore {
       allow create: if isValidId(messageId)
         && isValidMessage(incoming())
         && incoming().messageId == messageId
-        && exists(/databases/$(database)/documents/rooms/$(incoming().room))
         && (
-          incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantA
-          || incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantB
+          (incoming().room == 'truman-maezinha' && incoming().senderId in ['usr_truman', 'usr_maezinha'])
+          || (
+            exists(/databases/$(database)/documents/rooms/$(incoming().room))
+            && (
+              incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantA
+              || incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantB
+            )
+          )
         );
 
       // Append-only immutable log
