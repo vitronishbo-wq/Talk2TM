@@ -145,104 +145,105 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
 
 /**
  * Entra ou cria uma sala garantindo a regra de no máximo 2 participantes (Camadas 12 e 13)
+ * Com timeout estrito de 2 segundos para nunca travar a interface do usuário em redes lentas ou offline.
  */
 export async function joinFirestoreRoom(
   roomId: string,
   userId: string,
   userName: string
 ): Promise<{ success: boolean; room: Room; error?: string }> {
-  const { db } = await initFirebase();
   const nowIso = new Date().toISOString();
-
-  if (!db) {
-    // Modo local / offline
-    const localRoom: Room = {
-      roomId,
-      participantA: userId,
-      participantAName: userName,
-      createdAt: nowIso,
-      lastActivity: nowIso,
-    };
-    return { success: true, room: localRoom };
-  }
-
-  const roomDocRef = doc(db, 'rooms', roomId);
+  const fallbackRoom: Room = {
+    roomId,
+    participantA: userId,
+    participantAName: userName,
+    participantB: null,
+    participantBName: null,
+    createdAt: nowIso,
+    lastActivity: nowIso,
+  };
 
   try {
-    const snap = await getDoc(roomDocRef);
+    const initPromise = initFirebase();
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000));
+    const initRes = await Promise.race([initPromise, timeoutPromise]);
 
-    if (!snap.exists()) {
-      // Cria sala com participante A
-      const newRoom: Room = {
-        roomId,
-        participantA: userId,
-        participantAName: userName,
-        participantB: null,
-        participantBName: null,
-        createdAt: nowIso,
-        lastActivity: nowIso,
-      };
-
-      await setDoc(roomDocRef, {
-        ...newRoom,
-        createdAtServer: serverTimestamp(),
-        lastActivityServer: serverTimestamp(),
-      });
-
-      return { success: true, room: newRoom };
+    if (!initRes || !initRes.db) {
+      // Modo local / offline imediato
+      return { success: true, room: fallbackRoom };
     }
 
-    const data = snap.data() as Room;
+    const db = initRes.db;
+    const roomDocRef = doc(db, 'rooms', roomId);
 
-    // Se já é um dos participantes (reconexão / reload)
-    if (data.participantA === userId || data.participantB === userId) {
-      await updateDoc(roomDocRef, {
-        lastActivity: nowIso,
-        lastActivityServer: serverTimestamp(),
-      });
-      return { success: true, room: data };
-    }
+    const fetchSnap = async () => {
+      const snap = await getDoc(roomDocRef);
 
-    // Se a vaga B está disponível
-    if (!data.participantB || data.participantB === '') {
-      const updated: Partial<Room> = {
-        participantB: userId,
-        participantBName: userName,
-        lastActivity: nowIso,
-      };
+      if (!snap.exists()) {
+        const newRoom: Room = {
+          roomId,
+          participantA: userId,
+          participantAName: userName,
+          participantB: null,
+          participantBName: null,
+          createdAt: nowIso,
+          lastActivity: nowIso,
+        };
 
-      await updateDoc(roomDocRef, {
-        ...updated,
-        lastActivityServer: serverTimestamp(),
-      });
+        await setDoc(roomDocRef, newRoom);
+        return { success: true, room: newRoom };
+      }
 
-      return {
-        success: true,
-        room: {
-          ...data,
+      const data = snap.data() as Room;
+
+      // Se já é um dos participantes (reconexão / reload)
+      if (data.participantA === userId || data.participantB === userId) {
+        await updateDoc(roomDocRef, {
+          lastActivity: nowIso,
+        });
+        return { success: true, room: data };
+      }
+
+      // Se a vaga B está disponível
+      if (!data.participantB || data.participantB === '') {
+        const updated = {
           participantB: userId,
           participantBName: userName,
           lastActivity: nowIso,
-        },
-      };
-    }
+        };
 
-    // Sala já possui 2 participantes
-    return {
-      success: false,
-      room: data,
-      error: 'Sala cheia: limite de 2 participantes atingido.',
+        await updateDoc(roomDocRef, updated);
+
+        return {
+          success: true,
+          room: {
+            ...data,
+            participantB: userId,
+            participantBName: userName,
+            lastActivity: nowIso,
+          },
+        };
+      }
+
+      // Sala já possui 2 participantes
+      return {
+        success: false,
+        room: data,
+        error: 'Sala cheia: limite de 2 participantes atingido.',
+      };
     };
+
+    const result = await Promise.race([
+      fetchSnap(),
+      new Promise<{ success: boolean; room: Room }>((resolve) =>
+        setTimeout(() => resolve({ success: true, room: fallbackRoom }), 2000)
+      ),
+    ]);
+
+    return result;
   } catch (error) {
-    // Tolerância offline: se não puder ler da nuvem, permite entrada local
-    console.warn('Erro ao conectar na sala do Firestore (offline provável):', error);
-    const fallbackRoom: Room = {
-      roomId,
-      participantA: userId,
-      participantAName: userName,
-      createdAt: nowIso,
-      lastActivity: nowIso,
-    };
+    // Tolerância offline total: se falhar conexão remota, opera localmente
+    console.warn('Talk2TM: Firestore não acessível no momento. Operando com armazenamento local.', error);
     return { success: true, room: fallbackRoom };
   }
 }
