@@ -97,7 +97,7 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
       appId: import.meta.env.VITE_FIREBASE_APP_ID,
     };
   } else {
-    // 2. Fallback: carregar firebase-applet-config.json se existir no Google AI Studio
+    // 2. Fallback: carregar firebase-applet-config.json se existir no bundle/servidor
     try {
       const response = await fetch('/firebase-applet-config.json');
       if (response.ok) {
@@ -107,7 +107,19 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
         }
       }
     } catch {
-      // Ignora erro se o arquivo não estiver presente
+      // Ignora erro se a requisição falhar
+    }
+
+    // 3. Fallback estático padrão do projeto gen-lang-client-0618196986
+    if (!config || !config.projectId) {
+      config = {
+        apiKey: 'AIzaSyCfwTvVhyrRZHk4zzzRweShyVdMnimnzm0',
+        authDomain: 'gen-lang-client-0618196986.firebaseapp.com',
+        projectId: 'gen-lang-client-0618196986',
+        storageBucket: 'gen-lang-client-0618196986.firebasestorage.app',
+        messagingSenderId: '511328922010',
+        appId: '1:511328922010:web:58c5982b1ab704d93f3223',
+      };
     }
   }
 
