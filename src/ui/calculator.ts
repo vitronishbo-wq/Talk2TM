@@ -48,13 +48,12 @@ export class MobileCalculator {
     const topLabel = document.createElement('span');
     topLabel.className = 'calc-label';
     topLabel.textContent = 'Calculadora';
-    topLabel.title = 'Digite sua senha ou faça contas';
 
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
     manualBtn.className = 'calc-manual-btn';
-    manualBtn.textContent = '··· [senha]';
-    manualBtn.title = 'Entrada direta de senha';
+    manualBtn.textContent = 'DEG';
+    manualBtn.title = 'Modo Graus / Radianos';
     manualBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (this.callbacks.onOpenManualEntry) {
