@@ -4,6 +4,7 @@
 
 import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS } from '../src/config';
 import { sanitizeMessageText, sanitizeName, sanitizeRoom, generateId } from '../src/utils/sanitize';
+import { verifyPassword, PASSWORDS } from '../src/app';
 import { Room } from '../src/types';
 
 function assert(condition: boolean, description: string): void {
@@ -112,6 +113,25 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(getUserByPin('000000') === null, 'Senha desconhecida deve retornar null');
     assert(ACCESS_CONFIG.USERS.length === 2, 'Exatamente dois usuários no sistema');
     assert(DEFAULT_SETTINGS.inactivityLockSeconds === 5, 'Inatividade padrão de 5 segundos');
+  });
+
+  // 8. Verificação de Senha em app.ts ('852456' -> Truman, '135790' -> Mãezinha)
+  check('app.ts: verificação de senha com campo único', () => {
+    const trumanAuth = verifyPassword(PASSWORDS.TRUMAN);
+    assert(trumanAuth.valid === true, 'Senha Truman deve ser válida');
+    assert(trumanAuth.user === 'Truman', 'Usuário autenticado deve ser Truman');
+    assert(trumanAuth.userId === 'usr_truman', 'ID deve ser usr_truman');
+
+    const maezinhaAuth = verifyPassword(PASSWORDS.MAEZINHA);
+    assert(maezinhaAuth.valid === true, 'Senha Mãezinha deve ser válida');
+    assert(maezinhaAuth.user === 'Mãezinha', 'Usuário autenticado deve ser Mãezinha');
+    assert(maezinhaAuth.userId === 'usr_maezinha', 'ID deve ser usr_maezinha');
+
+    const invalidAuth = verifyPassword('999999');
+    assert(invalidAuth.valid === false, 'Senha incorreta deve ser rejeitada');
+
+    const emptyAuth = verifyPassword('   ');
+    assert(emptyAuth.valid === false, 'Senha em branco deve ser rejeitada');
   });
 
   return { passed, total };

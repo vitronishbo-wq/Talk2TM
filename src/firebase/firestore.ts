@@ -69,25 +69,54 @@ let isConfigured = false;
 
 /**
  * Tenta inicializar o Firebase com persistência local avançada (Camadas 06 e 07)
+ * Suporta:
+ * 1. Variáveis de ambiente Vite (import.meta.env.VITE_FIREBASE_*) para Render, GitHub Pages, Firebase Hosting e produção
+ * 2. Fallback para /firebase-applet-config.json gerado automaticamente no Google AI Studio
  */
 export async function initFirebase(): Promise<{ db: Firestore | null; configured: boolean }> {
   if (firestoreDb) {
     return { db: firestoreDb, configured: isConfigured };
   }
 
+  let config: Record<string, string | undefined> | null = null;
+
+  // 1. Prioridade: Variáveis de ambiente VITE_FIREBASE_* (Render, GitHub Actions, Vercel, .env)
+  if (import.meta.env.VITE_FIREBASE_PROJECT_ID && import.meta.env.VITE_FIREBASE_API_KEY) {
+    const rawAuthDomain = import.meta.env.VITE_FIREBASE_AUTH_DOMAIN?.trim();
+    const cleanAuthDomain =
+      rawAuthDomain && !rawAuthDomain.startsWith('://') && rawAuthDomain !== '://firebaseapp.com' && rawAuthDomain.includes('.')
+        ? rawAuthDomain.replace(/^https?:\/\//, '')
+        : `${import.meta.env.VITE_FIREBASE_PROJECT_ID}.firebaseapp.com`;
+
+    config = {
+      apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+      authDomain: cleanAuthDomain,
+      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || `${import.meta.env.VITE_FIREBASE_PROJECT_ID}.firebasestorage.app`,
+      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+      appId: import.meta.env.VITE_FIREBASE_APP_ID,
+    };
+  } else {
+    // 2. Fallback: carregar firebase-applet-config.json se existir no Google AI Studio
+    try {
+      const response = await fetch('/firebase-applet-config.json');
+      if (response.ok) {
+        const fetched = await response.json();
+        if (fetched && fetched.projectId) {
+          config = fetched;
+        }
+      }
+    } catch {
+      // Ignora erro se o arquivo não estiver presente
+    }
+  }
+
+  if (!config || !config.projectId) {
+    console.warn('Talk2TM: Rodando com mecanismo local offline (sem credenciais remotas do Firebase).');
+    return { db: null, configured: false };
+  }
+
   try {
-    // Tenta carregar configuração do firebase-applet-config.json se existir
-    const response = await fetch('/firebase-applet-config.json');
-    if (!response.ok) {
-      console.warn('Talk2TM: Rodando com mecanismo local offline (sem firebase-applet-config.json).');
-      return { db: null, configured: false };
-    }
-
-    const config = await response.json();
-    if (!config || !config.projectId) {
-      return { db: null, configured: false };
-    }
-
     if (!getApps().length) {
       firebaseApp = initializeApp(config);
     } else {
@@ -109,7 +138,7 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
     console.info('Talk2TM: Firestore inicializado com persistência local.');
     return { db: firestoreDb, configured: true };
   } catch (err) {
-    console.warn('Talk2TM: Inicialização remota não configurada. Modo offline local ativo.', err);
+    console.warn('Talk2TM: Inicialização remota falhou. Modo offline local ativo.', err);
     return { db: null, configured: false };
   }
 }
