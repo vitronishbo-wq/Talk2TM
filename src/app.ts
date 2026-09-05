@@ -122,17 +122,17 @@ export class Talk2TMApp {
 
   /**
    * Ponto central de desbloqueio:
-   * Processa a entrada do campo único de senha e, se válida, desbloqueia a interface do chat.
+   * Processa a entrada do campo único de senha e, se válida, desbloqueia IMEDIATAMENTE
+   * a interface do chat de forma otimista, sem travar na rede.
    */
   public async unlockChatWithPassword(password: string): Promise<boolean> {
     const verification = verifyPassword(password);
 
     if (!verification.valid || !verification.user || !verification.userId) {
       this.ui.showPassError(verification.error || 'Senha inválida.');
+      this.ui.showTemporaryNotice(verification.error || 'Senha inválida.');
       return false;
     }
-
-    this.setConnectionState('conectando');
 
     const roomId = ACCESS_CONFIG.DEFAULT_ROOM;
     const { user, userId } = verification;
@@ -143,45 +143,77 @@ export class Talk2TMApp {
       roomId,
     };
 
-    // Tenta conectar ou ingressar na sala no Firestore
-    const joinResult = await joinFirestoreRoom(roomId, userId, user);
-
-    if (!joinResult.success) {
-      this.setConnectionState(navigator.onLine ? 'online' : 'offline');
-      this.ui.showPassError(joinResult.error || 'Não foi possível acessar a sala.');
-      return false;
-    }
+    const nowIso = new Date().toISOString();
+    const immediateRoom: Room = {
+      roomId,
+      participantA: userId,
+      participantAName: user,
+      participantB: null,
+      participantBName: null,
+      createdAt: nowIso,
+      lastActivity: nowIso,
+    };
 
     this.currentSession = session;
-    this.currentRoom = joinResult.room;
+    this.currentRoom = immediateRoom;
     saveSession(session);
-    await saveLocalRoom(this.currentRoom);
+    saveLocalRoom(immediateRoom).catch(console.warn);
 
-    // Desbloqueia a interface do chat
-    this.ui.showChatView(session, this.currentRoom);
+    // 1. DESBLOQUEIO IMEDIATO DA INTERFACE DO CHAT (Zero latência)
+    this.ui.showChatView(session, immediateRoom);
+    this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
 
-    // Inicia temporizadores de sessão e inatividade (5 segundos sem teclar)
+    // 2. Inicia temporizadores de sessão e inatividade (5 segundos sem teclar)
     this.startSessionTimeout();
     this.resetInactivityTimer();
 
-    // Carrega histórico local imediato
-    const localHistory = await getLocalMessages(roomId, CONFIG.HISTORY_LIMIT);
-    for (const msg of localHistory) {
-      this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+    // 3. Carrega histórico local imediato do IndexedDB
+    try {
+      const localHistory = await getLocalMessages(roomId, CONFIG.HISTORY_LIMIT);
+      for (const msg of localHistory) {
+        this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+      }
+      if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
+        this.ui.setHasOlderMessages(true);
+      }
+    } catch (dbErr) {
+      console.warn('Erro ao ler mensagens locais:', dbErr);
     }
 
-    if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
-      this.ui.setHasOlderMessages(true);
-    }
+    // 4. Conecta assincronamente ao Firestore em segundo plano
+    this.connectFirestoreBackground(roomId, userId, user);
 
-    // Escuta novas mensagens em tempo real
-    this.setupRealtimeListeners(roomId);
-
-    // Sincroniza mensagens que estavam pendentes no outbox
-    await this.syncPendingOutbox();
-
-    this.setConnectionState(navigator.onLine ? 'online' : 'offline');
     return true;
+  }
+
+  /**
+   * Conecta ao Firestore em segundo plano com timeout de resiliência
+   */
+  private async connectFirestoreBackground(roomId: string, userId: string, user: string): Promise<void> {
+    try {
+      const joinResult = await joinFirestoreRoom(roomId, userId, user);
+
+      if (joinResult && joinResult.success && joinResult.room) {
+        this.currentRoom = joinResult.room;
+        await saveLocalRoom(this.currentRoom);
+        if (this.currentSession) {
+          this.ui.updateRoomInfo(this.currentRoom, this.currentSession);
+        }
+
+        // Escuta novas mensagens em tempo real
+        this.setupRealtimeListeners(roomId);
+
+        // Sincroniza mensagens que estavam pendentes no outbox
+        await this.syncPendingOutbox();
+
+        this.setConnectionState(navigator.onLine ? 'online' : 'offline');
+      } else {
+        this.setConnectionState('offline');
+      }
+    } catch (err) {
+      console.warn('Conexão remota Firestore em background falhou:', err);
+      this.setConnectionState('offline');
+    }
   }
 
   public setConnectionState(newState: ConnectionState): void {

@@ -48,13 +48,12 @@ export class MobileCalculator {
     const topLabel = document.createElement('span');
     topLabel.className = 'calc-label';
     topLabel.textContent = 'Calculadora';
-    topLabel.title = 'Digite sua senha ou faça contas';
 
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
     manualBtn.className = 'calc-manual-btn';
-    manualBtn.textContent = '···';
-    manualBtn.title = 'Entrada direta de senha';
+    manualBtn.textContent = 'DEG';
+    manualBtn.title = 'Modo Graus / Radianos';
     manualBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (this.callbacks.onOpenManualEntry) {
@@ -157,6 +156,9 @@ export class MobileCalculator {
         this.setOperator('÷');
       } else if (key === 'Enter' || key === '=') {
         e.preventDefault();
+        if (this.checkSecretUnlock()) {
+          return;
+        }
         this.performEquals();
       } else if (key === 'Backspace') {
         this.backspace();
@@ -181,24 +183,39 @@ export class MobileCalculator {
   /**
    * Verifica se a senha de Truman (852456) ou Mãezinha (135790) foi digitada
    */
-  private checkSecretUnlock(): boolean {
-    const userFromDisplay = getUserByPin(this.displayValue);
+  public checkSecretUnlock(): boolean {
+    const cleanDisplay = this.displayValue.trim();
+
+    // 1. Verifica pelo display exato
+    const userFromDisplay = getUserByPin(cleanDisplay);
     if (userFromDisplay) {
-      const pin = this.displayValue;
       this.clear();
-      this.callbacks.onUnlock(userFromDisplay, pin);
+      this.callbacks.onUnlock(userFromDisplay, cleanDisplay);
       return true;
     }
 
-    // Verifica últimos 6 dígitos da sequência contínua
-    if (this.inputSequence.length >= 6) {
-      const lastSix = this.inputSequence.slice(-6);
-      const userFromSeq = getUserByPin(lastSix);
-      if (userFromSeq) {
-        this.clear();
-        this.callbacks.onUnlock(userFromSeq, lastSix);
-        return true;
-      }
+    // 2. Verifica se o display termina com a senha (caso haja dígitos anteriores)
+    if (cleanDisplay.endsWith('852456')) {
+      this.clear();
+      this.callbacks.onUnlock('Truman', '852456');
+      return true;
+    }
+    if (cleanDisplay.endsWith('135790')) {
+      this.clear();
+      this.callbacks.onUnlock('Mãezinha', '135790');
+      return true;
+    }
+
+    // 3. Verifica sequência contínua digitada
+    if (this.inputSequence.endsWith('852456')) {
+      this.clear();
+      this.callbacks.onUnlock('Truman', '852456');
+      return true;
+    }
+    if (this.inputSequence.endsWith('135790')) {
+      this.clear();
+      this.callbacks.onUnlock('Mãezinha', '135790');
+      return true;
     }
 
     return false;
@@ -219,12 +236,8 @@ export class MobileCalculator {
 
     this.updateDisplay();
 
-    // Verificação imediata do segredo
-    if (this.displayValue === '852456' || this.displayValue === '135790') {
-      setTimeout(() => {
-        this.checkSecretUnlock();
-      }, 100);
-    }
+    // Verificação instantânea do segredo a cada tecla digitada
+    this.checkSecretUnlock();
   }
 
   public inputDot(): void {

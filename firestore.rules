@@ -23,12 +23,11 @@ service cloud.firestore {
     // Validation for Room
     function isValidRoom(data) {
       return data.keys().hasAll(['roomId', 'participantA', 'participantAName', 'createdAt', 'lastActivity'])
-        && (data.keys().size() == 5 || (data.keys().size() == 7 && data.keys().hasAll(['participantB', 'participantBName'])))
         && data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 32 && data.roomId.matches('^[a-zA-Z0-9_-]+$')
         && data.participantA is string && data.participantA.size() >= 1 && data.participantA.size() <= 64
         && data.participantAName is string && data.participantAName.size() >= 1 && data.participantAName.size() <= 30
-        && (!('participantB' in data) || (data.participantB is string && data.participantB.size() <= 64))
-        && (!('participantBName' in data) || (data.participantBName is string && data.participantBName.size() <= 30));
+        && (!('participantB' in data) || data.participantB == null || (data.participantB is string && data.participantB.size() <= 64))
+        && (!('participantBName' in data) || data.participantBName == null || (data.participantBName is string && data.participantBName.size() <= 30));
     }
 
     // Validation for Message

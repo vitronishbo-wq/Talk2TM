@@ -636,6 +636,7 @@ export class ChatUI {
 
   public showPassError(msg: string): void {
     this.passErrorEl.textContent = msg;
+    this.showTemporaryNotice(msg);
   }
 
   public showTemporaryNotice(text: string): void {
