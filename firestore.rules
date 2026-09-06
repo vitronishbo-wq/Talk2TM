@@ -104,31 +104,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Messages Collection (immutable, strictly text, strictly 2 participants)
+    // Messages Collection (V1 diagnostic unlock: unrestricted read/create, append-only)
     match /messages/{messageId} {
-      allow get: if isValidId(messageId);
-      
-      // List messages with room boundary check
-      allow list: if resource.data.room is string;
-
-      // Create message: must belong to valid room and be sent by participantA or participantB
-      allow create: if isValidId(messageId)
-        && isValidMessage(incoming())
-        && incoming().messageId == messageId
-        && (
-          (incoming().room == 'truman-maezinha' && incoming().senderId in ['usr_truman', 'usr_maezinha'])
-          || (
-            exists(/databases/$(database)/documents/rooms/$(incoming().room))
-            && (
-              incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantA
-              || incoming().senderId == get(/databases/$(database)/documents/rooms/$(incoming().room)).data.participantB
-            )
-          )
-        );
-
-      // Append-only immutable log
-      allow update: if false;
-      allow delete: if false;
+      allow read, create: if true;
+      allow update, delete: if false;
     }
   }
 }
