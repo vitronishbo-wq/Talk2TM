@@ -81,20 +81,27 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
   let config: Record<string, string | undefined> | null = null;
 
   // 1. Prioridade: Variáveis de ambiente VITE_FIREBASE_* (Render, GitHub Actions, Vercel, .env)
-  if (import.meta.env.VITE_FIREBASE_PROJECT_ID && import.meta.env.VITE_FIREBASE_API_KEY) {
-    const rawAuthDomain = import.meta.env.VITE_FIREBASE_AUTH_DOMAIN?.trim();
+  const metaEnv: Record<string, string | undefined> =
+    typeof import.meta !== 'undefined' && import.meta?.env ? (import.meta.env as unknown as Record<string, string | undefined>) : {};
+  const procEnv: Record<string, string | undefined> =
+    typeof process !== 'undefined' && process?.env ? (process.env as unknown as Record<string, string | undefined>) : {};
+  const envProjectId = metaEnv.VITE_FIREBASE_PROJECT_ID || procEnv.VITE_FIREBASE_PROJECT_ID;
+  const envApiKey = metaEnv.VITE_FIREBASE_API_KEY || procEnv.VITE_FIREBASE_API_KEY;
+
+  if (envProjectId && envApiKey) {
+    const rawAuthDomain = (metaEnv.VITE_FIREBASE_AUTH_DOMAIN || procEnv.VITE_FIREBASE_AUTH_DOMAIN)?.trim();
     const cleanAuthDomain =
       rawAuthDomain && !rawAuthDomain.startsWith('://') && rawAuthDomain !== '://firebaseapp.com' && rawAuthDomain.includes('.')
         ? rawAuthDomain.replace(/^https?:\/\//, '')
-        : `${import.meta.env.VITE_FIREBASE_PROJECT_ID}.firebaseapp.com`;
+        : `${envProjectId}.firebaseapp.com`;
 
     config = {
-      apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+      apiKey: envApiKey,
       authDomain: cleanAuthDomain,
-      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || `${import.meta.env.VITE_FIREBASE_PROJECT_ID}.firebasestorage.app`,
-      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-      appId: import.meta.env.VITE_FIREBASE_APP_ID,
+      projectId: envProjectId,
+      storageBucket: metaEnv.VITE_FIREBASE_STORAGE_BUCKET || procEnv.VITE_FIREBASE_STORAGE_BUCKET || `${envProjectId}.firebasestorage.app`,
+      messagingSenderId: metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID || procEnv.VITE_FIREBASE_MESSAGING_SENDER_ID,
+      appId: metaEnv.VITE_FIREBASE_APP_ID || procEnv.VITE_FIREBASE_APP_ID,
     };
   } else {
     // 2. Fallback: carregar firebase-applet-config.json se existir no bundle/servidor

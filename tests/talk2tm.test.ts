@@ -6,6 +6,7 @@ import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS } from '../src/co
 import { sanitizeMessageText, sanitizeName, sanitizeRoom, generateId } from '../src/utils/sanitize';
 import { verifyPassword, PASSWORDS } from '../src/app';
 import { Room } from '../src/types';
+import { testRealtimeSyncAtoB } from '../src/firebase/diagnostic';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -132,6 +133,11 @@ export function runTalk2TMTests(): { passed: number; total: number } {
 
     const emptyAuth = verifyPassword('   ');
     assert(emptyAuth.valid === false, 'Senha em branco deve ser rejeitada');
+  });
+
+  // 9. Diagnóstico de Sincronização A <-> B
+  check('Módulo de Diagnóstico: assinatura e contrato de teste A <-> B', () => {
+    assert(typeof testRealtimeSyncAtoB === 'function', 'testRealtimeSyncAtoB deve ser uma função exportada');
   });
 
   return { passed, total };

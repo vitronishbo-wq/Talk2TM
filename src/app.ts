@@ -37,6 +37,7 @@ import {
 } from './firebase/firestore';
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
+import { testRealtimeSyncAtoB } from './firebase/diagnostic';
 
 /**
  * Mapeamento estrito de senhas únicas por usuário
@@ -455,5 +456,10 @@ export async function startApp(container?: HTMLElement): Promise<Talk2TMApp> {
 
   const app = new Talk2TMApp(root);
   await app.init();
+
+  if (typeof window !== 'undefined') {
+    (window as unknown as { testRealtimeSyncAtoB: typeof testRealtimeSyncAtoB }).testRealtimeSyncAtoB = testRealtimeSyncAtoB;
+  }
+
   return app;
 }
