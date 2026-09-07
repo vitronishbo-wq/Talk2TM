@@ -1,4 +1,5 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
+import { getAuth, signInAnonymously, Auth, User } from 'firebase/auth';
 import {
   initializeFirestore,
   persistentLocalCache,
@@ -45,16 +46,24 @@ export interface FirestoreErrorInfo {
   };
 }
 
+let firebaseApp: FirebaseApp | null = null;
+let firestoreDb: Firestore | null = null;
+let firebaseAuth: Auth | null = null;
+let isConfigured = false;
+
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const currentUser = firebaseAuth?.currentUser;
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: null,
-      email: null,
-      emailVerified: null,
-      isAnonymous: true,
-      tenantId: null,
-      providerInfo: [],
+      userId: currentUser?.uid || null,
+      email: currentUser?.email || null,
+      emailVerified: currentUser?.emailVerified || null,
+      isAnonymous: currentUser?.isAnonymous ?? null,
+      tenantId: currentUser?.tenantId || null,
+      providerInfo: currentUser?.providerData
+        ? currentUser.providerData.map((p) => ({ providerId: p.providerId, email: p.email }))
+        : [],
     },
     operationType,
     path,
@@ -62,10 +71,6 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
-
-let firebaseApp: FirebaseApp | null = null;
-let firestoreDb: Firestore | null = null;
-let isConfigured = false;
 
 /**
  * Tenta inicializar o Firebase com persistência local avançada (Camadas 06 e 07)
@@ -153,6 +158,27 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
       firestoreDb = initializeFirestore(firebaseApp, {});
     }
 
+    try {
+      firebaseAuth = getAuth(firebaseApp);
+      // Garante autenticação anônima antes de concluir a inicialização
+      if (!firebaseAuth.currentUser) {
+        await Promise.race([
+          signInAnonymously(firebaseAuth)
+            .then((cred) => {
+              console.info(`Talk2TM: Autenticação anônima inicial estabelecida (UID: ${cred.user.uid}).`);
+              return cred.user;
+            })
+            .catch((authErr) => {
+              console.debug('Talk2TM: Autenticação anônima não pôde ser ativada:', authErr?.code || authErr?.message);
+              return null;
+            }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+        ]);
+      }
+    } catch (authInitErr) {
+      console.debug('Talk2TM: Inicialização do Firebase Auth ignorada:', authInitErr);
+    }
+
     isConfigured = true;
     console.info('Talk2TM: Firestore inicializado com persistência local.');
     return { db: firestoreDb, configured: true };
@@ -160,6 +186,42 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
     console.warn('Talk2TM: Inicialização remota falhou. Modo offline local ativo.', err);
     return { db: null, configured: false };
   }
+}
+
+/**
+ * Garante que o usuário esteja autenticado via Firebase Auth (anônimo ou existente)
+ * antes de qualquer sincronização inicial ou operação de escrita/leitura no Firestore.
+ */
+export async function ensureFirebaseAuth(): Promise<User | null> {
+  const { configured } = await initFirebase();
+  if (!configured || !firebaseAuth) {
+    return null;
+  }
+
+  if (firebaseAuth.currentUser) {
+    return firebaseAuth.currentUser;
+  }
+
+  try {
+    const authPromise = signInAnonymously(firebaseAuth).then((cred) => {
+      console.info(`Talk2TM: Autenticação anônima garantida com sucesso (UID: ${cred.user.uid}).`);
+      return cred.user;
+    });
+
+    // Timeout de resiliência de 2.5s para manter o princípio de zero-latência
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500));
+    return await Promise.race([authPromise, timeoutPromise]);
+  } catch (error: any) {
+    console.debug('Talk2TM: Falha ao garantir autenticação anônima:', error?.code || error?.message);
+    return null;
+  }
+}
+
+/**
+ * Retorna a instância atual de Firebase Auth
+ */
+export function getFirebaseAuth(): Auth | null {
+  return firebaseAuth;
 }
 
 /**
@@ -191,6 +253,9 @@ export async function joinFirestoreRoom(
       // Modo local / offline imediato
       return { success: true, room: fallbackRoom };
     }
+
+    // Garante que o usuário está autenticado antes da sincronização inicial com a sala
+    await ensureFirebaseAuth();
 
     const db = initRes.db;
     const roomDocRef = doc(db, 'rooms', roomId);
@@ -274,14 +339,23 @@ export async function sendFirestoreMessage(msg: Message): Promise<void> {
   const { db } = await initFirebase();
   if (!db) return;
 
+  // Garante autenticação anônima antes do envio para o Firestore
+  await ensureFirebaseAuth();
+
   const docRef = doc(db, 'messages', msg.messageId);
+  const payload: Message = {
+    messageId: msg.messageId,
+    room: msg.room,
+    sender: msg.sender,
+    senderId: msg.senderId,
+    text: msg.text,
+    clientId: msg.clientId,
+    createdAt: msg.createdAt || new Date().toISOString(),
+    status: 'synced',
+  };
 
   try {
-    await setDoc(docRef, {
-      ...msg,
-      status: 'synced',
-      createdAtServer: serverTimestamp(),
-    });
+    await setDoc(docRef, payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `messages/${msg.messageId}`);
   }

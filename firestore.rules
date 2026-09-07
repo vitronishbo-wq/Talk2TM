@@ -1,9 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Coleção de Salas (Rooms) - Máximo 2 participantes
+    match /rooms/{roomId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if false;
+    }
+
+    // Coleção de Mensagens (Messages)
+    // Permite leitura e escrita (create/update para transforms de timestamp e status de sincronização)
     match /messages/{messageId} {
-      allow read, create: if true;
-      allow update, delete: if false;
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if false;
     }
   }
 }

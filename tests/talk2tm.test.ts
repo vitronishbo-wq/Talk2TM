@@ -7,6 +7,7 @@ import { sanitizeMessageText, sanitizeName, sanitizeRoom, generateId } from '../
 import { verifyPassword, PASSWORDS } from '../src/app';
 import { Room } from '../src/types';
 import { testRealtimeSyncAtoB } from '../src/firebase/diagnostic';
+import { ensureFirebaseAuth, getFirebaseAuth } from '../src/firebase/firestore';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -138,6 +139,12 @@ export function runTalk2TMTests(): { passed: number; total: number } {
   // 9. Diagnóstico de Sincronização A <-> B
   check('Módulo de Diagnóstico: assinatura e contrato de teste A <-> B', () => {
     assert(typeof testRealtimeSyncAtoB === 'function', 'testRealtimeSyncAtoB deve ser uma função exportada');
+  });
+
+  // 10. Autenticação Anônima do Firebase
+  check('Firebase Auth: assinatura e contrato de ensureFirebaseAuth e getFirebaseAuth', () => {
+    assert(typeof ensureFirebaseAuth === 'function', 'ensureFirebaseAuth deve ser uma função exportada');
+    assert(typeof getFirebaseAuth === 'function', 'getFirebaseAuth deve ser uma função exportada');
   });
 
   return { passed, total };
