@@ -26,7 +26,10 @@ import {
   removeFromOutbox,
   saveLocalMessage,
   saveLocalRoom,
+  getLocalRoom,
+  updateLocalLastRead,
   saveSession,
+  getSession,
 } from './storage/indexeddb';
 import {
   initFirebase,
@@ -34,6 +37,11 @@ import {
   sendFirestoreMessage,
   subscribeToMessages,
   subscribeToRoom,
+  restoreAuthSession,
+  silentAuthenticateWithEmail,
+  isAuthValidAndNonAnonymous,
+  getCurrentAuthUser,
+  updateFirestoreLastRead,
 } from './firebase/firestore';
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
@@ -145,7 +153,8 @@ export class Talk2TMApp {
     };
 
     const nowIso = new Date().toISOString();
-    const immediateRoom: Room = {
+    const existingRoom = await getLocalRoom(roomId).catch(() => null);
+    const roomToUse: Room = existingRoom || {
       roomId,
       participantA: userId,
       participantAName: user,
@@ -156,12 +165,12 @@ export class Talk2TMApp {
     };
 
     this.currentSession = session;
-    this.currentRoom = immediateRoom;
+    this.currentRoom = roomToUse;
     saveSession(session);
-    saveLocalRoom(immediateRoom).catch(console.warn);
+    saveLocalRoom(roomToUse).catch(console.warn);
 
     // 1. DESBLOQUEIO IMEDIATO DA INTERFACE DO CHAT (Zero latência)
-    this.ui.showChatView(session, immediateRoom);
+    this.ui.showChatView(session, roomToUse);
     this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
 
     // 2. Inicia temporizadores de sessão e inatividade (5 segundos sem teclar)
@@ -181,8 +190,25 @@ export class Talk2TMApp {
       console.warn('Erro ao ler mensagens locais:', dbErr);
     }
 
-    // 4. Conecta assincronamente ao Firestore em segundo plano
-    this.connectFirestoreBackground(roomId, userId, user);
+    // Registra leitura imediata do chat pelo participante
+    this.markChatAsRead();
+
+    // Layer 4 — 2. Complete Silent Auth (if new session)
+    // Autenticação transparente sem prompt visual na calculadora
+    const authUser = await silentAuthenticateWithEmail(user);
+    const effectiveUid = authUser?.uid || userId;
+    if (effectiveUid !== session.userId) {
+      session.userId = effectiveUid;
+      roomToUse.participantA = effectiveUid;
+      this.currentSession = session;
+      saveSession(session);
+    }
+
+    // Layer 4 — 3. Initialize Firestore Listeners
+    await this.connectFirestoreBackground(roomId, effectiveUid, user);
+
+    // Layer 4 — 4. Flush Offline Outbox
+    await this.syncPendingOutbox();
 
     return true;
   }
@@ -199,10 +225,14 @@ export class Talk2TMApp {
         await saveLocalRoom(this.currentRoom);
         if (this.currentSession) {
           this.ui.updateRoomInfo(this.currentRoom, this.currentSession);
+          this.ui.updateReadReceipts(this.currentRoom, this.currentSession);
         }
 
         // Escuta novas mensagens em tempo real
         this.setupRealtimeListeners(roomId);
+
+        // Marca como lido com a sala conectada
+        this.markChatAsRead();
 
         // Sincroniza mensagens que estavam pendentes no outbox
         await this.syncPendingOutbox();
@@ -281,6 +311,61 @@ export class Talk2TMApp {
     clearSession();
   }
 
+  private lastMarkedReadTime: number = 0;
+
+  /**
+   * Salva e sincroniza a leitura do chat pelo participante atual
+   */
+  public async markChatAsRead(): Promise<void> {
+    if (!this.currentSession) return;
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    try {
+      // 1. Salva localmente no IndexedDB imediatamente
+      const updatedLocal = await updateLocalLastRead(
+        this.currentSession.roomId,
+        this.currentSession.displayName,
+        nowIso
+      );
+
+      if (this.currentRoom) {
+        if (!this.currentRoom.lastRead) {
+          this.currentRoom.lastRead = {};
+        }
+        this.currentRoom.lastRead[this.currentSession.displayName] = nowIso;
+        this.currentRoom.lastRead[this.currentSession.userId] = nowIso;
+        if (this.currentRoom.participantAName === this.currentSession.displayName) {
+          this.currentRoom.lastReadA = nowIso;
+        } else {
+          this.currentRoom.lastReadB = nowIso;
+        }
+        this.ui.updateReadReceipts(this.currentRoom, this.currentSession);
+      } else if (updatedLocal) {
+        this.currentRoom = updatedLocal;
+        this.ui.updateReadReceipts(updatedLocal, this.currentSession);
+      }
+    } catch (e) {
+      console.debug('Talk2TM: Erro ao persistir leitura localmente:', e);
+    }
+
+    // 2. Throttle para chamadas de rede no Firestore (1.5s)
+    if (now - this.lastMarkedReadTime < 1500) {
+      return;
+    }
+    this.lastMarkedReadTime = now;
+
+    // 3. Atualiza no Firestore se online e autenticado
+    if (navigator.onLine && isAuthValidAndNonAnonymous()) {
+      await updateFirestoreLastRead(
+        this.currentSession.roomId,
+        this.currentSession.userId,
+        this.currentSession.displayName,
+        nowIso
+      );
+    }
+  }
+
   public async sendMessage(rawText: string): Promise<void> {
     if (!this.currentSession) return;
     this.resetInactivityTimer();
@@ -309,8 +394,11 @@ export class Talk2TMApp {
     await saveLocalMessage(msg);
     await addToOutbox(msg);
     this.ui.appendOrUpdateMessage(msg, true);
+    this.markChatAsRead();
 
-    if (navigator.onLine) {
+    // Explicit guard check: procede APENAS se auth.currentUser != null e auth.currentUser.isAnonymous === false.
+    // Evita envios remotos prematuros ou bloqueados pelas regras do Firestore
+    if (navigator.onLine && isAuthValidAndNonAnonymous()) {
       try {
         await sendFirestoreMessage(msg);
         await removeFromOutbox(msg.messageId);
@@ -318,7 +406,7 @@ export class Talk2TMApp {
         await saveLocalMessage(syncedMsg);
         this.ui.appendOrUpdateMessage(syncedMsg, true);
       } catch (error) {
-        console.warn('Mensagem salva localmente:', error);
+        console.warn('Mensagem mantida no outbox local:', error);
       }
     }
   }
@@ -361,6 +449,14 @@ export class Talk2TMApp {
 
   private async syncPendingOutbox(): Promise<void> {
     if (!navigator.onLine) return;
+
+    // Explicit guard check: proceed ONLY if auth.currentUser != null and auth.currentUser.isAnonymous === false.
+    // Prevent outbox queues from attempting writes while unauthenticated or anonymous.
+    if (!isAuthValidAndNonAnonymous()) {
+      console.debug('Talk2TM [Guard]: syncPendingOutbox retido — aguardando autenticação não-anônima.');
+      return;
+    }
+
     const pending = await getOutboxMessages();
     if (pending.length === 0) return;
 
@@ -390,6 +486,7 @@ export class Talk2TMApp {
       saveLocalRoom(updatedRoom);
       if (this.currentSession) {
         this.ui.updateRoomInfo(updatedRoom, this.currentSession);
+        this.ui.updateReadReceipts(updatedRoom, this.currentSession);
       }
     });
 
@@ -400,6 +497,9 @@ export class Talk2TMApp {
         for (const msg of incomingMessages) {
           await saveLocalMessage(msg);
           this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+        }
+        if (this.ui.isChatActive()) {
+          this.markChatAsRead();
         }
       },
       (err) => {
@@ -419,6 +519,17 @@ export class Talk2TMApp {
     window.addEventListener('input', renewActivity, { passive: true });
     window.addEventListener('touchstart', renewActivity, { passive: true });
     window.addEventListener('pointerdown', renewActivity, { passive: true });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && this.currentSession && this.ui.isChatActive()) {
+        this.markChatAsRead();
+      }
+    });
+    window.addEventListener('focus', () => {
+      if (this.currentSession && this.ui.isChatActive()) {
+        this.markChatAsRead();
+      }
+    });
   }
 
   private setupNetworkMonitoring(): void {
@@ -442,6 +553,39 @@ export class Talk2TMApp {
 
   public async init(): Promise<void> {
     await initFirebase();
+
+    // Layer 4 — 1. Restore Firebase Auth Session (onAuthStateChanged)
+    await restoreAuthSession();
+
+    // Restaura sessão se houver dados salvos e autenticação válida ativa
+    const savedSession = getSession();
+    if (savedSession && isAuthValidAndNonAnonymous()) {
+      this.currentSession = savedSession;
+      const savedRoom = await getLocalRoom(savedSession.roomId).catch(() => null);
+      if (savedRoom) this.currentRoom = savedRoom;
+      this.ui.showChatView(savedSession, savedRoom || undefined);
+      this.startSessionTimeout();
+      this.resetInactivityTimer();
+
+      try {
+        const localHistory = await getLocalMessages(savedSession.roomId, CONFIG.HISTORY_LIMIT);
+        for (const msg of localHistory) {
+          this.ui.appendOrUpdateMessage(msg, msg.senderId === savedSession.userId);
+        }
+      } catch (e) {
+        console.warn('Erro ao restaurar histórico de mensagens:', e);
+      }
+
+      this.markChatAsRead();
+
+      // Layer 4 — 3. Initialize Firestore Listeners
+      await this.connectFirestoreBackground(savedSession.roomId, savedSession.userId, savedSession.displayName);
+
+      // Layer 4 — 4. Flush Offline Outbox
+      await this.syncPendingOutbox();
+      return;
+    }
+
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
     this.ui.showCalculatorView();
   }

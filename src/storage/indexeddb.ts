@@ -145,6 +145,34 @@ export async function getLocalRoom(roomId: string): Promise<Room | null> {
 }
 
 /**
+ * Atualiza localmente a data da última leitura de um participante na sala
+ */
+export async function updateLocalLastRead(
+  roomId: string,
+  userKey: string,
+  readAtIso: string
+): Promise<Room | null> {
+  const room = await getLocalRoom(roomId);
+  if (!room) return null;
+
+  if (!room.lastRead) {
+    room.lastRead = {};
+  }
+  room.lastRead[userKey] = readAtIso;
+
+  if (room.participantAName === userKey || room.participantA === userKey) {
+    room.lastReadA = readAtIso;
+  }
+  if (room.participantBName === userKey || room.participantB === userKey) {
+    room.lastReadB = readAtIso;
+  }
+  room.lastActivity = readAtIso;
+
+  await saveLocalRoom(room);
+  return room;
+}
+
+/**
  * Fila offline (outbox) para mensagens pendentes de sincronização
  */
 export async function addToOutbox(msg: Message): Promise<void> {

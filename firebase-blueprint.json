@@ -43,6 +43,20 @@
           "type": "string",
           "format": "date-time",
           "description": "Data/hora ISO da última atividade da sala."
+        },
+        "lastRead": {
+          "type": "object",
+          "description": "Mapeamento dos timestamps ISO da última leitura por participante."
+        },
+        "lastReadA": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp ISO da última leitura do participante A."
+        },
+        "lastReadB": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp ISO da última leitura do participante B."
         }
       },
       "required": ["roomId", "participantA", "participantAName", "createdAt", "lastActivity"]
@@ -96,7 +110,7 @@
         "status": {
           "type": "string",
           "description": "Estado de entrega textual da mensagem.",
-          "enum": ["pending", "synced", "failed"]
+          "enum": ["pending", "synced", "failed", "read"]
         }
       },
       "required": ["messageId", "room", "sender", "senderId", "text", "clientId", "createdAt"]

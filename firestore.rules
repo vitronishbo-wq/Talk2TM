@@ -1,19 +1,22 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Coleção de Salas (Rooms) - Máximo 2 participantes
+    
+    function isParticipant(roomId) {
+      let room = get(/databases/$(database)/documents/rooms/$(roomId)).data;
+      return request.auth != null && 
+            (request.auth.uid == room.participantA || request.auth.uid == room.participantB);
+    }
+
     match /rooms/{roomId} {
-      allow read: if true;
-      allow create, update: if true;
+      allow read, create, update: if request.auth != null;
       allow delete: if false;
     }
 
-    // Coleção de Mensagens (Messages)
-    // Permite leitura e escrita (create/update para transforms de timestamp e status de sincronização)
     match /messages/{messageId} {
-      allow read: if true;
-      allow create, update: if true;
-      allow delete: if false;
+      allow create: if isParticipant(request.resource.data.room);
+      allow read: if isParticipant(resource.data.room);
+      allow update, delete: if false;
     }
   }
 }

@@ -441,10 +441,20 @@ html, body {
   font-size: 11px;
   color: var(--text-muted);
   margin-left: 6px;
+  user-select: none;
 }
 
 .ttm-msg-row .msg-status[data-status="pending"] {
   color: #d29922;
+}
+
+.ttm-msg-row .msg-status[data-status="synced"] {
+  color: var(--text-muted);
+}
+
+.ttm-msg-row .msg-status[data-status="read"] {
+  color: #38bdf8;
+  font-weight: 500;
 }
 
 /* Formulário de Envio */

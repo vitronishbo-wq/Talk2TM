@@ -5,7 +5,7 @@
 
 export type ConnectionState = 'conectando' | 'online' | 'offline' | 'sincronizando';
 
-export type MessageStatus = 'pending' | 'synced' | 'failed';
+export type MessageStatus = 'pending' | 'synced' | 'failed' | 'read';
 
 export interface Room {
   roomId: string;
@@ -13,6 +13,9 @@ export interface Room {
   participantAName: string;
   participantB?: string | null;
   participantBName?: string | null;
+  lastReadA?: string | null;
+  lastReadB?: string | null;
+  lastRead?: Record<string, string>;
   createdAt: string;
   lastActivity: string;
 }

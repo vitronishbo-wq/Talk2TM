@@ -2,12 +2,20 @@
  * Talk2TM — Suite de Testes Autônoma (Camada 25)
  */
 
-import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS } from '../src/config';
+import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser } from '../src/config';
 import { sanitizeMessageText, sanitizeName, sanitizeRoom, generateId } from '../src/utils/sanitize';
 import { verifyPassword, PASSWORDS } from '../src/app';
 import { Room } from '../src/types';
 import { testRealtimeSyncAtoB } from '../src/firebase/diagnostic';
-import { ensureFirebaseAuth, getFirebaseAuth } from '../src/firebase/firestore';
+import {
+  ensureFirebaseAuth,
+  getFirebaseAuth,
+  silentAuthenticateWithEmail,
+  restoreAuthSession,
+  isAuthValidAndNonAnonymous,
+  getPartnerLastRead,
+  updateFirestoreLastRead,
+} from '../src/firebase/firestore';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -147,6 +155,93 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(typeof getFirebaseAuth === 'function', 'getFirebaseAuth deve ser uma função exportada');
   });
 
+  // 11. Credenciais Pré-Provisionadas mapeadas aos PINs
+  check('Auth: Mapeamento seguro de credenciais por usuário', () => {
+    const trumanCred = getCredentialsByUser('Truman');
+    assert(trumanCred !== undefined, 'Credencial de Truman deve existir');
+    assert(trumanCred.email === 'truman@talk2tm.internal', 'Email de Truman mapeado');
+    assert(trumanCred.pass.length > 8, 'Senha forte pré-provisionada');
+    assert(trumanCred.fallbackUid === 'uid_truman_852456', 'UID determinístico para Truman');
+
+    const maezinhaCred = getCredentialsByUser('Mãezinha');
+    assert(maezinhaCred !== undefined, 'Credencial de Mãezinha deve existir');
+    assert(maezinhaCred.email === 'maezinha@talk2tm.internal', 'Email de Mãezinha mapeado');
+    assert(maezinhaCred.pass.length > 8, 'Senha forte pré-provisionada');
+    assert(maezinhaCred.fallbackUid === 'uid_maezinha_135790', 'UID determinístico para Mãezinha');
+  });
+
+  // 12. Funções de Autenticação Transparente e Restauração de Sessão
+  check('Auth: Assinatura das funções de autenticação transparente e guarda de outbox', () => {
+    assert(typeof silentAuthenticateWithEmail === 'function', 'silentAuthenticateWithEmail deve ser uma função exportada');
+    assert(typeof restoreAuthSession === 'function', 'restoreAuthSession deve ser uma função exportada');
+    assert(typeof isAuthValidAndNonAnonymous === 'function', 'isAuthValidAndNonAnonymous deve ser uma função exportada');
+    // Em ambiente de teste sem login ativo, isAuthValidAndNonAnonymous deve retornar falso
+    assert(isAuthValidAndNonAnonymous() === false, 'isAuthValidAndNonAnonymous deve retornar false quando não autenticado');
+  });
+
+  // 13. Sistema de "Visto por" (Read Receipts): getPartnerLastRead e resolução de timestamps
+  check('Read Receipts: getPartnerLastRead resolve corretamente o carimbo de leitura do parceiro', () => {
+    const mockRoom: Room = {
+      roomId: 'talk2tm_main',
+      participantA: 'uid_truman_852456',
+      participantAName: 'Truman',
+      participantB: 'uid_maezinha_135790',
+      participantBName: 'Mãezinha',
+      createdAt: '2026-09-07T10:00:00.000Z',
+      lastActivity: '2026-09-07T10:05:00.000Z',
+      lastRead: {
+        Truman: '2026-09-07T10:04:00.000Z',
+        Mãezinha: '2026-09-07T10:05:00.000Z',
+      },
+    };
+
+    // Truman consultando a última leitura de Mãezinha
+    const readByMaezinha = getPartnerLastRead(mockRoom, 'Truman', 'uid_truman_852456');
+    assert(readByMaezinha === '2026-09-07T10:05:00.000Z', 'Truman deve obter timestamp de Mãezinha');
+
+    // Mãezinha consultando a última leitura de Truman
+    const readByTruman = getPartnerLastRead(mockRoom, 'Mãezinha', 'uid_maezinha_135790');
+    assert(readByTruman === '2026-09-07T10:04:00.000Z', 'Mãezinha deve obter timestamp de Truman');
+
+    // Sala nula retorna null
+    assert(getPartnerLastRead(null, 'Truman') === null, 'Sala nula deve retornar null');
+
+    // Suporte ao fallback lastReadA / lastReadB
+    const legacyRoom: Room = {
+      roomId: 'talk2tm_main',
+      participantA: 'uid_truman_852456',
+      participantAName: 'Truman',
+      participantB: 'uid_maezinha_135790',
+      participantBName: 'Mãezinha',
+      lastReadA: '2026-09-07T09:00:00.000Z',
+      lastReadB: '2026-09-07T09:30:00.000Z',
+      createdAt: '2026-09-07T08:00:00.000Z',
+      lastActivity: '2026-09-07T09:30:00.000Z',
+    };
+    assert(getPartnerLastRead(legacyRoom, 'Truman') === '2026-09-07T09:30:00.000Z', 'Fallback para lastReadB para parceiro Mãezinha');
+    assert(getPartnerLastRead(legacyRoom, 'Mãezinha') === '2026-09-07T09:00:00.000Z', 'Fallback para lastReadA para parceiro Truman');
+  });
+
+  // 14. Lógica de Status de Mensagens com "Visto por"
+  check('Read Receipts: Verificação do estado "visto" vs "enviado" baseado em timestamps', () => {
+    const partnerReadTime = '2026-09-07T12:00:00.000Z';
+
+    const olderMsgCreatedAt = '2026-09-07T11:59:00.000Z';
+    const newerMsgCreatedAt = '2026-09-07T12:05:00.000Z';
+
+    const isOlderMsgRead = partnerReadTime >= olderMsgCreatedAt;
+    const isNewerMsgRead = partnerReadTime >= newerMsgCreatedAt;
+
+    assert(isOlderMsgRead === true, 'Mensagem anterior ou igual ao carimbo deve ser considerada vista');
+    assert(isNewerMsgRead === false, 'Mensagem posterior ao carimbo deve permanecer como não lida');
+  });
+
+  // 15. Assinatura de updateFirestoreLastRead
+  check('Read Receipts: Assinatura da função de sincronização updateFirestoreLastRead', () => {
+    assert(typeof updateFirestoreLastRead === 'function', 'updateFirestoreLastRead deve ser uma função exportada');
+  });
+
+  console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
 

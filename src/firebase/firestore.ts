@@ -1,5 +1,13 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import { getAuth, signInAnonymously, Auth, User } from 'firebase/auth';
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInAnonymously,
+  onAuthStateChanged,
+  Auth,
+  User,
+} from 'firebase/auth';
 import {
   initializeFirestore,
   persistentLocalCache,
@@ -19,6 +27,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { Message, Room } from '../types';
+import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
 
 export enum OperationType {
   CREATE = 'create',
@@ -49,10 +58,11 @@ export interface FirestoreErrorInfo {
 let firebaseApp: FirebaseApp | null = null;
 let firestoreDb: Firestore | null = null;
 let firebaseAuth: Auth | null = null;
+let activeAuthUser: User | null = null;
 let isConfigured = false;
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
-  const currentUser = firebaseAuth?.currentUser;
+  const currentUser = getCurrentAuthUser();
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -70,6 +80,126 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
+}
+
+export function getCurrentAuthUser(): User | null {
+  return firebaseAuth?.currentUser || activeAuthUser || null;
+}
+
+/**
+ * Verifica com rigor se o usuário está autenticado no Firebase Auth e NÃO é anônimo.
+ * Utilizado pelos guard checks de envio e outbox.
+ */
+export function isAuthValidAndNonAnonymous(): boolean {
+  const user = getCurrentAuthUser();
+  return !!user && user.isAnonymous === false;
+}
+
+export function getFirebaseAuth(): Auth | null {
+  return firebaseAuth;
+}
+
+/**
+ * Restaura a sessão do Firebase Auth utilizando onAuthStateChanged (Layer 4)
+ */
+export async function restoreAuthSession(): Promise<User | null> {
+  const { configured } = await initFirebase();
+  if (!configured || !firebaseAuth) {
+    return null;
+  }
+
+  if (firebaseAuth.currentUser && !firebaseAuth.currentUser.isAnonymous) {
+    activeAuthUser = firebaseAuth.currentUser;
+    return activeAuthUser;
+  }
+
+  return new Promise<User | null>((resolve) => {
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        resolve(firebaseAuth?.currentUser || null);
+      }
+    }, 1500);
+
+    try {
+      const unsubscribe = onAuthStateChanged(
+        firebaseAuth!,
+        (user) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            activeAuthUser = user;
+            unsubscribe();
+            resolve(user);
+          }
+        },
+        () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            unsubscribe();
+            resolve(null);
+          }
+        }
+      );
+    } catch {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    }
+  });
+}
+
+/**
+ * Autenticação silenciosa e não-bloqueante no Firebase Auth mapeada aos PINs de entrada.
+ * Executa signInWithEmailAndPassword() utilizando as credenciais pré-provisionadas
+ * sem exibir NENHUM elemento de login visual na interface da calculadora (Layer 1 & 2).
+ */
+export async function silentAuthenticateWithEmail(userType: AllowedUser): Promise<User | null> {
+  const { configured } = await initFirebase();
+  if (!configured || !firebaseAuth) {
+    return null;
+  }
+
+  const creds = USER_AUTH_CREDENTIALS[userType];
+  const current = firebaseAuth.currentUser;
+  if (current && !current.isAnonymous && current.email === creds.email) {
+    activeAuthUser = current;
+    return current;
+  }
+
+  try {
+    const authPromise = (async () => {
+      try {
+        const result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
+        activeAuthUser = result.user;
+        console.info(`Talk2TM: Autenticação silenciosa ativa para ${userType} (UID: ${result.user.uid}).`);
+        return result.user;
+      } catch (err: any) {
+        if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+          try {
+            const newRes = await createUserWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
+            activeAuthUser = newRes.user;
+            console.info(`Talk2TM: Conta pré-provisionada criada para ${userType} (UID: ${newRes.user.uid}).`);
+            return newRes.user;
+          } catch (createErr: any) {
+            console.debug('Talk2TM: Criação de conta pré-provisionada falhou:', createErr?.code);
+          }
+        }
+        console.debug('Talk2TM: Autenticação remota email/senha retornou:', err?.code || err?.message);
+        return null;
+      }
+    })();
+
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000));
+    return await Promise.race([authPromise, timeoutPromise]);
+  } catch (error) {
+    console.debug('Talk2TM: Exceção no fluxo silentAuthenticateWithEmail:', error);
+    return null;
+  }
 }
 
 /**
@@ -218,13 +348,6 @@ export async function ensureFirebaseAuth(): Promise<User | null> {
 }
 
 /**
- * Retorna a instância atual de Firebase Auth
- */
-export function getFirebaseAuth(): Auth | null {
-  return firebaseAuth;
-}
-
-/**
  * Entra ou cria uma sala garantindo a regra de no máximo 2 participantes (Camadas 12 e 13)
  * Com timeout estrito de 2 segundos para nunca travar a interface do usuário em redes lentas ou offline.
  */
@@ -233,10 +356,14 @@ export async function joinFirestoreRoom(
   userId: string,
   userName: string
 ): Promise<{ success: boolean; room: Room; error?: string }> {
+  // Garante que o UID real do Firebase Auth seja vinculado sob participantA / participantB
+  const currentAuth = getCurrentAuthUser();
+  const effectiveUid = currentAuth?.uid || userId;
+
   const nowIso = new Date().toISOString();
   const fallbackRoom: Room = {
     roomId,
-    participantA: userId,
+    participantA: effectiveUid,
     participantAName: userName,
     participantB: null,
     participantBName: null,
@@ -254,9 +381,6 @@ export async function joinFirestoreRoom(
       return { success: true, room: fallbackRoom };
     }
 
-    // Garante que o usuário está autenticado antes da sincronização inicial com a sala
-    await ensureFirebaseAuth();
-
     const db = initRes.db;
     const roomDocRef = doc(db, 'rooms', roomId);
 
@@ -266,7 +390,7 @@ export async function joinFirestoreRoom(
       if (!snap.exists()) {
         const newRoom: Room = {
           roomId,
-          participantA: userId,
+          participantA: effectiveUid,
           participantAName: userName,
           participantB: null,
           participantBName: null,
@@ -280,8 +404,8 @@ export async function joinFirestoreRoom(
 
       const data = snap.data() as Room;
 
-      // Se já é um dos participantes (reconexão / reload)
-      if (data.participantA === userId || data.participantB === userId) {
+      // Se já é um dos participantes (reconexão / reload por UID)
+      if (data.participantA === effectiveUid || data.participantB === effectiveUid) {
         await updateDoc(roomDocRef, {
           lastActivity: nowIso,
         });
@@ -291,7 +415,7 @@ export async function joinFirestoreRoom(
       // Se a vaga B está disponível
       if (!data.participantB || data.participantB === '') {
         const updated = {
-          participantB: userId,
+          participantB: effectiveUid,
           participantBName: userName,
           lastActivity: nowIso,
         };
@@ -302,7 +426,7 @@ export async function joinFirestoreRoom(
           success: true,
           room: {
             ...data,
-            participantB: userId,
+            participantB: effectiveUid,
             participantBName: userName,
             lastActivity: nowIso,
           },
@@ -333,14 +457,19 @@ export async function joinFirestoreRoom(
 }
 
 /**
- * Envia mensagem para o Firestore com ID determinístico para idempotência (Camada 09)
+ * Envia mensagem para o Firestore com ID determinístico para idempotência (Camada 09).
+ * Inclui verificação explícita de guarda: procede APENAS com usuário autenticado e não-anônimo.
  */
 export async function sendFirestoreMessage(msg: Message): Promise<void> {
   const { db } = await initFirebase();
   if (!db) return;
 
-  // Garante autenticação anônima antes do envio para o Firestore
-  await ensureFirebaseAuth();
+  // Explicit guard check: proceed ONLY if auth.currentUser != null and auth.currentUser.isAnonymous === false.
+  // Prevent outbox queues from attempting writes while unauthenticated or anonymous.
+  if (!isAuthValidAndNonAnonymous()) {
+    console.warn('Talk2TM [Guard]: Escrita rejeitada em sendFirestoreMessage — usuário não autenticado ou anônimo.');
+    throw new Error('Operação cancelada: requer autenticação não-anônima ativa.');
+  }
 
   const docRef = doc(db, 'messages', msg.messageId);
   const payload: Message = {
@@ -452,4 +581,50 @@ export function subscribeToRoom(
       console.warn('Erro no listener da sala:', err);
     }
   );
+}
+
+/**
+ * Atualiza a data da última leitura de um participante no Firestore
+ */
+export async function updateFirestoreLastRead(
+  roomId: string,
+  userId: string,
+  userName: string,
+  readAtIso: string
+): Promise<void> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db) return;
+  if (!isAuthValidAndNonAnonymous()) return;
+
+  try {
+    const roomDocRef = doc(db, 'rooms', roomId);
+    await updateDoc(roomDocRef, {
+      [`lastRead.${userName}`]: readAtIso,
+      [`lastRead.${userId}`]: readAtIso,
+      lastActivity: readAtIso,
+    });
+  } catch (error) {
+    console.debug('Talk2TM: Falha silenciosa ao sincronizar lastRead no Firestore:', error);
+  }
+}
+
+/**
+ * Retorna a data ISO da última leitura do parceiro na sala
+ */
+export function getPartnerLastRead(
+  room: Room | null,
+  currentUserName: string,
+  currentUserId?: string
+): string | null {
+  if (!room) return null;
+  const partnerName = currentUserName === 'Truman' ? 'Mãezinha' : 'Truman';
+  const partnerId = room.participantAName === partnerName ? room.participantA : room.participantB;
+
+  if (room.lastRead) {
+    if (room.lastRead[partnerName]) return room.lastRead[partnerName];
+    if (partnerId && room.lastRead[partnerId]) return room.lastRead[partnerId];
+  }
+  if (room.participantAName === partnerName && room.lastReadA) return room.lastReadA;
+  if (room.participantBName === partnerName && room.lastReadB) return room.lastReadB;
+  return null;
 }

@@ -2,6 +2,7 @@ import { ConnectionState, Message, Room, UserSession } from '../types';
 import { AppSettings, getUserByPin, AllowedUser } from '../config';
 import { formatTime } from '../utils/sanitize';
 import { MobileCalculator } from './calculator';
+import { getPartnerLastRead } from '../firebase/firestore';
 
 export interface UIEvents {
   onUnlockByPin: (pin: string) => void;
@@ -45,6 +46,9 @@ export class ChatUI {
   private inactivityNoticeEl!: HTMLElement;
 
   private renderedMessageIds: Set<string> = new Set();
+  private renderedMessages: Map<string, { msg: Message; isSelf: boolean }> = new Map();
+  private currentRoom: Room | null = null;
+  private currentSession: UserSession | null = null;
 
   constructor(container: HTMLElement, settings: AppSettings, events: UIEvents) {
     this.container = container;
@@ -494,13 +498,22 @@ export class ChatUI {
     }, 100);
   }
 
-  public showChatView(session: UserSession, room: Room): void {
+  public isChatActive(): boolean {
+    return this.chatViewEl ? this.chatViewEl.style.display === 'flex' : false;
+  }
+
+  public showChatView(session: UserSession, room?: Room): void {
+    this.currentSession = session;
     this.closeSettingsModal();
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
     this.chatViewEl.style.display = 'flex';
-    this.updateRoomInfo(room, session);
+    if (room) {
+      this.currentRoom = room;
+      this.updateRoomInfo(room, session);
+      this.updateReadReceipts(room, session);
+    }
     setTimeout(() => {
       this.msgInputEl.focus();
     }, 100);
@@ -512,6 +525,8 @@ export class ChatUI {
   }
 
   public updateRoomInfo(room: Room, session: UserSession): void {
+    this.currentRoom = room;
+    this.currentSession = session;
     const isTruman = session.displayName === 'Truman';
     const partnerName = isTruman ? 'Mãezinha' : 'Truman';
 
@@ -527,14 +542,63 @@ export class ChatUI {
     this.loadOlderBtn.style.display = hasOlder ? 'inline-block' : 'none';
   }
 
-  public appendOrUpdateMessage(msg: Message, isSelf: boolean): void {
-    const existingRow = document.getElementById(`ttm-msg-${msg.messageId}`);
+  public getPartnerLastReadTime(): string | null {
+    if (!this.currentRoom || !this.currentSession) return null;
+    return getPartnerLastRead(this.currentRoom, this.currentSession.displayName, this.currentSession.userId);
+  }
 
+  public computeMessageStatus(msg: Message, isSelf: boolean): { text: string; dataStatus: string; title: string } {
+    if (!isSelf) {
+      return { text: '', dataStatus: 'incoming', title: '' };
+    }
+    if (msg.status === 'pending') {
+      return { text: '· ...', dataStatus: 'pending', title: 'Pendente de envio' };
+    }
+
+    const partnerReadTime = this.getPartnerLastReadTime();
+    if (partnerReadTime && partnerReadTime >= msg.createdAt) {
+      return { text: '✓✓ visto', dataStatus: 'read', title: 'Visto pelo parceiro' };
+    }
+
+    return { text: '✓', dataStatus: 'synced', title: 'Enviado' };
+  }
+
+  public updateReadReceipts(room: Room, session: UserSession): void {
+    this.currentRoom = room;
+    this.currentSession = session;
+    const partnerReadTime = getPartnerLastRead(room, session.displayName, session.userId);
+    if (!partnerReadTime) return;
+
+    for (const [messageId, item] of this.renderedMessages.entries()) {
+      if (item.isSelf && item.msg.status !== 'pending') {
+        const isRead = partnerReadTime >= item.msg.createdAt;
+        if (isRead) {
+          item.msg.status = 'read';
+          const row = document.getElementById(`ttm-msg-${messageId}`);
+          if (row) {
+            const statusSpan = row.querySelector('.msg-status');
+            if (statusSpan) {
+              statusSpan.textContent = '✓✓ visto';
+              statusSpan.setAttribute('data-status', 'read');
+              statusSpan.setAttribute('title', 'Visto pelo parceiro');
+            }
+          }
+        }
+      }
+    }
+  }
+
+  public appendOrUpdateMessage(msg: Message, isSelf: boolean): void {
+    this.renderedMessages.set(msg.messageId, { msg, isSelf });
+    const statusInfo = this.computeMessageStatus(msg, isSelf);
+
+    const existingRow = document.getElementById(`ttm-msg-${msg.messageId}`);
     if (existingRow) {
       const statusSpan = existingRow.querySelector('.msg-status');
-      if (statusSpan) {
-        statusSpan.textContent = msg.status === 'pending' ? '· ...' : '· ok';
-        statusSpan.setAttribute('data-status', msg.status || 'synced');
+      if (statusSpan && isSelf) {
+        statusSpan.textContent = statusInfo.text;
+        statusSpan.setAttribute('data-status', statusInfo.dataStatus);
+        if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
       }
       return;
     }
@@ -565,13 +629,16 @@ export class ChatUI {
 
     const statusSpan = document.createElement('span');
     statusSpan.className = 'msg-status';
-    statusSpan.textContent = msg.status === 'pending' ? '· ...' : '· ok';
-    statusSpan.setAttribute('data-status', msg.status || 'synced');
+    statusSpan.textContent = statusInfo.text;
+    statusSpan.setAttribute('data-status', statusInfo.dataStatus);
+    if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
 
     rowEl.appendChild(timeSpan);
     rowEl.appendChild(senderSpan);
     rowEl.appendChild(textSpan);
-    rowEl.appendChild(statusSpan);
+    if (isSelf) {
+      rowEl.appendChild(statusSpan);
+    }
 
     this.msgListEl.appendChild(rowEl);
     this.renderedMessageIds.add(msg.messageId);
@@ -589,6 +656,9 @@ export class ChatUI {
       if (this.renderedMessageIds.has(msg.messageId)) return;
 
       const isSelf = msg.senderId === currentUserId;
+      this.renderedMessages.set(msg.messageId, { msg, isSelf });
+      const statusInfo = this.computeMessageStatus(msg, isSelf);
+
       const rowEl = document.createElement('div');
       rowEl.id = `ttm-msg-${msg.messageId}`;
       rowEl.className = 'ttm-msg-row';
@@ -615,12 +685,16 @@ export class ChatUI {
 
       const statusSpan = document.createElement('span');
       statusSpan.className = 'msg-status';
-      statusSpan.textContent = msg.status === 'pending' ? '· ...' : '· ok';
+      statusSpan.textContent = statusInfo.text;
+      statusSpan.setAttribute('data-status', statusInfo.dataStatus);
+      if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
 
       rowEl.appendChild(timeSpan);
       rowEl.appendChild(senderSpan);
       rowEl.appendChild(textSpan);
-      rowEl.appendChild(statusSpan);
+      if (isSelf) {
+        rowEl.appendChild(statusSpan);
+      }
 
       fragment.appendChild(rowEl);
       this.renderedMessageIds.add(msg.messageId);
