@@ -3,7 +3,8 @@ import {
   getAuth,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  signInAnonymously,
+  setPersistence,
+  browserLocalPersistence,
   onAuthStateChanged,
   Auth,
   User,
@@ -102,7 +103,7 @@ export function getFirebaseAuth(): Auth | null {
 /**
  * Restaura a sessão do Firebase Auth utilizando onAuthStateChanged (Layer 4)
  */
-export async function restoreAuthSession(): Promise<User | null> {
+export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User | null> {
   const { configured } = await initFirebase();
   if (!configured || !firebaseAuth) {
     return null;
@@ -120,7 +121,7 @@ export async function restoreAuthSession(): Promise<User | null> {
         resolved = true;
         resolve(firebaseAuth?.currentUser || null);
       }
-    }, 1500);
+    }, timeoutMs);
 
     try {
       const unsubscribe = onAuthStateChanged(
@@ -172,32 +173,55 @@ export async function silentAuthenticateWithEmail(userType: AllowedUser): Promis
   }
 
   try {
+    try {
+      await setPersistence(firebaseAuth, browserLocalPersistence);
+    } catch {
+      // continua se persistência já ativa
+    }
+
     const authPromise = (async () => {
       try {
         const result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
         activeAuthUser = result.user;
-        console.info(`Talk2TM: Autenticação silenciosa ativa para ${userType} (UID: ${result.user.uid}).`);
+        console.info(`Talk2TM [Layer 1]: Autenticação silenciosa ativa para ${userType} (UID: ${result.user.uid}).`);
         return result.user;
       } catch (err: any) {
         if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
           try {
             const newRes = await createUserWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
             activeAuthUser = newRes.user;
-            console.info(`Talk2TM: Conta pré-provisionada criada para ${userType} (UID: ${newRes.user.uid}).`);
+            console.info(`Talk2TM [Layer 1]: Conta criada para ${userType} (UID: ${newRes.user.uid}).`);
             return newRes.user;
           } catch (createErr: any) {
-            console.debug('Talk2TM: Criação de conta pré-provisionada falhou:', createErr?.code);
+            if (createErr?.code === 'auth/email-already-in-use') {
+              try {
+                const retryRes = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
+                activeAuthUser = retryRes.user;
+                return retryRes.user;
+              } catch (retryErr) {
+                console.debug('Talk2TM [Layer 1]: Retry signIn falhou:', retryErr);
+              }
+            } else if (createErr?.code === 'auth/operation-not-allowed') {
+              console.error(
+                'Talk2TM [Layer 1]: Provedor "E-mail/senha" desativado no Firebase Console. Ative em Authentication > Sign-in method > E-mail/senha.'
+              );
+            }
+            console.debug('Talk2TM [Layer 1]: Criação de conta pré-provisionada falhou:', createErr?.code);
           }
+        } else if (err.code === 'auth/operation-not-allowed') {
+          console.error(
+            'Talk2TM [Layer 1]: Provedor "E-mail/senha" desativado no Firebase Console. Ative em Authentication > Sign-in method > E-mail/senha.'
+          );
         }
-        console.debug('Talk2TM: Autenticação remota email/senha retornou:', err?.code || err?.message);
+        console.debug('Talk2TM [Layer 1]: Autenticação remota email/senha retornou:', err?.code || err?.message);
         return null;
       }
     })();
 
-    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000));
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
     return await Promise.race([authPromise, timeoutPromise]);
   } catch (error) {
-    console.debug('Talk2TM: Exceção no fluxo silentAuthenticateWithEmail:', error);
+    console.debug('Talk2TM [Layer 1]: Exceção no fluxo silentAuthenticateWithEmail:', error);
     return null;
   }
 }
@@ -206,7 +230,8 @@ export async function silentAuthenticateWithEmail(userType: AllowedUser): Promis
  * Tenta inicializar o Firebase com persistência local avançada (Camadas 06 e 07)
  * Suporta:
  * 1. Variáveis de ambiente Vite (import.meta.env.VITE_FIREBASE_*) para Render, GitHub Pages, Firebase Hosting e produção
- * 2. Fallback para /firebase-applet-config.json gerado automaticamente no Google AI Studio
+ * 2. Fallback Firebase Hosting (/__/firebase/init.json) quando executado em talk2tm.web.app
+ * 3. Fallback para /firebase-applet-config.json gerado automaticamente no Google AI Studio
  */
 export async function initFirebase(): Promise<{ db: Firestore | null; configured: boolean }> {
   if (firestoreDb) {
@@ -239,20 +264,40 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
       appId: metaEnv.VITE_FIREBASE_APP_ID || procEnv.VITE_FIREBASE_APP_ID,
     };
   } else {
-    // 2. Fallback: carregar firebase-applet-config.json se existir no bundle/servidor
-    try {
-      const response = await fetch('/firebase-applet-config.json');
-      if (response.ok) {
-        const fetched = await response.json();
-        if (fetched && fetched.projectId) {
-          config = fetched;
+    // 2. Fallback Firebase Hosting para domínios *.web.app ou *.firebaseapp.com
+    if (typeof window !== 'undefined' && window.location) {
+      const host = window.location.hostname;
+      if (host.includes('web.app') || host.includes('firebaseapp.com')) {
+        try {
+          const hostingRes = await fetch('/__/firebase/init.json');
+          if (hostingRes.ok) {
+            const hostingConfig = await hostingRes.json();
+            if (hostingConfig && hostingConfig.projectId) {
+              config = hostingConfig;
+            }
+          }
+        } catch {
+          // segue para os outros fallbacks
         }
       }
-    } catch {
-      // Ignora erro se a requisição falhar
     }
 
-    // 3. Fallback estático padrão do projeto gen-lang-client-0618196986
+    // 3. Fallback: carregar firebase-applet-config.json se existir no bundle/servidor
+    if (!config || !config.projectId) {
+      try {
+        const response = await fetch('/firebase-applet-config.json');
+        if (response.ok) {
+          const fetched = await response.json();
+          if (fetched && fetched.projectId) {
+            config = fetched;
+          }
+        }
+      } catch {
+        // Ignora erro se a requisição falhar
+      }
+    }
+
+    // 4. Fallback estático padrão do projeto gen-lang-client-0618196986
     if (!config || !config.projectId) {
       config = {
         apiKey: 'AIzaSyCfwTvVhyrRZHk4zzzRweShyVdMnimnzm0',
@@ -290,20 +335,10 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
 
     try {
       firebaseAuth = getAuth(firebaseApp);
-      // Garante autenticação anônima antes de concluir a inicialização
-      if (!firebaseAuth.currentUser) {
-        await Promise.race([
-          signInAnonymously(firebaseAuth)
-            .then((cred) => {
-              console.info(`Talk2TM: Autenticação anônima inicial estabelecida (UID: ${cred.user.uid}).`);
-              return cred.user;
-            })
-            .catch((authErr) => {
-              console.debug('Talk2TM: Autenticação anônima não pôde ser ativada:', authErr?.code || authErr?.message);
-              return null;
-            }),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
-        ]);
+      try {
+        await setPersistence(firebaseAuth, browserLocalPersistence);
+      } catch (pErr) {
+        console.debug('Talk2TM: Persistência local configurada ou padrão:', pErr);
       }
     } catch (authInitErr) {
       console.debug('Talk2TM: Inicialização do Firebase Auth ignorada:', authInitErr);
@@ -319,8 +354,7 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
 }
 
 /**
- * Garante que o usuário esteja autenticado via Firebase Auth (anônimo ou existente)
- * antes de qualquer sincronização inicial ou operação de escrita/leitura no Firestore.
+ * Garante que o usuário esteja autenticado no Firebase Auth (restaura sessão persistente)
  */
 export async function ensureFirebaseAuth(): Promise<User | null> {
   const { configured } = await initFirebase();
@@ -328,23 +362,12 @@ export async function ensureFirebaseAuth(): Promise<User | null> {
     return null;
   }
 
-  if (firebaseAuth.currentUser) {
+  if (firebaseAuth.currentUser && !firebaseAuth.currentUser.isAnonymous) {
+    activeAuthUser = firebaseAuth.currentUser;
     return firebaseAuth.currentUser;
   }
 
-  try {
-    const authPromise = signInAnonymously(firebaseAuth).then((cred) => {
-      console.info(`Talk2TM: Autenticação anônima garantida com sucesso (UID: ${cred.user.uid}).`);
-      return cred.user;
-    });
-
-    // Timeout de resiliência de 2.5s para manter o princípio de zero-latência
-    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500));
-    return await Promise.race([authPromise, timeoutPromise]);
-  } catch (error: any) {
-    console.debug('Talk2TM: Falha ao garantir autenticação anônima:', error?.code || error?.message);
-    return null;
-  }
+  return await restoreAuthSession(1500);
 }
 
 /**
@@ -404,15 +427,39 @@ export async function joinFirestoreRoom(
 
       const data = snap.data() as Room;
 
-      // Se já é um dos participantes (reconexão / reload por UID)
+      // 1. Se já é um dos participantes pelo UID exato
       if (data.participantA === effectiveUid || data.participantB === effectiveUid) {
         await updateDoc(roomDocRef, {
           lastActivity: nowIso,
         });
-        return { success: true, room: data };
+        return { success: true, room: { ...data, lastActivity: nowIso } };
       }
 
-      // Se a vaga B está disponível
+      // 2. Se o participante A tem o mesmo nome (atualiza UID com o UID real autenticado do Firebase Auth)
+      if (data.participantAName === userName) {
+        await updateDoc(roomDocRef, {
+          participantA: effectiveUid,
+          lastActivity: nowIso,
+        });
+        return {
+          success: true,
+          room: { ...data, participantA: effectiveUid, lastActivity: nowIso },
+        };
+      }
+
+      // 3. Se o participante B tem o mesmo nome (atualiza UID com o UID real autenticado do Firebase Auth)
+      if (data.participantBName === userName) {
+        await updateDoc(roomDocRef, {
+          participantB: effectiveUid,
+          lastActivity: nowIso,
+        });
+        return {
+          success: true,
+          room: { ...data, participantB: effectiveUid, lastActivity: nowIso },
+        };
+      }
+
+      // 4. Se a vaga B está disponível
       if (!data.participantB || data.participantB === '') {
         const updated = {
           participantB: effectiveUid,
@@ -433,7 +480,7 @@ export async function joinFirestoreRoom(
         };
       }
 
-      // Sala já possui 2 participantes
+      // Sala já possui 2 participantes distintos
       return {
         success: false,
         room: data,
@@ -458,25 +505,27 @@ export async function joinFirestoreRoom(
 
 /**
  * Envia mensagem para o Firestore com ID determinístico para idempotência (Camada 09).
- * Inclui verificação explícita de guarda: procede APENAS com usuário autenticado e não-anônimo.
+ * Layer 2: Procede APENAS com usuário autenticado e não-anônimo.
  */
 export async function sendFirestoreMessage(msg: Message): Promise<void> {
   const { db } = await initFirebase();
   if (!db) return;
 
-  // Explicit guard check: proceed ONLY if auth.currentUser != null and auth.currentUser.isAnonymous === false.
-  // Prevent outbox queues from attempting writes while unauthenticated or anonymous.
+  // Layer 2: Explicit guard check — proceed ONLY if auth.currentUser != null and auth.currentUser.isAnonymous === false.
   if (!isAuthValidAndNonAnonymous()) {
-    console.warn('Talk2TM [Guard]: Escrita rejeitada em sendFirestoreMessage — usuário não autenticado ou anônimo.');
+    console.warn('Talk2TM [Layer 2 Guard]: Escrita rejeitada em sendFirestoreMessage — usuário não autenticado ou anônimo.');
     throw new Error('Operação cancelada: requer autenticação não-anônima ativa.');
   }
+
+  const authUser = firebaseAuth?.currentUser;
+  const effectiveSenderId = authUser ? authUser.uid : msg.senderId;
 
   const docRef = doc(db, 'messages', msg.messageId);
   const payload: Message = {
     messageId: msg.messageId,
     room: msg.room,
     sender: msg.sender,
-    senderId: msg.senderId,
+    senderId: effectiveSenderId,
     text: msg.text,
     clientId: msg.clientId,
     createdAt: msg.createdAt || new Date().toISOString(),

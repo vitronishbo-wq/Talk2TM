@@ -217,6 +217,9 @@ export class Talk2TMApp {
    * Conecta ao Firestore em segundo plano com timeout de resiliência
    */
   private async connectFirestoreBackground(roomId: string, userId: string, user: string): Promise<void> {
+    // Garante que o listener em tempo real esteja ativo imediatamente para capturar mensagens de A e B
+    this.setupRealtimeListeners(roomId);
+
     try {
       const joinResult = await joinFirestoreRoom(roomId, userId, user);
 
@@ -227,9 +230,6 @@ export class Talk2TMApp {
           this.ui.updateRoomInfo(this.currentRoom, this.currentSession);
           this.ui.updateReadReceipts(this.currentRoom, this.currentSession);
         }
-
-        // Escuta novas mensagens em tempo real
-        this.setupRealtimeListeners(roomId);
 
         // Marca como lido com a sala conectada
         this.markChatAsRead();
@@ -398,15 +398,20 @@ export class Talk2TMApp {
 
     // Explicit guard check: procede APENAS se auth.currentUser != null e auth.currentUser.isAnonymous === false.
     // Evita envios remotos prematuros ou bloqueados pelas regras do Firestore
-    if (navigator.onLine && isAuthValidAndNonAnonymous()) {
-      try {
-        await sendFirestoreMessage(msg);
-        await removeFromOutbox(msg.messageId);
-        const syncedMsg: Message = { ...msg, status: 'synced' };
-        await saveLocalMessage(syncedMsg);
-        this.ui.appendOrUpdateMessage(syncedMsg, true);
-      } catch (error) {
-        console.warn('Mensagem mantida no outbox local:', error);
+    if (navigator.onLine) {
+      if (!isAuthValidAndNonAnonymous()) {
+        await restoreAuthSession(1000);
+      }
+      if (isAuthValidAndNonAnonymous()) {
+        try {
+          await sendFirestoreMessage(msg);
+          await removeFromOutbox(msg.messageId);
+          const syncedMsg: Message = { ...msg, status: 'synced' };
+          await saveLocalMessage(syncedMsg);
+          this.ui.appendOrUpdateMessage(syncedMsg, true);
+        } catch (error) {
+          console.warn('Mensagem mantida no outbox local:', error);
+        }
       }
     }
   }
