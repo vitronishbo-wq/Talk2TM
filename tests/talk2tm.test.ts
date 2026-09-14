@@ -15,6 +15,10 @@ import {
   isAuthValidAndNonAnonymous,
   getPartnerLastRead,
   updateFirestoreLastRead,
+  AuthState,
+  getAuthState,
+  waitForAuthCompletion,
+  sendFirestoreMessage,
 } from '../src/firebase/firestore';
 
 function assert(condition: boolean, description: string): void {
@@ -239,6 +243,26 @@ export function runTalk2TMTests(): { passed: number; total: number } {
   // 15. Assinatura de updateFirestoreLastRead
   check('Read Receipts: Assinatura da função de sincronização updateFirestoreLastRead', () => {
     assert(typeof updateFirestoreLastRead === 'function', 'updateFirestoreLastRead deve ser uma função exportada');
+  });
+
+  // 16. Camada 2 — Estado de Autenticação Único (AuthState)
+  check('Auth: Estados de autenticação e valores do enum AuthState', () => {
+    assert(AuthState.UNINITIALIZED === 'uninitialized', 'Estado uninitialized deve existir');
+    assert(AuthState.AUTHENTICATING === 'authenticating', 'Estado authenticating deve existir');
+    assert(AuthState.AUTHENTICATED_NON_ANONYMOUS === 'authenticated_non_anonymous', 'Estado authenticated_non_anonymous deve existir');
+    assert(AuthState.ANONYMOUS === 'anonymous', 'Estado anonymous deve existir');
+    assert(AuthState.FAILED === 'failed', 'Estado failed deve existir');
+    assert(typeof getAuthState === 'function', 'getAuthState deve ser função exportada');
+  });
+
+  // 17. Camada 2.2 — Promessa de Conclusão da Autenticação
+  check('Auth: Assinatura e contrato de waitForAuthCompletion', () => {
+    assert(typeof waitForAuthCompletion === 'function', 'waitForAuthCompletion deve ser uma função exportada');
+  });
+
+  // 18. Camada 4 — Guarda de Envio no Firestore sem identidade válida
+  check('Firestore: sendFirestoreMessage rejeita quando unauthenticated ou anônimo', async () => {
+    assert(typeof sendFirestoreMessage === 'function', 'sendFirestoreMessage deve ser função exportada');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);

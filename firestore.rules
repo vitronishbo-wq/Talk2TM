@@ -1,9 +1,29 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Regra de diagnóstico temporário Talk2TM (provar conectividade e autenticação A <-> B)
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+
+    function isRoomParticipant(roomId) {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+        (
+          request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantA ||
+          request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantB
+        );
+    }
+
+    // Camada 6 & 8: Regras da coleção /rooms autorizada aos participantes autenticados
+    match /rooms/{roomId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // Camada 7 & 8: Regras da coleção /messages vinculada estritamente aos participantes da sala
+    match /messages/{messageId} {
+      allow read: if isRoomParticipant(resource.data.room);
+      allow create: if isRoomParticipant(request.resource.data.room) &&
+                       request.resource.data.senderId == request.auth.uid;
+      allow update, delete: if false;
     }
   }
 }
+

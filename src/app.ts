@@ -40,6 +40,7 @@ import {
   restoreAuthSession,
   silentAuthenticateWithEmail,
   isAuthValidAndNonAnonymous,
+  waitForAuthCompletion,
   getCurrentAuthUser,
   updateFirestoreLastRead,
 } from './firebase/firestore';
@@ -455,8 +456,11 @@ export class Talk2TMApp {
   private async syncPendingOutbox(): Promise<void> {
     if (!navigator.onLine) return;
 
-    // Explicit guard check: proceed ONLY if auth.currentUser != null and auth.currentUser.isAnonymous === false.
-    // Prevent outbox queues from attempting writes while unauthenticated or anonymous.
+    // Camada 2.5: A inicialização do Firestore não deve disparar sincronização da outbox antes da conclusão da autenticação necessária
+    if (!isAuthValidAndNonAnonymous()) {
+      await waitForAuthCompletion(1500);
+    }
+
     if (!isAuthValidAndNonAnonymous()) {
       console.debug('Talk2TM [Guard]: syncPendingOutbox retido — aguardando autenticação não-anônima.');
       return;

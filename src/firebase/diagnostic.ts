@@ -20,7 +20,12 @@ import {
   serverTimestamp,
   Unsubscribe,
 } from 'firebase/firestore';
-import { initFirebase, ensureFirebaseAuth } from './firestore';
+import {
+  initFirebase,
+  ensureFirebaseAuth,
+  silentAuthenticateWithEmail,
+  joinFirestoreRoom,
+} from './firestore';
 import { Message } from '../types';
 import { ACCESS_CONFIG } from '../config';
 import { generateId } from '../utils/sanitize';
@@ -72,9 +77,12 @@ export async function testRealtimeSyncAtoB(options?: DiagnosticOptions): Promise
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`[1/4] Inicializando Firestore para sala "${roomId}"...`);
 
-  // 1. Inicializa o Firestore e garante autenticação anônima
+  // 1. Inicializa o Firestore e garante autenticação silenciosa com UID real
   const { db } = await initFirebase();
-  await ensureFirebaseAuth();
+  const authUser = await silentAuthenticateWithEmail('Truman');
+  const effectiveSenderId = authUser?.uid || senderId;
+  await joinFirestoreRoom(roomId, effectiveSenderId, 'Truman');
+
   if (!db) {
     const errMsg = 'Firestore não está disponível ou credenciais não foram configuradas.';
     console.error(`✖ Erro: ${errMsg}`);
@@ -169,7 +177,7 @@ export async function testRealtimeSyncAtoB(options?: DiagnosticOptions): Promise
       messageId,
       room: roomId,
       sender,
-      senderId,
+      senderId: effectiveSenderId,
       text,
       clientId,
       createdAt: sentIso,

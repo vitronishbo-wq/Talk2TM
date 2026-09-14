@@ -2,7 +2,6 @@ import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import {
   getAuth,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   setPersistence,
   browserLocalPersistence,
   onAuthStateChanged,
@@ -39,6 +38,23 @@ export enum OperationType {
   WRITE = 'write',
 }
 
+/**
+ * Camada 2 — Estado de Autenticação Único
+ * Distingue:
+ * - uninitialized (não inicializada)
+ * - authenticating (em processo de autenticação)
+ * - authenticated_non_anonymous (autenticada não anônima)
+ * - anonymous (sessão anônima)
+ * - failed (autenticação falhada)
+ */
+export enum AuthState {
+  UNINITIALIZED = 'uninitialized',
+  AUTHENTICATING = 'authenticating',
+  AUTHENTICATED_NON_ANONYMOUS = 'authenticated_non_anonymous',
+  ANONYMOUS = 'anonymous',
+  FAILED = 'failed',
+}
+
 export interface FirestoreErrorInfo {
   error: string;
   operationType: OperationType;
@@ -60,7 +76,13 @@ let firebaseApp: FirebaseApp | null = null;
 let firestoreDb: Firestore | null = null;
 let firebaseAuth: Auth | null = null;
 let activeAuthUser: User | null = null;
+let currentAuthState: AuthState = AuthState.UNINITIALIZED;
+let ongoingAuthPromise: Promise<User | null> | null = null;
 let isConfigured = false;
+
+export function getAuthState(): AuthState {
+  return currentAuthState;
+}
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
   const currentUser = getCurrentAuthUser();
@@ -93,7 +115,10 @@ export function getCurrentAuthUser(): User | null {
  */
 export function isAuthValidAndNonAnonymous(): boolean {
   const user = getCurrentAuthUser();
-  return !!user && user.isAnonymous === false;
+  return !!user && user.isAnonymous === false && (
+    currentAuthState === AuthState.AUTHENTICATED_NON_ANONYMOUS ||
+    (currentAuthState === AuthState.UNINITIALIZED && !user.isAnonymous)
+  );
 }
 
 export function getFirebaseAuth(): Auth | null {
@@ -101,16 +126,36 @@ export function getFirebaseAuth(): Auth | null {
 }
 
 /**
- * Restaura a sessão do Firebase Auth utilizando onAuthStateChanged (Layer 4)
+ * Aguarda a conclusão de qualquer processo de autenticação em andamento ou restaura sessão.
+ * Camada 2.2: Disponibiliza promessa que permite aguardar a conclusão antes de operações Firestore.
+ */
+export async function waitForAuthCompletion(timeoutMs: number = 3000): Promise<User | null> {
+  const user = getCurrentAuthUser();
+  if (user && !user.isAnonymous && currentAuthState === AuthState.AUTHENTICATED_NON_ANONYMOUS) {
+    return user;
+  }
+
+  if (ongoingAuthPromise) {
+    const timeout = new Promise<null>((res) => setTimeout(() => res(null), timeoutMs));
+    return await Promise.race([ongoingAuthPromise, timeout]);
+  }
+
+  return await restoreAuthSession(timeoutMs);
+}
+
+/**
+ * Restaura a sessão do Firebase Auth utilizando onAuthStateChanged (Camada 1 & 2)
  */
 export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User | null> {
   const { configured } = await initFirebase();
   if (!configured || !firebaseAuth) {
+    currentAuthState = AuthState.UNINITIALIZED;
     return null;
   }
 
   if (firebaseAuth.currentUser && !firebaseAuth.currentUser.isAnonymous) {
     activeAuthUser = firebaseAuth.currentUser;
+    currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
     return activeAuthUser;
   }
 
@@ -119,7 +164,16 @@ export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        resolve(firebaseAuth?.currentUser || null);
+        const u = firebaseAuth?.currentUser || null;
+        if (u && !u.isAnonymous) {
+          activeAuthUser = u;
+          currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
+        } else if (u && u.isAnonymous) {
+          currentAuthState = AuthState.ANONYMOUS;
+        } else {
+          currentAuthState = AuthState.UNINITIALIZED;
+        }
+        resolve(u);
       }
     }, timeoutMs);
 
@@ -131,6 +185,13 @@ export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User
             resolved = true;
             clearTimeout(timer);
             activeAuthUser = user;
+            if (user && !user.isAnonymous) {
+              currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
+            } else if (user && user.isAnonymous) {
+              currentAuthState = AuthState.ANONYMOUS;
+            } else {
+              currentAuthState = AuthState.UNINITIALIZED;
+            }
             unsubscribe();
             resolve(user);
           }
@@ -140,6 +201,7 @@ export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User
             resolved = true;
             clearTimeout(timer);
             unsubscribe();
+            currentAuthState = AuthState.FAILED;
             resolve(null);
           }
         }
@@ -148,6 +210,7 @@ export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
+        currentAuthState = AuthState.FAILED;
         resolve(null);
       }
     }
@@ -157,11 +220,17 @@ export async function restoreAuthSession(timeoutMs: number = 1500): Promise<User
 /**
  * Autenticação silenciosa e não-bloqueante no Firebase Auth mapeada aos PINs de entrada.
  * Executa signInWithEmailAndPassword() utilizando as credenciais pré-provisionadas
- * sem exibir NENHUM elemento de login visual na interface da calculadora (Layer 1 & 2).
+ * sem exibir NENHUM elemento de login visual na interface da calculadora (Camadas 1, 2 e 3).
+ *
+ * Regras estritas:
+ * - Não cria contas automaticamente no cliente (1.6)
+ * - Não utiliza criação de contas dentro de blocos catch (1.7)
+ * - Não exibe erro através de telas de login (1.8)
  */
 export async function silentAuthenticateWithEmail(userType: AllowedUser): Promise<User | null> {
   const { configured } = await initFirebase();
   if (!configured || !firebaseAuth) {
+    currentAuthState = AuthState.FAILED;
     return null;
   }
 
@@ -169,61 +238,43 @@ export async function silentAuthenticateWithEmail(userType: AllowedUser): Promis
   const current = firebaseAuth.currentUser;
   if (current && !current.isAnonymous && current.email === creds.email) {
     activeAuthUser = current;
+    currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
     return current;
   }
 
-  try {
+  currentAuthState = AuthState.AUTHENTICATING;
+
+  const authPromise = (async () => {
     try {
-      await setPersistence(firebaseAuth, browserLocalPersistence);
-    } catch {
-      // continua se persistência já ativa
-    }
-
-    const authPromise = (async () => {
       try {
-        const result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
-        activeAuthUser = result.user;
-        console.info(`Talk2TM [Layer 1]: Autenticação silenciosa ativa para ${userType} (UID: ${result.user.uid}).`);
-        return result.user;
-      } catch (err: any) {
-        if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-          try {
-            const newRes = await createUserWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
-            activeAuthUser = newRes.user;
-            console.info(`Talk2TM [Layer 1]: Conta criada para ${userType} (UID: ${newRes.user.uid}).`);
-            return newRes.user;
-          } catch (createErr: any) {
-            if (createErr?.code === 'auth/email-already-in-use') {
-              try {
-                const retryRes = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
-                activeAuthUser = retryRes.user;
-                return retryRes.user;
-              } catch (retryErr) {
-                console.debug('Talk2TM [Layer 1]: Retry signIn falhou:', retryErr);
-              }
-            } else if (createErr?.code === 'auth/operation-not-allowed') {
-              console.error(
-                'Talk2TM [Layer 1]: Provedor "E-mail/senha" desativado no Firebase Console. Ative em Authentication > Sign-in method > E-mail/senha.'
-              );
-            }
-            console.debug('Talk2TM [Layer 1]: Criação de conta pré-provisionada falhou:', createErr?.code);
-          }
-        } else if (err.code === 'auth/operation-not-allowed') {
-          console.error(
-            'Talk2TM [Layer 1]: Provedor "E-mail/senha" desativado no Firebase Console. Ative em Authentication > Sign-in method > E-mail/senha.'
-          );
-        }
-        console.debug('Talk2TM [Layer 1]: Autenticação remota email/senha retornou:', err?.code || err?.message);
-        return null;
+        await setPersistence(firebaseAuth!, browserLocalPersistence);
+      } catch {
+        // continua se persistência já ativa
       }
-    })();
 
-    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
-    return await Promise.race([authPromise, timeoutPromise]);
-  } catch (error) {
-    console.debug('Talk2TM [Layer 1]: Exceção no fluxo silentAuthenticateWithEmail:', error);
-    return null;
-  }
+      const result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
+      activeAuthUser = result.user;
+      currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
+      console.info(`Talk2TM [Layer 1]: Autenticação silenciosa ativa para ${userType} (UID: ${result.user.uid}).`);
+      return result.user;
+    } catch (err: any) {
+      currentAuthState = AuthState.FAILED;
+      if (err?.code === 'auth/operation-not-allowed') {
+        console.error(
+          'Talk2TM [Layer 1]: Provedor "E-mail/senha" desativado no Firebase Console. Ative em Authentication > Sign-in method > E-mail/senha.'
+        );
+      } else {
+        console.debug('Talk2TM [Layer 1]: Autenticação remota retornou:', err?.code || err?.message);
+      }
+      return null;
+    } finally {
+      ongoingAuthPromise = null;
+    }
+  })();
+
+  ongoingAuthPromise = authPromise;
+  const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
+  return await Promise.race([authPromise, timeoutPromise]);
 }
 
 /**
