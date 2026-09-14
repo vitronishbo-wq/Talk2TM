@@ -1,5 +1,5 @@
 // Talk2TM Minimalist Shell Service Worker
-const CACHE_NAME = 'talk2tm-shell-v2';
+const CACHE_NAME = 'talk2tm-shell-v3';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -36,10 +36,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
 
-  // 11.2 Para requisições de navegação (/ ou /index.html): Network-first com fallback para cache
+  // 11.2 Para requisições de navegação (/ ou /index.html): Network-first com no-store e fallback para cache
   if (event.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
     event.respondWith(
-      fetch(event.request)
+      fetch(event.request, { cache: 'no-store' })
         .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
             const copy = networkResponse.clone();

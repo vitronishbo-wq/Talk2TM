@@ -2,6 +2,7 @@ import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import {
   getAuth,
   signInWithEmailAndPassword,
+  signOut,
   setPersistence,
   browserLocalPersistence,
   onAuthStateChanged,
@@ -232,6 +233,15 @@ export async function silentAuthenticateWithEmail(userType: AllowedUser): Promis
   if (!configured || !firebaseAuth) {
     currentAuthState = AuthState.FAILED;
     return null;
+  }
+
+  // Purga sessão anônima residual herdada de versões anteriores
+  if (firebaseAuth.currentUser && firebaseAuth.currentUser.isAnonymous) {
+    try {
+      await signOut(firebaseAuth);
+    } catch {
+      // continua
+    }
   }
 
   const creds = USER_AUTH_CREDENTIALS[userType];
@@ -598,7 +608,10 @@ export function subscribeToMessages(
   onNewMessages: (messages: Message[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe | null {
-  if (!firestoreDb) return null;
+  if (!firestoreDb || !isAuthValidAndNonAnonymous()) {
+    console.debug('Talk2TM [Guard]: subscribeToMessages retido — autenticação necessária.');
+    return null;
+  }
 
   let activeUnsubscribe: Unsubscribe | null = null;
 
@@ -667,7 +680,10 @@ export function subscribeToRoom(
   roomId: string,
   onRoomUpdate: (room: Room) => void
 ): Unsubscribe | null {
-  if (!firestoreDb) return null;
+  if (!firestoreDb || !isAuthValidAndNonAnonymous()) {
+    console.debug('Talk2TM [Guard]: subscribeToRoom retido — autenticação necessária.');
+    return null;
+  }
 
   const docRef = doc(firestoreDb, 'rooms', roomId);
   return onSnapshot(

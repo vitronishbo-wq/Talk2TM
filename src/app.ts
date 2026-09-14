@@ -218,10 +218,19 @@ export class Talk2TMApp {
    * Conecta ao Firestore em segundo plano com timeout de resiliência
    */
   private async connectFirestoreBackground(roomId: string, userId: string, user: string): Promise<void> {
-    // Garante que o listener em tempo real esteja ativo imediatamente para capturar mensagens de A e B
-    this.setupRealtimeListeners(roomId);
+    // 1. Aguarda autenticação não-anônima ativa
+    if (!isAuthValidAndNonAnonymous()) {
+      await waitForAuthCompletion(2500);
+    }
+
+    if (!isAuthValidAndNonAnonymous()) {
+      console.debug('Talk2TM [Guard]: Conexão Firestore em background suspensa — aguardando autenticação não-anônima.');
+      this.setConnectionState('offline');
+      return;
+    }
 
     try {
+      // 2. Garante PRIMEIRO que a sala exista no Firestore e que o participante com seu UID real esteja registrado
       const joinResult = await joinFirestoreRoom(roomId, userId, user);
 
       if (joinResult && joinResult.success && joinResult.room) {
@@ -232,10 +241,13 @@ export class Talk2TMApp {
           this.ui.updateReadReceipts(this.currentRoom, this.currentSession);
         }
 
-        // Marca como lido com a sala conectada
+        // 3. AGORA que a sala existe e o participante está registrado e autenticado, ativa os listeners em tempo real
+        this.setupRealtimeListeners(roomId);
+
+        // 4. Marca como lido com a sala conectada
         this.markChatAsRead();
 
-        // Sincroniza mensagens que estavam pendentes no outbox
+        // 5. Sincroniza mensagens que estavam pendentes no outbox
         await this.syncPendingOutbox();
 
         this.setConnectionState(navigator.onLine ? 'online' : 'offline');
@@ -381,11 +393,18 @@ export class Talk2TMApp {
     const messageId = `${this.currentSession.roomId}_${clientId}`;
     const nowIso = new Date().toISOString();
 
+    const currentAuth = getCurrentAuthUser();
+    const effectiveSenderId = (currentAuth && !currentAuth.isAnonymous ? currentAuth.uid : null) || this.currentSession.userId;
+    if (currentAuth && !currentAuth.isAnonymous && this.currentSession.userId !== currentAuth.uid) {
+      this.currentSession.userId = currentAuth.uid;
+      saveSession(this.currentSession);
+    }
+
     const msg: Message = {
       messageId,
       room: this.currentSession.roomId,
       sender: this.currentSession.displayName,
-      senderId: this.currentSession.userId,
+      senderId: effectiveSenderId,
       text: sanitized.text,
       clientId,
       createdAt: nowIso,
@@ -556,7 +575,28 @@ export class Talk2TMApp {
     if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
       navigator.serviceWorker
         .register('/sw.js')
+        .then((reg) => {
+          reg.update().catch(() => {});
+          reg.onupdatefound = () => {
+            const installing = reg.installing;
+            if (installing) {
+              installing.onstatechange = () => {
+                if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+                  installing.postMessage({ type: 'SKIP_WAITING' });
+                }
+              };
+            }
+          };
+        })
         .catch((err) => console.debug('Service Worker erro:', err));
+
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!refreshing) {
+          refreshing = true;
+          window.location.reload();
+        }
+      });
     }
   }
 
