@@ -11,6 +11,7 @@ export interface UIEvents {
   onSendMessage: (text: string) => void;
   onLoadOlder: () => void;
   onUpdateSettings: (settings: AppSettings) => void;
+  onDeleteMessagesLocally?: (messageIds: string[]) => void;
 }
 
 export class ChatUI {
@@ -39,6 +40,16 @@ export class ChatUI {
   private msgInputEl!: HTMLInputElement;
   private charCountEl!: HTMLElement;
   private loadOlderBtn!: HTMLButtonElement;
+  private sendFormEl!: HTMLFormElement;
+
+  // Modo de Seleção e Exclusão Local
+  private isSelectionMode: boolean = false;
+  private selectedMessageIds: Set<string> = new Set();
+  private selectionBarEl!: HTMLElement;
+  private selectionCountEl!: HTMLElement;
+  private selectionNormalActionsEl!: HTMLElement;
+  private selectionConfirmActionsEl!: HTMLElement;
+  private selectionConfirmTextEl!: HTMLElement;
 
   // Modal de Definições Mínimas
   private settingsModalEl!: HTMLElement;
@@ -273,8 +284,8 @@ export class ChatUI {
     this.chatViewEl.appendChild(this.msgListEl);
 
     // Formulário de envio
-    const sendForm = document.createElement('form');
-    sendForm.className = 'ttm-send-form';
+    this.sendFormEl = document.createElement('form');
+    this.sendFormEl.className = 'ttm-send-form';
 
     this.msgInputEl = document.createElement('input');
     this.msgInputEl.type = 'text';
@@ -303,10 +314,10 @@ export class ChatUI {
     inputRow.appendChild(this.msgInputEl);
     inputRow.appendChild(sendBtn);
 
-    sendForm.appendChild(inputRow);
-    sendForm.appendChild(this.charCountEl);
+    this.sendFormEl.appendChild(inputRow);
+    this.sendFormEl.appendChild(this.charCountEl);
 
-    sendForm.addEventListener('submit', (e) => {
+    this.sendFormEl.addEventListener('submit', (e) => {
       e.preventDefault();
       const text = this.msgInputEl.value;
       if (!text.trim()) return;
@@ -316,7 +327,99 @@ export class ChatUI {
       this.msgInputEl.focus();
     });
 
-    this.chatViewEl.appendChild(sendForm);
+    // Barra Mínima de Seleção Ultraleve
+    this.selectionBarEl = document.createElement('div');
+    this.selectionBarEl.className = 'ttm-selection-bar';
+    this.selectionBarEl.style.display = 'none';
+
+    // 1. Linha normal de seleção: N selecionadas | todas | Apagar | Cancelar
+    this.selectionNormalActionsEl = document.createElement('div');
+    this.selectionNormalActionsEl.className = 'ttm-selection-normal-row';
+
+    const selInfoCol = document.createElement('div');
+    selInfoCol.className = 'ttm-selection-info-col';
+
+    this.selectionCountEl = document.createElement('span');
+    this.selectionCountEl.className = 'ttm-selection-count';
+    this.selectionCountEl.textContent = '0 selecionadas';
+    selInfoCol.appendChild(this.selectionCountEl);
+
+    const selBtnGroup = document.createElement('div');
+    selBtnGroup.className = 'ttm-selection-btn-group';
+
+    const selectAllBtn = document.createElement('button');
+    selectAllBtn.type = 'button';
+    selectAllBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-sel-all';
+    selectAllBtn.textContent = 'todas';
+    selectAllBtn.title = 'Alternar seleção de todas as mensagens';
+    selectAllBtn.addEventListener('click', () => {
+      this.toggleSelectAll();
+    });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'ttm-btn ttm-btn-danger ttm-btn-sel-del';
+    deleteBtn.textContent = 'Apagar';
+    deleteBtn.title = 'Apagar mensagens selecionadas apenas deste dispositivo';
+    deleteBtn.addEventListener('click', () => {
+      this.showDeleteConfirmation();
+    });
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-sel-cancel';
+    cancelBtn.textContent = 'Cancelar';
+    cancelBtn.title = 'Cancelar modo de seleção';
+    cancelBtn.addEventListener('click', () => {
+      this.exitSelectionMode();
+    });
+
+    selBtnGroup.appendChild(selectAllBtn);
+    selBtnGroup.appendChild(deleteBtn);
+    selBtnGroup.appendChild(cancelBtn);
+
+    this.selectionNormalActionsEl.appendChild(selInfoCol);
+    this.selectionNormalActionsEl.appendChild(selBtnGroup);
+
+    // 2. Linha de confirmação pequena: Apagar N mensagens deste dispositivo? [Sim, apagar] [Voltar]
+    this.selectionConfirmActionsEl = document.createElement('div');
+    this.selectionConfirmActionsEl.className = 'ttm-selection-confirm-row';
+    this.selectionConfirmActionsEl.style.display = 'none';
+
+    this.selectionConfirmTextEl = document.createElement('span');
+    this.selectionConfirmTextEl.className = 'ttm-selection-confirm-text';
+    this.selectionConfirmTextEl.textContent = 'Apagar deste dispositivo?';
+
+    const confirmBtnGroup = document.createElement('div');
+    confirmBtnGroup.className = 'ttm-selection-btn-group';
+
+    const confirmYesBtn = document.createElement('button');
+    confirmYesBtn.type = 'button';
+    confirmYesBtn.className = 'ttm-btn ttm-btn-danger ttm-btn-confirm-yes';
+    confirmYesBtn.textContent = 'Sim, apagar';
+    confirmYesBtn.addEventListener('click', () => {
+      this.confirmDeleteSelected();
+    });
+
+    const confirmNoBtn = document.createElement('button');
+    confirmNoBtn.type = 'button';
+    confirmNoBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-confirm-no';
+    confirmNoBtn.textContent = 'Voltar';
+    confirmNoBtn.addEventListener('click', () => {
+      this.hideDeleteConfirmation();
+    });
+
+    confirmBtnGroup.appendChild(confirmYesBtn);
+    confirmBtnGroup.appendChild(confirmNoBtn);
+
+    this.selectionConfirmActionsEl.appendChild(this.selectionConfirmTextEl);
+    this.selectionConfirmActionsEl.appendChild(confirmBtnGroup);
+
+    this.selectionBarEl.appendChild(this.selectionNormalActionsEl);
+    this.selectionBarEl.appendChild(this.selectionConfirmActionsEl);
+
+    this.chatViewEl.appendChild(this.sendFormEl);
+    this.chatViewEl.appendChild(this.selectionBarEl);
   }
 
   /**
@@ -481,6 +584,7 @@ export class ChatUI {
   }
 
   public showCalculatorView(): void {
+    this.exitSelectionMode();
     this.closeSettingsModal();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
@@ -619,6 +723,14 @@ export class ChatUI {
       rowEl.classList.add('ttm-msg-maezinha');
     }
 
+    if (this.isSelectionMode && this.selectedMessageIds.has(msg.messageId)) {
+      rowEl.classList.add('ttm-msg-selected');
+    }
+
+    const checkSpan = document.createElement('span');
+    checkSpan.className = 'msg-check';
+    checkSpan.textContent = '✓ ';
+
     const timeSpan = document.createElement('span');
     timeSpan.className = 'msg-time';
     timeSpan.textContent = `[${formatTime(msg.createdAt)}] `;
@@ -637,12 +749,15 @@ export class ChatUI {
     statusSpan.setAttribute('data-status', statusInfo.dataStatus);
     if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
 
+    rowEl.appendChild(checkSpan);
     rowEl.appendChild(timeSpan);
     rowEl.appendChild(senderSpan);
     rowEl.appendChild(textSpan);
     if (isSelf) {
       rowEl.appendChild(statusSpan);
     }
+
+    this.attachMessageSelectionHandlers(rowEl, msg.messageId);
 
     this.msgListEl.appendChild(rowEl);
     this.renderedMessageIds.add(msg.messageId);
@@ -675,6 +790,14 @@ export class ChatUI {
         rowEl.classList.add('ttm-msg-maezinha');
       }
 
+      if (this.isSelectionMode && this.selectedMessageIds.has(msg.messageId)) {
+        rowEl.classList.add('ttm-msg-selected');
+      }
+
+      const checkSpan = document.createElement('span');
+      checkSpan.className = 'msg-check';
+      checkSpan.textContent = '✓ ';
+
       const timeSpan = document.createElement('span');
       timeSpan.className = 'msg-time';
       timeSpan.textContent = `[${formatTime(msg.createdAt)}] `;
@@ -693,6 +816,7 @@ export class ChatUI {
       statusSpan.setAttribute('data-status', statusInfo.dataStatus);
       if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
 
+      rowEl.appendChild(checkSpan);
       rowEl.appendChild(timeSpan);
       rowEl.appendChild(senderSpan);
       rowEl.appendChild(textSpan);
@@ -700,12 +824,271 @@ export class ChatUI {
         rowEl.appendChild(statusSpan);
       }
 
+      this.attachMessageSelectionHandlers(rowEl, msg.messageId);
+
       fragment.appendChild(rowEl);
       this.renderedMessageIds.add(msg.messageId);
     });
 
     this.msgListEl.insertBefore(fragment, this.msgListEl.firstChild);
     this.msgListEl.scrollTop = this.msgListEl.scrollHeight - previousHeight;
+  }
+
+  /**
+   * Vincula detecção de long-press (~500ms) e alternância de seleção
+   */
+  private attachMessageSelectionHandlers(rowEl: HTMLElement, messageId: string): void {
+    let touchStartTime = 0;
+    let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+    let touchStartX = 0;
+    let touchStartY = 0;
+
+    const cancelTimer = () => {
+      if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+    };
+
+    // Mobile touch
+    rowEl.addEventListener(
+      'touchstart',
+      (e: TouchEvent) => {
+        if (e.touches.length > 1) {
+          cancelTimer();
+          return;
+        }
+        const touch = e.touches[0];
+        touchStartX = touch.clientX;
+        touchStartY = touch.clientY;
+        touchStartTime = Date.now();
+
+        cancelTimer();
+        if (!this.isSelectionMode) {
+          longPressTimer = setTimeout(() => {
+            this.enterSelectionMode(messageId);
+            try {
+              if (typeof navigator !== 'undefined' && navigator.vibrate) {
+                navigator.vibrate(40);
+              }
+            } catch {
+              // Silencioso se vibração não permitida
+            }
+          }, 500);
+        }
+      },
+      { passive: true }
+    );
+
+    rowEl.addEventListener(
+      'touchmove',
+      (e: TouchEvent) => {
+        if (!longPressTimer) return;
+        const touch = e.touches[0];
+        const dx = Math.abs(touch.clientX - touchStartX);
+        const dy = Math.abs(touch.clientY - touchStartY);
+        if (dx > 10 || dy > 10) {
+          // Deslocamento de scroll: cancela long-press para não atrapalhar a rolagem
+          cancelTimer();
+        }
+      },
+      { passive: true }
+    );
+
+    rowEl.addEventListener('touchend', () => {
+      cancelTimer();
+      if (this.isSelectionMode) {
+        // No modo de seleção, tocar na mensagem faz toggle
+        this.toggleMessageSelection(messageId);
+      }
+    });
+
+    rowEl.addEventListener('touchcancel', cancelTimer);
+
+    // Desktop mouse
+    rowEl.addEventListener('mousedown', (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      cancelTimer();
+      if (!this.isSelectionMode) {
+        longPressTimer = setTimeout(() => {
+          this.enterSelectionMode(messageId);
+        }, 500);
+      }
+    });
+
+    rowEl.addEventListener('mousemove', () => {
+      cancelTimer();
+    });
+
+    rowEl.addEventListener('mouseup', () => {
+      cancelTimer();
+    });
+
+    rowEl.addEventListener('click', (e: MouseEvent) => {
+      if (this.isSelectionMode) {
+        e.preventDefault();
+        this.toggleMessageSelection(messageId);
+      }
+    });
+
+    // Evita menu contextual nativo durante toque longo
+    rowEl.addEventListener('contextmenu', (e: MouseEvent) => {
+      if (this.isSelectionMode || Date.now() - touchStartTime < 800) {
+        e.preventDefault();
+      }
+    });
+  }
+
+  public enterSelectionMode(initialMessageId: string): void {
+    this.isSelectionMode = true;
+    this.selectedMessageIds.clear();
+    this.selectedMessageIds.add(initialMessageId);
+
+    this.msgListEl.classList.add('ttm-selecting-mode');
+
+    // Marca linha inicial
+    const row = document.getElementById(`ttm-msg-${initialMessageId}`);
+    if (row) {
+      row.classList.add('ttm-msg-selected');
+    }
+
+    // Salva texto atual da sala no cabeçalho
+    if (!this.roomInfoEl.hasAttribute('data-original-info')) {
+      this.roomInfoEl.setAttribute('data-original-info', this.roomInfoEl.textContent || '');
+    }
+
+    this.sendFormEl.style.display = 'none';
+    this.selectionBarEl.style.display = 'block';
+    this.hideDeleteConfirmation();
+
+    this.updateSelectionCountUI();
+  }
+
+  public toggleMessageSelection(messageId: string): void {
+    if (this.selectedMessageIds.has(messageId)) {
+      this.selectedMessageIds.delete(messageId);
+    } else {
+      this.selectedMessageIds.add(messageId);
+    }
+
+    const row = document.getElementById(`ttm-msg-${messageId}`);
+    if (row) {
+      if (this.selectedMessageIds.has(messageId)) {
+        row.classList.add('ttm-msg-selected');
+      } else {
+        row.classList.remove('ttm-msg-selected');
+      }
+    }
+
+    this.updateSelectionCountUI();
+  }
+
+  public toggleSelectAll(): void {
+    const allRendered = Array.from(this.renderedMessageIds);
+    if (allRendered.length === 0) return;
+
+    if (this.selectedMessageIds.size === allRendered.length) {
+      // Já estavam todas selecionadas: desseleciona tudo
+      this.selectedMessageIds.clear();
+      this.msgListEl.querySelectorAll('.ttm-msg-selected').forEach((el) => {
+        el.classList.remove('ttm-msg-selected');
+      });
+    } else {
+      // Seleciona todas
+      allRendered.forEach((id) => this.selectedMessageIds.add(id));
+      allRendered.forEach((id) => {
+        const row = document.getElementById(`ttm-msg-${id}`);
+        if (row) row.classList.add('ttm-msg-selected');
+      });
+    }
+
+    this.updateSelectionCountUI();
+  }
+
+  private updateSelectionCountUI(): void {
+    const count = this.selectedMessageIds.size;
+    const text = count === 1 ? '1 selecionada' : `${count} selecionadas`;
+    this.selectionCountEl.textContent = text;
+    this.roomInfoEl.textContent = `${text}`;
+  }
+
+  private showDeleteConfirmation(): void {
+    const count = this.selectedMessageIds.size;
+    if (count === 0) {
+      this.showTemporaryNotice('Selecione ao menos 1 mensagem.');
+      return;
+    }
+
+    this.selectionConfirmTextEl.textContent =
+      count === 1
+        ? 'Apagar 1 mensagem deste dispositivo?'
+        : `Apagar ${count} mensagens deste dispositivo?`;
+
+    this.selectionNormalActionsEl.style.display = 'none';
+    this.selectionConfirmActionsEl.style.display = 'flex';
+  }
+
+  private hideDeleteConfirmation(): void {
+    this.selectionConfirmActionsEl.style.display = 'none';
+    this.selectionNormalActionsEl.style.display = 'flex';
+  }
+
+  private confirmDeleteSelected(): void {
+    const ids = Array.from(this.selectedMessageIds);
+    if (ids.length > 0) {
+      if (this.events.onDeleteMessagesLocally) {
+        this.events.onDeleteMessagesLocally(ids);
+      }
+      this.removeMessages(ids);
+    }
+    this.exitSelectionMode();
+  }
+
+  public exitSelectionMode(): void {
+    this.isSelectionMode = false;
+    this.selectedMessageIds.clear();
+
+    this.msgListEl.classList.remove('ttm-selecting-mode');
+
+    // Remove classes visuais
+    const selectedRows = this.msgListEl.querySelectorAll('.ttm-msg-selected');
+    selectedRows.forEach((el) => el.classList.remove('ttm-msg-selected'));
+
+    this.selectionBarEl.style.display = 'none';
+    this.sendFormEl.style.display = 'block';
+    this.hideDeleteConfirmation();
+
+    const originalText = this.roomInfoEl.getAttribute('data-original-info');
+    if (originalText !== null) {
+      this.roomInfoEl.textContent = originalText;
+      this.roomInfoEl.removeAttribute('data-original-info');
+    }
+  }
+
+  public removeMessages(messageIds: string[]): void {
+    messageIds.forEach((id) => {
+      this.renderedMessageIds.delete(id);
+      this.renderedMessages.delete(id);
+      const row = document.getElementById(`ttm-msg-${id}`);
+      if (row) {
+        row.style.opacity = '0';
+        row.style.transform = 'scale(0.96)';
+        row.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+        setTimeout(() => {
+          if (row.parentNode) {
+            row.parentNode.removeChild(row);
+          }
+        }, 200);
+      }
+    });
+  }
+
+  public getIsSelectionMode(): boolean {
+    return this.isSelectionMode;
+  }
+
+  public getSelectedMessageIds(): string[] {
+    return Array.from(this.selectedMessageIds);
   }
 
   public scrollToBottom(): void {

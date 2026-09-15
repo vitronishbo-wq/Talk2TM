@@ -45,6 +45,11 @@ export async function getLocalDB(): Promise<IDBDatabase> {
  * Salva ou atualiza uma mensagem localmente garantindo idempotência
  */
 export async function saveLocalMessage(msg: Message): Promise<void> {
+  // Se a mensagem foi marcada como ocultada/apagada localmente neste dispositivo, ignora
+  if (isMessageHiddenLocally(msg.room, msg.messageId)) {
+    return;
+  }
+
   const db = await getLocalDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readwrite');
@@ -56,10 +61,68 @@ export async function saveLocalMessage(msg: Message): Promise<void> {
 }
 
 /**
+ * Tombstone local: Mensagens apagadas apenas neste dispositivo
+ */
+const HIDDEN_KEY_PREFIX = 'talk2tm_hidden_';
+
+export function getHiddenMessageIds(roomId: string): Set<string> {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(`${HIDDEN_KEY_PREFIX}${roomId}`);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          return new Set(arr);
+        }
+      }
+    }
+  } catch {
+    // Falha silenciosa se armazenamento restrito
+  }
+  return new Set();
+}
+
+export function hideMessagesLocally(roomId: string, messageIds: string[]): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const currentSet = getHiddenMessageIds(roomId);
+      messageIds.forEach((id) => currentSet.add(id));
+      window.localStorage.setItem(
+        `${HIDDEN_KEY_PREFIX}${roomId}`,
+        JSON.stringify(Array.from(currentSet))
+      );
+    }
+  } catch (err) {
+    console.debug('Talk2TM [Storage]: Erro ao salvar tombstone local:', err);
+  }
+}
+
+export function isMessageHiddenLocally(roomId: string, messageId: string): boolean {
+  return getHiddenMessageIds(roomId).has(messageId);
+}
+
+/**
+ * Remove mensagens da tabela de mensagens do IndexedDB local
+ */
+export async function deleteLocalMessages(messageIds: string[]): Promise<void> {
+  if (messageIds.length === 0) return;
+  const db = await getLocalDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('messages', 'readwrite');
+    const store = tx.objectStore('messages');
+    messageIds.forEach((id) => store.delete(id));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
  * Recupera as últimas N mensagens de uma sala em ordem cronológica (Camada 11)
  */
 export async function getLocalMessages(roomId: string, limitCount = 50): Promise<Message[]> {
   const db = await getLocalDB();
+  const hiddenSet = getHiddenMessageIds(roomId);
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readonly');
     const store = tx.objectStore('messages');
@@ -73,7 +136,10 @@ export async function getLocalMessages(roomId: string, limitCount = 50): Promise
     request.onsuccess = (event) => {
       const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
       if (cursor && list.length < limitCount) {
-        list.push(cursor.value);
+        const msg = cursor.value;
+        if (!hiddenSet.has(msg.messageId)) {
+          list.push(msg);
+        }
         cursor.continue();
       } else {
         // Ordena cronologicamente (mais antiga para mais recente para leitura linear)
@@ -94,6 +160,8 @@ export async function getOlderLocalMessages(
   limitCount = 50
 ): Promise<Message[]> {
   const db = await getLocalDB();
+  const hiddenSet = getHiddenMessageIds(roomId);
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readonly');
     const store = tx.objectStore('messages');
@@ -107,7 +175,10 @@ export async function getOlderLocalMessages(
     request.onsuccess = (event) => {
       const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
       if (cursor && list.length < limitCount) {
-        list.push(cursor.value);
+        const msg = cursor.value;
+        if (!hiddenSet.has(msg.messageId)) {
+          list.push(msg);
+        }
         cursor.continue();
       } else {
         resolve(list.reverse());
