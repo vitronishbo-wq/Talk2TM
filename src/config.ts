@@ -29,15 +29,17 @@ export const ACCESS_CONFIG = {
  * Credenciais pré-provisionadas para autenticação silenciosa no Firebase Auth
  * Mapeadas de forma opaca aos PINs de entrada.
  */
-export const USER_AUTH_CREDENTIALS: Record<AllowedUser, { email: string; pass: string; fallbackUid: string }> = {
+export const USER_AUTH_CREDENTIALS: Record<AllowedUser, { email: string; pass: string; pinPass: string; fallbackUid: string }> = {
   Truman: {
     email: 'truman@talk2tm.internal',
     pass: 'Truman#852456!Sec',
+    pinPass: '852456',
     fallbackUid: 'uid_truman_852456',
   },
   Mãezinha: {
     email: 'maezinha@talk2tm.internal',
     pass: 'Maezinha#135790!Sec',
+    pinPass: '135790',
     fallbackUid: 'uid_maezinha_135790',
   },
 };

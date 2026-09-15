@@ -1,4 +1,3 @@
-```yaml
 name: Deploy to Firebase (Hosting & Firestore)
 
 on:
@@ -28,7 +27,7 @@ jobs:
       - name: Build Production Bundle
         run: npm run build
         env:
-          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY || 'AIzaSyCfwTvVhyrRZHk4zzzRweShyVdMnimnzm' }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY || 'AIzaSyCfwTvVhyrRZHk4zzzRweShyVdMnimnzm0' }}
           VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN || 'gen-lang-client-0618196986.firebaseapp.com' }}
           VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID || 'gen-lang-client-0618196986' }}
           VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET || 'gen-lang-client-0618196986.firebasestorage.app' }}
@@ -42,4 +41,3 @@ jobs:
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           channelId: live
           projectId: 'gen-lang-client-0618196986'
-```

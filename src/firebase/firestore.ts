@@ -262,7 +262,23 @@ export async function silentAuthenticateWithEmail(userType: AllowedUser): Promis
         // continua se persistência já ativa
       }
 
-      const result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
+      let result;
+      try {
+        // Tenta autenticar primeiro com a senha de 6 dígitos correspondente ao PIN cadastrado no console
+        result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pinPass);
+      } catch (pinErr: any) {
+        if (
+          pinErr?.code === 'auth/invalid-credential' ||
+          pinErr?.code === 'auth/wrong-password' ||
+          String(pinErr?.message || '').includes('INVALID_LOGIN_CREDENTIALS') ||
+          String(pinErr).includes('INVALID_LOGIN_CREDENTIALS')
+        ) {
+          console.debug(`Talk2TM [Auth]: Tentando senha secundária de contingência para ${creds.email}...`);
+          result = await signInWithEmailAndPassword(firebaseAuth!, creds.email, creds.pass);
+        } else {
+          throw pinErr;
+        }
+      }
       activeAuthUser = result.user;
       currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
       console.info(`Talk2TM [Layer 1]: Autenticação silenciosa ativa para ${userType} (UID: ${result.user.uid}).`);
