@@ -59,6 +59,93 @@ html, body {
   overflow: hidden;
 }
 
+/* Notificação Fina de Instalação PWA */
+.ttm-pwa-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  min-height: 34px;
+  background-color: #12161f;
+  border-bottom: 1px solid #242b35;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.2;
+  z-index: 99;
+  animation: pwaSlideDown 0.25s ease-out;
+}
+
+.ttm-pwa-bar.ttm-pwa-bar-hiding {
+  opacity: 0;
+  transform: translateY(-100%);
+  transition: all 0.2s ease-in;
+}
+
+@keyframes pwaSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ttm-pwa-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+
+.ttm-pwa-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ttm-pwa-btn {
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.ttm-pwa-btn-install {
+  background-color: var(--accent-blue);
+  color: #0d1117;
+}
+
+.ttm-pwa-btn-install:active {
+  transform: scale(0.96);
+  filter: brightness(0.9);
+}
+
+.ttm-pwa-btn-continue {
+  background-color: transparent;
+  color: #64748b;
+  border: 1px solid #334155;
+}
+
+.ttm-pwa-btn-continue:hover {
+  color: #cbd5e1;
+  border-color: #475569;
+}
+
+.ttm-pwa-btn-continue:active {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
 /* =========================================================
    1. CAMUFLAGEM: CALCULADORA MÓVEL ULTRAMINIMALISTA
    ========================================================= */

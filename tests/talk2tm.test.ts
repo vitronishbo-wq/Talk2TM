@@ -20,6 +20,17 @@ import {
   waitForAuthCompletion,
   sendFirestoreMessage,
 } from '../src/firebase/firestore';
+import {
+  PWA_PROMPT_VERSION,
+  PWA_STORAGE_KEY,
+  PWA_COOLDOWNS,
+  getPWAState,
+  savePWAState,
+  shouldShowPWAPrompt,
+  isStandaloneMode,
+  isAppleMobileDevice,
+  PWAPromptBar,
+} from '../src/ui/pwa-prompt';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -263,6 +274,135 @@ export function runTalk2TMTests(): { passed: number; total: number } {
   // 18. Camada 4 — Guarda de Envio no Firestore sem identidade válida
   check('Firestore: sendFirestoreMessage rejeita quando unauthenticated ou anônimo', async () => {
     assert(typeof sendFirestoreMessage === 'function', 'sendFirestoreMessage deve ser função exportada');
+  });
+
+  // 19. PWA Storage: Fallback em memória e persistência com versão
+  check('PWA Storage: Operação segura e versionamento talk2tm_pwa_prompt_v1', () => {
+    const memoryStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    assert(PWA_STORAGE_KEY === 'talk2tm_pwa_prompt_v1', 'Chave deve ser versionada com v1');
+
+    const initialState = getPWAState(mockStorage);
+    assert(initialState.decision === 'unprompted', 'Estado inicial deve ser unprompted');
+    assert(initialState.version === PWA_PROMPT_VERSION, 'Versão do estado deve corresponder');
+
+    savePWAState({ decision: 'continued', timestamp: 1000 }, mockStorage);
+    const savedState = getPWAState(mockStorage);
+    assert(savedState.decision === 'continued', 'Decisão deve persistir no storage');
+    assert(savedState.timestamp === 1000, 'Timestamp deve persistir no storage');
+  });
+
+  // 20. PWA Standalone Mode: Nunca exibe prompt e marca installed
+  check('PWA Standalone: Quando executando como PWA, não exibe prompt e marca installed', () => {
+    const memoryStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    // Forçando standalone = true
+    const shouldShow = shouldShowPWAPrompt(Date.now(), mockStorage, true);
+    assert(shouldShow === false, 'Não deve exibir prompt em modo standalone');
+
+    const state = getPWAState(mockStorage);
+    assert(state.decision === 'installed', 'Detectar standalone deve persistir decision installed');
+
+    // Uma vez installed, mesmo sem flag standalone o prompt nunca mais reaparece
+    const shouldShowAfter = shouldShowPWAPrompt(Date.now(), mockStorage, false);
+    assert(shouldShowAfter === false, 'Estado installed impede reexibição');
+  });
+
+  // 21. PWA Continuar: Cooldown suave de 7 dias
+  check('PWA Cooldown: Continuar bloqueia exibição por 7 dias e libera após', () => {
+    const memoryStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    const t0 = 1000000000000;
+    savePWAState({ decision: 'continued', timestamp: t0 }, mockStorage);
+
+    // 6 dias depois: ainda em cooldown
+    const t6Days = t0 + (6 * 24 * 60 * 60 * 1000);
+    assert(shouldShowPWAPrompt(t6Days, mockStorage, false) === false, '6 dias após continuar deve continuar em cooldown');
+
+    // 7 dias e 1 segundo depois: cooldown expirado
+    const t7DaysPlus = t0 + PWA_COOLDOWNS.CONTINUED_MS + 1000;
+    assert(shouldShowPWAPrompt(t7DaysPlus, mockStorage, false) === true, 'Após 7 dias deve liberar exibição');
+  });
+
+  // 22. PWA Recusado: Cooldown longo de 14 dias
+  check('PWA Cooldown: Dismissed nativo bloqueia por 14 dias e libera após', () => {
+    const memoryStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    const t0 = 1000000000000;
+    savePWAState({ decision: 'dismissed', timestamp: t0 }, mockStorage);
+
+    // 13 dias depois: ainda em cooldown
+    const t13Days = t0 + (13 * 24 * 60 * 60 * 1000);
+    assert(shouldShowPWAPrompt(t13Days, mockStorage, false) === false, '13 dias após dismissed deve continuar em cooldown');
+
+    // 14 dias e 1 segundo depois: cooldown expirado
+    const t14DaysPlus = t0 + PWA_COOLDOWNS.DISMISSED_MS + 1000;
+    assert(shouldShowPWAPrompt(t14DaysPlus, mockStorage, false) === true, 'Após 14 dias deve liberar exibição');
+  });
+
+  // 23. PWA Instalação Aceita: Transição accepted → install_pending e appinstalled → installed
+  check('PWA Transições de Estado: accepted marca install_pending e finalização marca installed', () => {
+    const memoryStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    const now = 2000000000000;
+    savePWAState({ decision: 'install_pending', timestamp: now }, mockStorage);
+    assert(getPWAState(mockStorage).decision === 'install_pending', 'Estado intermediário registrado');
+
+    // Durante as 24h de pending, não re-exibe
+    assert(shouldShowPWAPrompt(now + 1000, mockStorage, false) === false, 'Install pending bloqueia reexibição imediata');
+
+    // Conclusão com appinstalled
+    savePWAState({ decision: 'installed', timestamp: now + 5000 }, mockStorage);
+    assert(getPWAState(mockStorage).decision === 'installed', 'Conclusão confirmada como installed');
+    assert(shouldShowPWAPrompt(now + 999999999, mockStorage, false) === false, 'Installed nunca mais reexibe');
+  });
+
+  // 24. PWA Versionamento: Chaves legadas ou versões antigas são migradas sem travar
+  check('PWA Versionamento: Dados com versão antiga são descartados elegantemente', () => {
+    const memoryStore: Record<string, string> = {
+      [PWA_STORAGE_KEY]: JSON.stringify({ version: 'v0_old', decision: 'continued', timestamp: 9999 }),
+    };
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    const state = getPWAState(mockStorage);
+    assert(state.decision === 'unprompted', 'Versão anterior deve resetar para unprompted');
+    assert(state.version === PWA_PROMPT_VERSION, 'Estado deve adotar a nova versão');
+  });
+
+  // 25. Assinatura da Classe PWAPromptBar e detecção de dispositivos
+  check('PWA Component: Assinaturas de PWAPromptBar, isStandaloneMode e isAppleMobileDevice', () => {
+    assert(typeof PWAPromptBar === 'function', 'PWAPromptBar deve ser uma classe exportada');
+    assert(typeof isStandaloneMode === 'function', 'isStandaloneMode deve ser função exportada');
+    assert(typeof isAppleMobileDevice === 'function', 'isAppleMobileDevice deve ser função exportada');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);

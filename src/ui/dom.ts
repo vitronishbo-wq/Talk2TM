@@ -3,6 +3,7 @@ import { AppSettings, getUserByPin, AllowedUser } from '../config';
 import { formatTime } from '../utils/sanitize';
 import { MobileCalculator } from './calculator';
 import { getPartnerLastRead } from '../firebase/firestore';
+import { PWAPromptBar } from './pwa-prompt';
 
 export interface UIEvents {
   onUnlockByPin: (pin: string) => void;
@@ -66,6 +67,9 @@ export class ChatUI {
     this.appWrapper = document.createElement('div');
     this.appWrapper.id = 'talk2tm-app';
     this.appWrapper.className = 'talk2tm-shell';
+
+    // Notificação Fina de Instalação PWA
+    new PWAPromptBar(this.appWrapper);
 
     // 1. Calculadora Camuflada com teclado universal
     this.calculator = new MobileCalculator(this.appWrapper, {
