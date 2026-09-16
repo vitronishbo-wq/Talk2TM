@@ -42,14 +42,13 @@ export class ChatUI {
   private loadOlderBtn!: HTMLButtonElement;
   private sendFormEl!: HTMLFormElement;
 
-  // Modo de Seleção e Exclusão Local
+  // Modo de Seleção e Exclusão Local Minimalista (1 a 1 + Apagar + Clicar fora para cancelar)
   private isSelectionMode: boolean = false;
   private selectedMessageIds: Set<string> = new Set();
   private selectionBarEl!: HTMLElement;
-  private selectionCountEl!: HTMLElement;
-  private selectionNormalActionsEl!: HTMLElement;
-  private selectionConfirmActionsEl!: HTMLElement;
-  private selectionConfirmTextEl!: HTMLElement;
+  private deleteBtnEl!: HTMLButtonElement;
+  private isConfirmPending: boolean = false;
+  private confirmTimerId: ReturnType<typeof setTimeout> | null = null;
 
   // Modal de Definições Mínimas
   private settingsModalEl!: HTMLElement;
@@ -283,6 +282,23 @@ export class ChatUI {
     this.msgListEl.className = 'ttm-msg-list';
     this.chatViewEl.appendChild(this.msgListEl);
 
+    // Cancelamento ultra-minimalista: clicar fora das mensagens encerra o modo de seleção
+    this.msgListEl.addEventListener('click', (e) => {
+      if (!this.isSelectionMode) return;
+      // Se clicou na área vazia da lista (não numa linha de mensagem)
+      const target = e.target as HTMLElement | null;
+      if (target && !target.closest('.ttm-msg-row')) {
+        this.exitSelectionMode();
+      }
+    });
+
+    // Tecla ESC para cancelar seleção
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.isSelectionMode) {
+        this.exitSelectionMode();
+      }
+    });
+
     // Formulário de envio
     this.sendFormEl = document.createElement('form');
     this.sendFormEl.className = 'ttm-send-form';
@@ -327,96 +343,22 @@ export class ChatUI {
       this.msgInputEl.focus();
     });
 
-    // Barra Mínima de Seleção Ultraleve
+    // Barra Ultra-Minimalista: Apenas botão direto 'Apagar' (ou 'Confirmar?')
     this.selectionBarEl = document.createElement('div');
     this.selectionBarEl.className = 'ttm-selection-bar';
     this.selectionBarEl.style.display = 'none';
 
-    // 1. Linha normal de seleção: N selecionadas | todas | Apagar | Cancelar
-    this.selectionNormalActionsEl = document.createElement('div');
-    this.selectionNormalActionsEl.className = 'ttm-selection-normal-row';
-
-    const selInfoCol = document.createElement('div');
-    selInfoCol.className = 'ttm-selection-info-col';
-
-    this.selectionCountEl = document.createElement('span');
-    this.selectionCountEl.className = 'ttm-selection-count';
-    this.selectionCountEl.textContent = '0 selecionadas';
-    selInfoCol.appendChild(this.selectionCountEl);
-
-    const selBtnGroup = document.createElement('div');
-    selBtnGroup.className = 'ttm-selection-btn-group';
-
-    const selectAllBtn = document.createElement('button');
-    selectAllBtn.type = 'button';
-    selectAllBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-sel-all';
-    selectAllBtn.textContent = 'todas';
-    selectAllBtn.title = 'Alternar seleção de todas as mensagens';
-    selectAllBtn.addEventListener('click', () => {
-      this.toggleSelectAll();
+    this.deleteBtnEl = document.createElement('button');
+    this.deleteBtnEl.type = 'button';
+    this.deleteBtnEl.className = 'ttm-btn ttm-btn-compact-del';
+    this.deleteBtnEl.textContent = 'Apagar';
+    this.deleteBtnEl.title = 'Toque para confirmar a exclusão deste dispositivo';
+    this.deleteBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.handleDeleteBtnClick();
     });
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'ttm-btn ttm-btn-danger ttm-btn-sel-del';
-    deleteBtn.textContent = 'Apagar';
-    deleteBtn.title = 'Apagar mensagens selecionadas apenas deste dispositivo';
-    deleteBtn.addEventListener('click', () => {
-      this.showDeleteConfirmation();
-    });
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-sel-cancel';
-    cancelBtn.textContent = 'Cancelar';
-    cancelBtn.title = 'Cancelar modo de seleção';
-    cancelBtn.addEventListener('click', () => {
-      this.exitSelectionMode();
-    });
-
-    selBtnGroup.appendChild(selectAllBtn);
-    selBtnGroup.appendChild(deleteBtn);
-    selBtnGroup.appendChild(cancelBtn);
-
-    this.selectionNormalActionsEl.appendChild(selInfoCol);
-    this.selectionNormalActionsEl.appendChild(selBtnGroup);
-
-    // 2. Linha de confirmação pequena: Apagar N mensagens deste dispositivo? [Sim, apagar] [Voltar]
-    this.selectionConfirmActionsEl = document.createElement('div');
-    this.selectionConfirmActionsEl.className = 'ttm-selection-confirm-row';
-    this.selectionConfirmActionsEl.style.display = 'none';
-
-    this.selectionConfirmTextEl = document.createElement('span');
-    this.selectionConfirmTextEl.className = 'ttm-selection-confirm-text';
-    this.selectionConfirmTextEl.textContent = 'Apagar deste dispositivo?';
-
-    const confirmBtnGroup = document.createElement('div');
-    confirmBtnGroup.className = 'ttm-selection-btn-group';
-
-    const confirmYesBtn = document.createElement('button');
-    confirmYesBtn.type = 'button';
-    confirmYesBtn.className = 'ttm-btn ttm-btn-danger ttm-btn-confirm-yes';
-    confirmYesBtn.textContent = 'Sim, apagar';
-    confirmYesBtn.addEventListener('click', () => {
-      this.confirmDeleteSelected();
-    });
-
-    const confirmNoBtn = document.createElement('button');
-    confirmNoBtn.type = 'button';
-    confirmNoBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-confirm-no';
-    confirmNoBtn.textContent = 'Voltar';
-    confirmNoBtn.addEventListener('click', () => {
-      this.hideDeleteConfirmation();
-    });
-
-    confirmBtnGroup.appendChild(confirmYesBtn);
-    confirmBtnGroup.appendChild(confirmNoBtn);
-
-    this.selectionConfirmActionsEl.appendChild(this.selectionConfirmTextEl);
-    this.selectionConfirmActionsEl.appendChild(confirmBtnGroup);
-
-    this.selectionBarEl.appendChild(this.selectionNormalActionsEl);
-    this.selectionBarEl.appendChild(this.selectionConfirmActionsEl);
+    this.selectionBarEl.appendChild(this.deleteBtnEl);
 
     this.chatViewEl.appendChild(this.sendFormEl);
     this.chatViewEl.appendChild(this.selectionBarEl);
@@ -998,10 +940,9 @@ export class ChatUI {
     }
 
     this.sendFormEl.style.display = 'none';
-    this.selectionBarEl.style.display = 'block';
-    this.hideDeleteConfirmation();
-
-    this.updateSelectionCountUI();
+    this.selectionBarEl.style.display = 'flex';
+    this.resetDeleteButtonState();
+    this.updateSelectionUI();
   }
 
   public toggleMessageSelection(messageId: string): void {
@@ -1020,57 +961,61 @@ export class ChatUI {
       }
     }
 
-    this.updateSelectionCountUI();
-  }
-
-  public toggleSelectAll(): void {
-    const allRendered = Array.from(this.renderedMessageIds);
-    if (allRendered.length === 0) return;
-
-    if (this.selectedMessageIds.size === allRendered.length) {
-      // Já estavam todas selecionadas: desseleciona tudo
-      this.selectedMessageIds.clear();
-      this.msgListEl.querySelectorAll('.ttm-msg-selected').forEach((el) => {
-        el.classList.remove('ttm-msg-selected');
-      });
-    } else {
-      // Seleciona todas
-      allRendered.forEach((id) => this.selectedMessageIds.add(id));
-      allRendered.forEach((id) => {
-        const row = document.getElementById(`ttm-msg-${id}`);
-        if (row) row.classList.add('ttm-msg-selected');
-      });
-    }
-
-    this.updateSelectionCountUI();
-  }
-
-  private updateSelectionCountUI(): void {
-    const count = this.selectedMessageIds.size;
-    const text = count === 1 ? '1 selecionada' : `${count} selecionadas`;
-    this.selectionCountEl.textContent = text;
-    this.roomInfoEl.textContent = `${text}`;
-  }
-
-  private showDeleteConfirmation(): void {
-    const count = this.selectedMessageIds.size;
-    if (count === 0) {
-      this.showTemporaryNotice('Selecione ao menos 1 mensagem.');
+    // Se o usuário desmarcou tudo, sai automaticamente do modo de seleção
+    if (this.selectedMessageIds.size === 0) {
+      this.exitSelectionMode();
       return;
     }
 
-    this.selectionConfirmTextEl.textContent =
-      count === 1
-        ? 'Apagar 1 mensagem deste dispositivo?'
-        : `Apagar ${count} mensagens deste dispositivo?`;
-
-    this.selectionNormalActionsEl.style.display = 'none';
-    this.selectionConfirmActionsEl.style.display = 'flex';
+    this.resetDeleteButtonState();
+    this.updateSelectionUI();
   }
 
-  private hideDeleteConfirmation(): void {
-    this.selectionConfirmActionsEl.style.display = 'none';
-    this.selectionNormalActionsEl.style.display = 'flex';
+  private updateSelectionUI(): void {
+    const count = this.selectedMessageIds.size;
+    const text = count === 1 ? '1 selecionada' : `${count} selecionadas`;
+    this.roomInfoEl.textContent = text;
+
+    if (!this.isConfirmPending) {
+      this.deleteBtnEl.textContent = count > 1 ? `Apagar (${count})` : 'Apagar';
+    }
+  }
+
+  private resetDeleteButtonState(): void {
+    if (this.confirmTimerId) {
+      clearTimeout(this.confirmTimerId);
+      this.confirmTimerId = null;
+    }
+    this.isConfirmPending = false;
+    this.deleteBtnEl.classList.remove('ttm-btn-confirm-state');
+    const count = this.selectedMessageIds.size;
+    this.deleteBtnEl.textContent = count > 1 ? `Apagar (${count})` : 'Apagar';
+  }
+
+  private handleDeleteBtnClick(): void {
+    const count = this.selectedMessageIds.size;
+    if (count === 0) {
+      this.exitSelectionMode();
+      return;
+    }
+
+    if (!this.isConfirmPending) {
+      // Primeiro clique: solicita confirmação discreta sem modal nem botões extras
+      this.isConfirmPending = true;
+      this.deleteBtnEl.classList.add('ttm-btn-confirm-state');
+      this.deleteBtnEl.textContent = count > 1 ? `Confirmar (${count})?` : 'Confirmar?';
+
+      // Auto-reverte para 'Apagar' após 3.5 segundos de inatividade
+      if (this.confirmTimerId) clearTimeout(this.confirmTimerId);
+      this.confirmTimerId = setTimeout(() => {
+        if (this.isSelectionMode && this.isConfirmPending) {
+          this.resetDeleteButtonState();
+        }
+      }, 3500);
+    } else {
+      // Segundo clique: executa exclusão local imediata
+      this.confirmDeleteSelected();
+    }
   }
 
   private confirmDeleteSelected(): void {
@@ -1087,6 +1032,7 @@ export class ChatUI {
   public exitSelectionMode(): void {
     this.isSelectionMode = false;
     this.selectedMessageIds.clear();
+    this.resetDeleteButtonState();
 
     this.msgListEl.classList.remove('ttm-selecting-mode');
 
@@ -1096,7 +1042,6 @@ export class ChatUI {
 
     this.selectionBarEl.style.display = 'none';
     this.sendFormEl.style.display = 'block';
-    this.hideDeleteConfirmation();
 
     const originalText = this.roomInfoEl.getAttribute('data-original-info');
     if (originalText !== null) {
