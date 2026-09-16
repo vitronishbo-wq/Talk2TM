@@ -839,3 +839,48 @@ html, body {
   text-align: center;
   max-width: 90%;
 }
+
+/* =========================================================
+   7. ONBOARDING ULTRALEVE (CRIAR CÓDIGO / PRIMEIRO ACESSO)
+   ========================================================= */
+.ttm-onboarding-box {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)) 20px;
+  justify-content: center;
+  align-items: center;
+  background-color: var(--bg-dark);
+}
+
+.ttm-onboarding-card {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.ttm-code-badge {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--accent-blue);
+  color: var(--accent-blue);
+  font-family: monospace;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding: 12px 20px;
+  border-radius: 8px;
+  margin: 16px 0;
+  text-align: center;
+  user-select: all;
+}
+
+.ttm-onboarding-tip {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  margin-bottom: 20px;
+  line-height: 1.4;
+}
+

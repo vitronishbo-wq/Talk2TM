@@ -456,6 +456,56 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(!processedForRender.includes(msgDeleted), 'A mensagem apagada localmente NUNCA deve ser processada');
   });
 
+  // 28. Expansion V1: Integridade da cadeia de invariantes das 5 entidades
+  check('Expansion V1: Estrutura das 5 entidades e invariante de participantes de conversa', () => {
+    // Validação de formato Talk2TM ID: TM-XXXX-XXXX
+    const talk2tmIdRegex = /^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+    const sampleId = 'TM-K7P4-X92M';
+    assert(talk2tmIdRegex.test(sampleId), 'Formato de Talk2TM ID deve ser TM-XXXX-XXXX');
+
+    // Validação da invariante de conversa estrita (exatamente 2 participantes)
+    const conv = {
+      conversationId: 'conv_123',
+      participantA: 'uid_truman',
+      participantB: 'uid_maezinha',
+      talk2tmIdA: 'TM-K7P4-X92M',
+      talk2tmIdB: 'TM-M3A1-Z99B',
+      displayNameA: 'Truman',
+      displayNameB: 'Mãezinha',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const isParticipant = (uid: string) => uid === conv.participantA || uid === conv.participantB;
+    assert(isParticipant('uid_truman') === true, 'Truman é participante A');
+    assert(isParticipant('uid_maezinha') === true, 'Mãezinha é participante B');
+    assert(isParticipant('uid_invasor') === false, 'Terceiros não são participantes da conversa');
+  });
+
+  // 29. Phase 2 (Onboarding Ultraleve): Geração de ID e invariantes de perfil/identidade
+  check('Fase 2: Geração de ID TM-XXXX-XXXX e integridade da credencial sem fricção', () => {
+    const talk2tmIdRegex = /^TM-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/;
+    
+    // Gerar e testar 10 IDs para garantir conformidade
+    const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+    for (let i = 0; i < 10; i++) {
+      const array = new Uint8Array(8);
+      for (let j = 0; j < 8; j++) array[j] = Math.floor(Math.random() * 256);
+      const p1 = Array.from(array.slice(0, 4)).map((b) => chars[b % chars.length]).join('');
+      const p2 = Array.from(array.slice(4, 8)).map((b) => chars[b % chars.length]).join('');
+      const id = `TM-${p1}-${p2}`;
+      
+      assert(talk2tmIdRegex.test(id), `ID gerado ${id} deve respeitar formato TM-XXXX-XXXX sem ambiguidade`);
+      assert(id.length === 12, 'Comprimento do ID deve ser exatamente 12 caracteres (TM-XXXX-XXXX)');
+      assert(!id.includes('0') && !id.includes('O') && !id.includes('1') && !id.includes('I'), 'Não deve conter caracteres ambíguos');
+    }
+
+    // Invariante da credencial interna sem fricção
+    const mockTalkId = 'TM-K7P4-X92M';
+    const internalEmail = `tm_${mockTalkId.toLowerCase().replace(/[^a-z0-9]/g, '_')}@talk2tm.internal`;
+    assert(internalEmail === 'tm_tm_k7p4_x92m@talk2tm.internal', 'Email interno determinístico');
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }

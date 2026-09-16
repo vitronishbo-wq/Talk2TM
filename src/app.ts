@@ -51,6 +51,12 @@ import {
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
+import {
+  createTalk2TMIdentity,
+  getLocalIdentity,
+  restoreLocalIdentity,
+  LocalIdentity,
+} from './identity';
 
 /**
  * Mapeamento estrito de senhas únicas por usuário
@@ -138,6 +144,9 @@ export class Talk2TMApp {
         for (const id of messageIds) {
           await removeFromOutbox(id).catch(() => {});
         }
+      },
+      onCreateIdentity: async (displayName: string) => {
+        return await this.handleCreateIdentity(displayName);
       },
     });
 
@@ -659,8 +668,56 @@ export class Talk2TMApp {
       return;
     }
 
+    // Se houver identidade local prévia salva da Fase 2, restaura silenciosamente
+    const localIdentity = await restoreLocalIdentity().catch(() => null);
+    if (localIdentity && isAuthValidAndNonAnonymous()) {
+      console.info(`Talk2TM [Identity]: Identidade ${localIdentity.talk2tmId} restaurada para ${localIdentity.displayName}`);
+    }
+
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
     this.ui.showCalculatorView();
+  }
+
+  /**
+   * Onboarding Ultraleve (Fase 2):
+   * Cria nova conta e perfil associados ao Talk2TM ID (TM-XXXX-XXXX) sem exigir email ou senha do usuário.
+   */
+  public async handleCreateIdentity(displayName: string): Promise<string> {
+    const identity = await createTalk2TMIdentity(displayName);
+    const roomId = ACCESS_CONFIG.DEFAULT_ROOM;
+
+    const session: UserSession = {
+      userId: identity.uid,
+      displayName: identity.displayName,
+      roomId,
+      talk2tmId: identity.talk2tmId,
+    };
+
+    const nowIso = new Date().toISOString();
+    const roomToUse: Room = {
+      roomId,
+      participantA: identity.uid,
+      participantAName: identity.displayName,
+      participantB: null,
+      participantBName: null,
+      createdAt: nowIso,
+      lastActivity: nowIso,
+    };
+
+    this.currentSession = session;
+    this.currentRoom = roomToUse;
+    saveSession(session);
+    saveLocalRoom(roomToUse).catch(console.warn);
+
+    // Desbloqueio imediato da interface do chat com o novo código
+    setTimeout(() => {
+      this.ui.showChatView(session, roomToUse);
+      this.setConnectionState(navigator.onLine ? 'online' : 'offline');
+      this.startSessionTimeout();
+      this.resetInactivityTimer();
+    }, 800);
+
+    return identity.talk2tmId;
   }
 }
 

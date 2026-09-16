@@ -2,8 +2,20 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Funções utilitárias comuns
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // ====================================================================
+    // LEGADO: Compatibilidade retroativa total com /rooms e /messages
+    // ====================================================================
     function isRoomParticipant(roomId) {
-      return request.auth != null &&
+      return isAuthenticated() &&
         exists(/databases/$(database)/documents/rooms/$(roomId)) &&
         (
           request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantA ||
@@ -11,19 +23,91 @@ service cloud.firestore {
         );
     }
 
-    // Camada 6 & 8: Regras da coleção /rooms autorizada aos participantes autenticados
     match /rooms/{roomId} {
-      allow read, create, update: if request.auth != null;
+      allow read, create, update: if isAuthenticated();
       allow delete: if false;
     }
 
-    // Camada 7 & 8: Regras da coleção /messages vinculada estritamente aos participantes da sala
     match /messages/{messageId} {
       allow read: if isRoomParticipant(resource.data.room);
       allow create: if isRoomParticipant(request.resource.data.room) &&
                        request.resource.data.senderId == request.auth.uid;
       allow update, delete: if false;
     }
+
+    // ====================================================================
+    // EXPANSION V1: AS 5 ENTIDADES ENXUTAS
+    // ====================================================================
+
+    // 1. users/{uid} — Metadados privados da conta
+    match /users/{uid} {
+      allow read: if isUser(uid);
+      allow create: if isUser(uid) &&
+                       request.resource.data.uid == request.auth.uid &&
+                       request.resource.data.talk2tmId is string;
+      allow update: if isUser(uid) &&
+                       request.resource.data.uid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // 2. userProfiles/{talk2tmId} — Índice público para busca e convite por ID
+    match /userProfiles/{talk2tmId} {
+      // Qualquer usuário autenticado pode consultar um perfil por Talk2TM ID para convidá-lo
+      allow read: if isAuthenticated();
+      // Criação ou atualização permitida somente pelo dono do UID correspondente
+      allow create, update: if isAuthenticated() &&
+                               request.resource.data.uid == request.auth.uid &&
+                               request.resource.data.talk2tmId == talk2tmId;
+      allow delete: if false;
+    }
+
+    // 3. conversations/{conversationId} — Vínculo estrito bilateral
+    function isConversationParticipant(convData) {
+      return isAuthenticated() && (
+        request.auth.uid == convData.participantA ||
+        request.auth.uid == convData.participantB
+      );
+    }
+
+    match /conversations/{conversationId} {
+      allow read: if isConversationParticipant(resource.data);
+      // Criar conversa requer que quem cria seja participantA ou participantB
+      allow create: if isAuthenticated() && (
+        request.resource.data.participantA == request.auth.uid ||
+        request.resource.data.participantB == request.auth.uid
+      );
+      // Atualizações de timestamp e leitura permitidas apenas aos dois participantes
+      allow update: if isConversationParticipant(resource.data) &&
+                       isConversationParticipant(request.resource.data);
+      allow delete: if false;
+
+      // 5. conversations/{conversationId}/messages/{messageId} — Subcoleção de mensagens
+      match /messages/{messageId} {
+        allow read: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
+        allow create: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // 4. conversationInvites/{inviteId} — Convites bilaterais
+    match /conversationInvites/{inviteId} {
+      // Leitura permitida para quem enviou o convite (fromUid) ou para quem é o destinatário
+      allow read: if isAuthenticated() && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid ||
+        (resource.data.toUid == null && isAuthenticated())
+      );
+      // Criar convite: fromUid deve ser o usuário autenticado
+      allow create: if isAuthenticated() &&
+                       request.resource.data.fromUid == request.auth.uid;
+      // Aceitar ou recusar convite: apenas os envolvidos podem atualizar status
+      allow update: if isAuthenticated() && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid ||
+        request.resource.data.toUid == request.auth.uid
+      );
+      allow delete: if false;
+    }
   }
 }
-

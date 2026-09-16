@@ -126,6 +126,10 @@ export function getFirebaseAuth(): Auth | null {
   return firebaseAuth;
 }
 
+export function getFirebaseDB(): Firestore | null {
+  return firestoreDb;
+}
+
 /**
  * Aguarda a conclusão de qualquer processo de autenticação em andamento ou restaura sessão.
  * Camada 2.2: Disponibiliza promessa que permite aguardar a conclusão antes de operações Firestore.

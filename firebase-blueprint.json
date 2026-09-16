@@ -2,7 +2,7 @@
   "entities": {
     "Room": {
       "title": "Room",
-      "description": "Sala textual com limite rígido de exatamente 2 participantes simultâneos.",
+      "description": "Sala textual legado com limite rígido de exatamente 2 participantes simultâneos.",
       "type": "object",
       "properties": {
         "roomId": {
@@ -114,16 +114,206 @@
         }
       },
       "required": ["messageId", "room", "sender", "senderId", "text", "clientId", "createdAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Conta privada vinculada ao UID do Firebase Auth.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "UID do Firebase Auth."
+        },
+        "talk2tmId": {
+          "type": "string",
+          "description": "Identificador público formatado TM-XXXX-XXXX.",
+          "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "talk2tmId", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Índice público de descoberta por Talk2TM ID.",
+      "type": "object",
+      "properties": {
+        "talk2tmId": {
+          "type": "string",
+          "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$"
+        },
+        "uid": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["talk2tmId", "uid", "displayName", "active", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Conversa 1:1 bilateral entre dois UIDs autorizados.",
+      "type": "object",
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "participantA": {
+          "type": "string"
+        },
+        "participantB": {
+          "type": "string"
+        },
+        "talk2tmIdA": {
+          "type": "string"
+        },
+        "talk2tmIdB": {
+          "type": "string"
+        },
+        "displayNameA": {
+          "type": "string"
+        },
+        "displayNameB": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastReadA": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastReadB": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["conversationId", "participantA", "participantB", "talk2tmIdA", "talk2tmIdB", "createdAt", "updatedAt"]
+    },
+    "ConversationInvite": {
+      "title": "ConversationInvite",
+      "description": "Convite de conversa bilateral para formação de conexão 1:1.",
+      "type": "object",
+      "properties": {
+        "inviteId": {
+          "type": "string"
+        },
+        "fromUid": {
+          "type": "string"
+        },
+        "fromDisplayName": {
+          "type": "string"
+        },
+        "fromTalk2tmId": {
+          "type": "string"
+        },
+        "toTalk2tmId": {
+          "type": "string"
+        },
+        "toUid": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "accepted", "declined", "cancelled"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["inviteId", "fromUid", "fromTalk2tmId", "toTalk2tmId", "conversationId", "status", "createdAt", "updatedAt"]
+    },
+    "ConversationMessage": {
+      "title": "ConversationMessage",
+      "description": "Mensagem textual dentro de uma conversation específica.",
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "senderId": {
+          "type": "string"
+        },
+        "senderTalk2tmId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "synced", "failed", "read"]
+        }
+      },
+      "required": ["messageId", "conversationId", "senderId", "senderTalk2tmId", "text", "clientId", "createdAt"]
     }
   },
   "firestore": {
     "/rooms/{roomId}": {
       "schema": "Room",
-      "description": "Coleção de salas Talk2TM limitadas a 2 participantes."
+      "description": "Coleção de salas legadas Talk2TM limitadas a 2 participantes."
     },
     "/messages/{messageId}": {
       "schema": "Message",
-      "description": "Coleção linear de mensagens puramente textuais da sala."
+      "description": "Coleção linear de mensagens legadas da sala."
+    },
+    "/users/{uid}": {
+      "schema": "UserAccount",
+      "description": "Metadados privados da conta do usuário autenticado."
+    },
+    "/userProfiles/{talk2tmId}": {
+      "schema": "UserProfile",
+      "description": "Índice público de perfis ativos para busca por Talk2TM ID."
+    },
+    "/conversations/{conversationId}": {
+      "schema": "Conversation",
+      "description": "Conversas bilaterais ativas entre exatamente dois participantes."
+    },
+    "/conversationInvites/{inviteId}": {
+      "schema": "ConversationInvite",
+      "description": "Convites de conexão bilateral entre usuários."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": "ConversationMessage",
+      "description": "Mensagens estritas vinculadas aos dois participantes da conversa."
     }
   }
 }

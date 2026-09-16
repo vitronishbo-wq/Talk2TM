@@ -12,6 +12,7 @@ export interface UIEvents {
   onLoadOlder: () => void;
   onUpdateSettings: (settings: AppSettings) => void;
   onDeleteMessagesLocally?: (messageIds: string[]) => void;
+  onCreateIdentity?: (displayName: string) => Promise<string | null>;
 }
 
 export class ChatUI {
@@ -33,6 +34,13 @@ export class ChatUI {
   private passViewEl!: HTMLElement;
   private singlePassInput!: HTMLInputElement;
   private passErrorEl!: HTMLElement;
+
+  // Tela de Onboarding Ultraleve (Criar meu código)
+  private onboardingViewEl!: HTMLElement;
+  private onboardingNameInput!: HTMLInputElement;
+  private onboardingErrorEl!: HTMLElement;
+  private onboardingSubmitBtn!: HTMLButtonElement;
+  private generatedCodeBadgeEl!: HTMLElement;
 
   // Tela de Chat
   private chatViewEl!: HTMLElement;
@@ -157,10 +165,12 @@ export class ChatUI {
     this.mainEl.className = 'ttm-main';
 
     this.buildPassEntryView();
+    this.buildOnboardingView();
     this.buildChatView();
     this.buildSettingsModal();
 
     this.mainEl.appendChild(this.passViewEl);
+    this.mainEl.appendChild(this.onboardingViewEl);
     this.mainEl.appendChild(this.chatViewEl);
     this.appWrapper.appendChild(this.mainEl);
     this.appWrapper.appendChild(this.settingsModalEl);
@@ -211,6 +221,14 @@ export class ChatUI {
     enterBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
     enterBtn.textContent = '[entrar]';
 
+    const createCodeBtn = document.createElement('button');
+    createCodeBtn.type = 'button';
+    createCodeBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    createCodeBtn.textContent = '[criar meu código Talk2TM]';
+    createCodeBtn.addEventListener('click', () => {
+      this.showOnboardingView();
+    });
+
     const backToCalcBtn = document.createElement('button');
     backToCalcBtn.type = 'button';
     backToCalcBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
@@ -222,6 +240,7 @@ export class ChatUI {
     formEl.appendChild(this.singlePassInput);
     formEl.appendChild(this.passErrorEl);
     formEl.appendChild(enterBtn);
+    formEl.appendChild(createCodeBtn);
     formEl.appendChild(backToCalcBtn);
 
     // Validação da senha única: determina automaticamente a conta
@@ -249,6 +268,103 @@ export class ChatUI {
     this.passViewEl.appendChild(titleEl);
     this.passViewEl.appendChild(subtitleEl);
     this.passViewEl.appendChild(formEl);
+  }
+
+  /**
+   * Onboarding Ultraleve (Fase 2)
+   * Fluxo: "Como quer aparecer?" -> Nome -> Criação de Talk2TM ID (TM-XXXX-XXXX)
+   */
+  private buildOnboardingView(): void {
+    this.onboardingViewEl = document.createElement('div');
+    this.onboardingViewEl.id = 'ttm-onboarding-view';
+    this.onboardingViewEl.className = 'ttm-onboarding-box';
+    this.onboardingViewEl.style.display = 'none';
+
+    const cardEl = document.createElement('div');
+    cardEl.className = 'ttm-onboarding-card';
+
+    const titleEl = document.createElement('h1');
+    titleEl.className = 'ttm-title';
+    titleEl.textContent = 'Novo Código Talk2TM';
+
+    const subtitleEl = document.createElement('p');
+    subtitleEl.className = 'ttm-subtitle';
+    subtitleEl.textContent = 'Como quer aparecer para o seu parceiro?';
+
+    const formEl = document.createElement('form');
+    formEl.className = 'ttm-form';
+
+    this.onboardingNameInput = document.createElement('input');
+    this.onboardingNameInput.type = 'text';
+    this.onboardingNameInput.id = 'ttm-onboarding-name';
+    this.onboardingNameInput.className = 'ttm-input';
+    this.onboardingNameInput.placeholder = 'Seu nome ou apelido...';
+    this.onboardingNameInput.maxLength = 30;
+    this.onboardingNameInput.autocomplete = 'off';
+
+    this.onboardingErrorEl = document.createElement('div');
+    this.onboardingErrorEl.className = 'ttm-error';
+    this.onboardingErrorEl.textContent = '';
+
+    this.generatedCodeBadgeEl = document.createElement('div');
+    this.generatedCodeBadgeEl.className = 'ttm-code-badge';
+    this.generatedCodeBadgeEl.style.display = 'none';
+
+    const tipEl = document.createElement('div');
+    tipEl.className = 'ttm-onboarding-tip';
+    tipEl.textContent = 'Um código pessoal seguro TM-XXXX-XXXX será gerado automaticamente.';
+
+    this.onboardingSubmitBtn = document.createElement('button');
+    this.onboardingSubmitBtn.type = 'submit';
+    this.onboardingSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
+
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    backBtn.textContent = '[voltar]';
+    backBtn.addEventListener('click', () => {
+      this.showPassEntryView();
+    });
+
+    formEl.appendChild(this.onboardingNameInput);
+    formEl.appendChild(this.generatedCodeBadgeEl);
+    formEl.appendChild(tipEl);
+    formEl.appendChild(this.onboardingErrorEl);
+    formEl.appendChild(this.onboardingSubmitBtn);
+    formEl.appendChild(backBtn);
+
+    formEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      this.onboardingErrorEl.textContent = '';
+      const name = this.onboardingNameInput.value.trim();
+      if (!name) {
+        this.onboardingErrorEl.textContent = 'Por favor, digite um nome ou apelido.';
+        return;
+      }
+
+      if (this.events.onCreateIdentity) {
+        this.onboardingSubmitBtn.disabled = true;
+        this.onboardingSubmitBtn.textContent = '[gerando código...]';
+        try {
+          const generatedId = await this.events.onCreateIdentity(name);
+          if (generatedId) {
+            this.generatedCodeBadgeEl.textContent = generatedId;
+            this.generatedCodeBadgeEl.style.display = 'block';
+            tipEl.textContent = 'Seu código Talk2TM foi criado com sucesso! Entrando no chat...';
+          }
+        } catch (err: any) {
+          this.onboardingErrorEl.textContent = err?.message || 'Falha ao criar identidade.';
+          this.onboardingSubmitBtn.disabled = false;
+          this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
+        }
+      }
+    });
+
+    cardEl.appendChild(titleEl);
+    cardEl.appendChild(subtitleEl);
+    cardEl.appendChild(formEl);
+    this.onboardingViewEl.appendChild(cardEl);
   }
 
   /**
@@ -534,6 +650,7 @@ export class ChatUI {
     this.closeSettingsModal();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.calculator.show();
   }
@@ -543,12 +660,30 @@ export class ChatUI {
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'none';
     this.passViewEl.style.display = 'flex';
     this.singlePassInput.value = '';
     this.passErrorEl.textContent = '';
     // Auto-focus para teclado físico e mobile
     setTimeout(() => {
       this.singlePassInput.focus();
+    }, 100);
+  }
+
+  public showOnboardingView(): void {
+    this.closeSettingsModal();
+    this.calculator.hide();
+    this.headerEl.style.display = 'none';
+    this.passViewEl.style.display = 'none';
+    this.chatViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'flex';
+    this.onboardingNameInput.value = '';
+    this.onboardingErrorEl.textContent = '';
+    this.generatedCodeBadgeEl.style.display = 'none';
+    this.onboardingSubmitBtn.disabled = false;
+    this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
+    setTimeout(() => {
+      this.onboardingNameInput.focus();
     }, 100);
   }
 
@@ -570,6 +705,7 @@ export class ChatUI {
     this.closeSettingsModal();
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
     this.chatViewEl.style.display = 'flex';
     this.clearMessages();
@@ -613,7 +749,8 @@ export class ChatUI {
       partnerStatus = `conectado com: ${partnerName}`;
     }
 
-    this.roomInfoEl.textContent = `você: ${session.displayName} | ${partnerStatus}`;
+    const idLabel = session.talk2tmId ? ` [${session.talk2tmId}]` : '';
+    this.roomInfoEl.textContent = `você: ${session.displayName}${idLabel} | ${partnerStatus}`;
   }
 
   public setHasOlderMessages(hasOlder: boolean): void {
