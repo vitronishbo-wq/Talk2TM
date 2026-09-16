@@ -63,10 +63,10 @@ html, body {
 .ttm-pwa-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
-  padding: 6px 12px;
-  min-height: 34px;
+  padding: 4px 12px;
+  min-height: 32px;
   background-color: #12161f;
   border-bottom: 1px solid #242b35;
   color: #94a3b8;
@@ -387,70 +387,105 @@ html, body {
 .ttm-btn-lock {
   border-color: #f85149;
   color: #f85149;
-  font-size: 11px;
-  padding: 4px 8px;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  height: 22px;
+  line-height: 1;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
 .ttm-btn-def {
   border-color: var(--border-color);
   color: var(--text-muted);
-  font-size: 11px;
-  padding: 4px 8px;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  height: 22px;
+  line-height: 1;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
 /* =========================================================
    3. TELA DE CHAT MOBILE: TALK2TM
    ========================================================= */
 .ttm-header {
-  padding: max(10px, env(safe-area-inset-top)) 14px 10px 14px;
+  padding: max(4px, env(safe-area-inset-top)) 10px 4px 10px;
   border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-dark);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .ttm-header-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 6px;
+  min-height: 24px;
 }
 
 .ttm-header-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+}
+
+.ttm-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .ttm-brand strong {
   color: var(--accent-blue);
+  font-weight: 600;
 }
 
 .ttm-brand span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 10.5px;
 }
 
 .ttm-status {
-  font-size: 11px;
-  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: auto;
+  margin-left: 2px;
+  color: #d29922;
+  line-height: 1;
 }
 
-.ttm-status[data-state="online"] {
-  color: var(--success-color);
+.ttm-net-icon {
+  display: block;
+  width: 13px;
+  height: 13px;
 }
 
-.ttm-status[data-state="offline"] {
+.ttm-status[data-state="online"],
+.ttm-status.is-online {
+  color: #3fb950;
+}
+
+.ttm-status[data-state="offline"],
+.ttm-status.is-offline {
+  color: #f85149;
+}
+
+.ttm-status[data-state="sincronizando"],
+.ttm-status[data-state="conectando"] {
   color: #d29922;
 }
 
-.ttm-status[data-state="sincronizando"] {
-  color: var(--accent-blue);
-}
-
 .ttm-room-info {
-  font-size: 12px;
-  color: var(--text-muted);
+  font-size: 10.5px;
+  color: #64748b;
+  line-height: 1.1;
 }
 
 .ttm-main {

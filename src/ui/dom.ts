@@ -107,7 +107,10 @@ export class ChatUI {
 
     this.statusEl = document.createElement('div');
     this.statusEl.className = 'ttm-status';
-    this.statusEl.textContent = 'conectando...';
+    this.statusEl.setAttribute('data-state', 'conectando');
+    this.statusEl.setAttribute('title', 'Rede: conectando');
+    this.statusEl.setAttribute('aria-label', 'Rede: conectando');
+    this.statusEl.innerHTML = this.getNetworkIconSvg();
 
     // Ações do cabeçalho
     const headerActions = document.createElement('div');
@@ -116,7 +119,7 @@ export class ChatUI {
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
     settingsBtn.className = 'ttm-btn ttm-btn-def';
-    settingsBtn.textContent = '[⚙ def]';
+    settingsBtn.textContent = '[☼ def]';
     settingsBtn.title = 'Definições mínimas (tempo de sessão e inatividade)';
     settingsBtn.addEventListener('click', () => {
       this.openSettingsModal();
@@ -125,7 +128,7 @@ export class ChatUI {
     const lockBtn = document.createElement('button');
     lockBtn.type = 'button';
     lockBtn.className = 'ttm-btn ttm-btn-lock';
-    lockBtn.textContent = '[⌕ calc]';
+    lockBtn.textContent = '[⚑ calc]';
     lockBtn.title = 'Bloquear imediatamente e camuflar na calculadora';
     lockBtn.addEventListener('click', () => {
       this.events.onLockToCalculator();
@@ -580,8 +583,22 @@ export class ChatUI {
   }
 
   public updateConnectionState(state: ConnectionState): void {
-    this.statusEl.textContent = state;
     this.statusEl.setAttribute('data-state', state);
+    this.statusEl.setAttribute('title', `Rede: ${state}`);
+    this.statusEl.setAttribute('aria-label', `Rede: ${state}`);
+    if (state === 'online') {
+      this.statusEl.classList.add('is-online');
+      this.statusEl.classList.remove('is-offline');
+    } else if (state === 'offline') {
+      this.statusEl.classList.add('is-offline');
+      this.statusEl.classList.remove('is-online');
+    } else {
+      this.statusEl.classList.remove('is-online', 'is-offline');
+    }
+  }
+
+  private getNetworkIconSvg(): string {
+    return `<svg class="ttm-net-icon" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><rect x="2" y="16" width="3.5" height="5" rx="0.8"/><rect x="7.5" y="12" width="3.5" height="9" rx="0.8"/><rect x="13" y="7" width="3.5" height="14" rx="0.8"/><rect x="18.5" y="2" width="3.5" height="19" rx="0.8"/></svg>`;
   }
 
   public updateRoomInfo(room: Room, session: UserSession): void {

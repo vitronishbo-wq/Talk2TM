@@ -244,10 +244,6 @@ export class PWAPromptBar {
     this.bannerEl.id = 'ttm-pwa-bar';
     this.bannerEl.className = 'ttm-pwa-bar';
 
-    const textSpan = document.createElement('span');
-    textSpan.className = 'ttm-pwa-text';
-    textSpan.textContent = 'Instalar app para uso em tela cheia e offline';
-
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'ttm-pwa-actions';
 
@@ -267,7 +263,6 @@ export class PWAPromptBar {
     actionsDiv.appendChild(installBtn);
     actionsDiv.appendChild(continueBtn);
 
-    this.bannerEl.appendChild(textSpan);
     this.bannerEl.appendChild(actionsDiv);
 
     if (this.container.firstChild) {
@@ -314,14 +309,16 @@ export class PWAPromptBar {
   private showIOSInstructions(): void {
     if (!this.bannerEl) return;
 
-    const textSpan = this.bannerEl.querySelector('.ttm-pwa-text') as HTMLElement | null;
-    const actionsDiv = this.bannerEl.querySelector('.ttm-pwa-actions') as HTMLElement | null;
-
-    if (textSpan) {
-      textSpan.textContent = 'Toque em Compartilhar e depois em "Adicionar à Tela de Início"';
-      textSpan.style.color = '#38bdf8';
+    let textSpan = this.bannerEl.querySelector('.ttm-pwa-text') as HTMLElement | null;
+    if (!textSpan) {
+      textSpan = document.createElement('span');
+      textSpan.className = 'ttm-pwa-text';
+      this.bannerEl.insertBefore(textSpan, this.bannerEl.firstChild);
     }
+    textSpan.textContent = 'Toque em Compartilhar e "Adicionar à Tela de Início"';
+    textSpan.style.color = '#38bdf8';
 
+    const actionsDiv = this.bannerEl.querySelector('.ttm-pwa-actions') as HTMLElement | null;
     if (actionsDiv) {
       while (actionsDiv.firstChild) {
         actionsDiv.removeChild(actionsDiv.firstChild);
