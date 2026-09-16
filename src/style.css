@@ -387,84 +387,105 @@ html, body {
 .ttm-btn-lock {
   border-color: #f85149;
   color: #f85149;
-  font-size: 10.5px;
-  padding: 1px 6px;
-  height: 22px;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  height: 19px;
   line-height: 1;
-  border-radius: 4px;
+  border-radius: 3px;
   white-space: nowrap;
 }
 
 .ttm-btn-def {
   border-color: var(--border-color);
   color: var(--text-muted);
-  font-size: 10.5px;
-  padding: 1px 6px;
-  height: 22px;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  height: 19px;
   line-height: 1;
-  border-radius: 4px;
+  border-radius: 3px;
   white-space: nowrap;
 }
 
 /* =========================================================
    3. TELA DE CHAT MOBILE: TALK2TM
    ========================================================= */
+#chat-header,
 .ttm-header {
-  padding: max(4px, env(safe-area-inset-top)) 10px 4px 10px;
+  padding: max(2px, env(safe-area-inset-top)) 8px 2px 8px;
+  margin: 0;
   border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-dark);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0px;
 }
 
+#chat-header .ttm-header-row,
 .ttm-header-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 6px;
-  min-height: 24px;
+  gap: 4px;
+  min-height: 20px;
+  margin: 0;
+  padding: 0;
 }
 
+#chat-header .ttm-header-actions,
 .ttm-header-actions {
   display: flex;
   align-items: center;
   gap: 4px;
+  margin: 0;
+  padding: 0;
 }
 
+#chat-header .ttm-brand,
 .ttm-brand {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 2px;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
   white-space: nowrap;
+  margin: 0;
+  padding: 0;
 }
 
+#chat-header .ttm-brand strong,
 .ttm-brand strong {
   color: var(--accent-blue);
   font-weight: 600;
+  font-size: 11px;
+  line-height: 1;
 }
 
+#chat-header .ttm-brand span,
 .ttm-brand span {
   color: var(--text-muted);
-  font-size: 10.5px;
+  font-size: 9.5px;
+  line-height: 1;
 }
 
+#chat-header .ttm-status,
 .ttm-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   margin-right: auto;
   margin-left: 2px;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding: 0;
   color: #d29922;
   line-height: 1;
 }
 
+#chat-header .ttm-net-icon,
 .ttm-net-icon {
   display: block;
-  width: 13px;
-  height: 13px;
+  width: 11px;
+  height: 11px;
 }
 
 .ttm-status[data-state="online"],
@@ -482,10 +503,18 @@ html, body {
   color: #d29922;
 }
 
+#chat-header .ttm-room-info,
 .ttm-room-info {
-  font-size: 10.5px;
+  font-size: 9px;
   color: #64748b;
-  line-height: 1.1;
+  line-height: 1;
+  margin: 0;
+  padding: 0;
+}
+
+#chat-header .ttm-room-info:empty,
+.ttm-room-info:empty {
+  display: none;
 }
 
 .ttm-main {
@@ -532,10 +561,52 @@ html, body {
 
 /* Linha de Mensagem Linear */
 .ttm-msg-row {
+  position: relative;
   line-height: 1.45;
   word-break: break-word;
   white-space: pre-wrap;
   user-select: text;
+}
+
+/* Botão sutil [×] desktop no hover */
+.ttm-msg-del {
+  display: none;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: 6px;
+  cursor: pointer;
+  opacity: 0;
+  border-radius: 3px;
+  vertical-align: middle;
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ttm-msg-del {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .ttm-msg-row:hover .ttm-msg-del {
+    opacity: 0.55;
+  }
+
+  .ttm-msg-del:hover {
+    opacity: 1 !important;
+    color: #f85149;
+    background-color: rgba(248, 81, 73, 0.15);
+  }
+}
+
+/* Oculta botão individual de exclusão no modo de seleção múltipla */
+.ttm-selecting-mode .ttm-msg-del {
+  display: none !important;
 }
 
 .ttm-msg-row .msg-time {

@@ -93,6 +93,7 @@ export class ChatUI {
 
     // 2. Cabeçalho Minimalista
     this.headerEl = document.createElement('header');
+    this.headerEl.id = 'chat-header';
     this.headerEl.className = 'ttm-header';
     this.headerEl.style.display = 'none';
 
@@ -718,6 +719,18 @@ export class ChatUI {
     statusSpan.setAttribute('data-status', statusInfo.dataStatus);
     if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
 
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'ttm-msg-del';
+    deleteBtn.textContent = '×';
+    deleteBtn.title = 'Apagar mensagem localmente';
+    deleteBtn.setAttribute('aria-label', 'Apagar mensagem');
+    deleteBtn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.deleteSingleMessage(msg.messageId);
+    });
+
     rowEl.appendChild(checkSpan);
     rowEl.appendChild(timeSpan);
     rowEl.appendChild(senderSpan);
@@ -725,6 +738,7 @@ export class ChatUI {
     if (isSelf) {
       rowEl.appendChild(statusSpan);
     }
+    rowEl.appendChild(deleteBtn);
 
     this.attachMessageSelectionHandlers(rowEl, msg.messageId);
 
@@ -785,6 +799,18 @@ export class ChatUI {
       statusSpan.setAttribute('data-status', statusInfo.dataStatus);
       if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
 
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'ttm-msg-del';
+      deleteBtn.textContent = '×';
+      deleteBtn.title = 'Apagar mensagem localmente';
+      deleteBtn.setAttribute('aria-label', 'Apagar mensagem');
+      deleteBtn.addEventListener('click', (e: MouseEvent) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.deleteSingleMessage(msg.messageId);
+      });
+
       rowEl.appendChild(checkSpan);
       rowEl.appendChild(timeSpan);
       rowEl.appendChild(senderSpan);
@@ -792,6 +818,7 @@ export class ChatUI {
       if (isSelf) {
         rowEl.appendChild(statusSpan);
       }
+      rowEl.appendChild(deleteBtn);
 
       this.attachMessageSelectionHandlers(rowEl, msg.messageId);
 
@@ -1065,6 +1092,13 @@ export class ChatUI {
       this.roomInfoEl.textContent = originalText;
       this.roomInfoEl.removeAttribute('data-original-info');
     }
+  }
+
+  public deleteSingleMessage(messageId: string): void {
+    if (this.events.onDeleteMessagesLocally) {
+      this.events.onDeleteMessagesLocally([messageId]);
+    }
+    this.removeMessages([messageId]);
   }
 
   public removeMessages(messageIds: string[]): void {
