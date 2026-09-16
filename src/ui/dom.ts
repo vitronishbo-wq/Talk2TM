@@ -610,6 +610,15 @@ export class ChatUI {
     return this.chatViewEl ? this.chatViewEl.style.display === 'flex' : false;
   }
 
+  public clearMessages(): void {
+    this.renderedMessageIds.clear();
+    this.renderedMessages.clear();
+    this.selectedMessageIds.clear();
+    if (this.msgListEl) {
+      this.msgListEl.innerHTML = '';
+    }
+  }
+
   public showChatView(session: UserSession, room?: Room): void {
     this.currentSession = session;
     this.closeSettingsModal();
@@ -617,6 +626,7 @@ export class ChatUI {
     this.passViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
     this.chatViewEl.style.display = 'flex';
+    this.clearMessages();
     if (room) {
       this.currentRoom = room;
       this.updateRoomInfo(room, session);
@@ -851,6 +861,8 @@ export class ChatUI {
     };
 
     // Mobile touch
+    let wasLongPressTriggered = false;
+
     rowEl.addEventListener(
       'touchstart',
       (e: TouchEvent) => {
@@ -862,10 +874,12 @@ export class ChatUI {
         touchStartX = touch.clientX;
         touchStartY = touch.clientY;
         touchStartTime = Date.now();
+        wasLongPressTriggered = false;
 
         cancelTimer();
         if (!this.isSelectionMode) {
           longPressTimer = setTimeout(() => {
+            wasLongPressTriggered = true;
             this.enterSelectionMode(messageId);
             try {
               if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -897,27 +911,48 @@ export class ChatUI {
 
     rowEl.addEventListener('touchend', () => {
       cancelTimer();
+      if (wasLongPressTriggered) {
+        // Já entrou no modo seleção com esta mensagem selecionada, não faz toggle no touchend
+        wasLongPressTriggered = false;
+        return;
+      }
       if (this.isSelectionMode) {
         // No modo de seleção, tocar na mensagem faz toggle
         this.toggleMessageSelection(messageId);
       }
     });
 
-    rowEl.addEventListener('touchcancel', cancelTimer);
+    rowEl.addEventListener('touchcancel', () => {
+      cancelTimer();
+      wasLongPressTriggered = false;
+    });
 
     // Desktop mouse
+    let mouseStartX = 0;
+    let mouseStartY = 0;
+    let wasMouseLongPressTriggered = false;
+
     rowEl.addEventListener('mousedown', (e: MouseEvent) => {
       if (e.button !== 0) return;
       cancelTimer();
+      mouseStartX = e.clientX;
+      mouseStartY = e.clientY;
+      wasMouseLongPressTriggered = false;
       if (!this.isSelectionMode) {
         longPressTimer = setTimeout(() => {
+          wasMouseLongPressTriggered = true;
           this.enterSelectionMode(messageId);
         }, 500);
       }
     });
 
-    rowEl.addEventListener('mousemove', () => {
-      cancelTimer();
+    rowEl.addEventListener('mousemove', (e: MouseEvent) => {
+      if (!longPressTimer) return;
+      const dx = Math.abs(e.clientX - mouseStartX);
+      const dy = Math.abs(e.clientY - mouseStartY);
+      if (dx > 8 || dy > 8) {
+        cancelTimer();
+      }
     });
 
     rowEl.addEventListener('mouseup', () => {
@@ -925,6 +960,11 @@ export class ChatUI {
     });
 
     rowEl.addEventListener('click', (e: MouseEvent) => {
+      if (wasMouseLongPressTriggered) {
+        wasMouseLongPressTriggered = false;
+        e.preventDefault();
+        return;
+      }
       if (this.isSelectionMode) {
         e.preventDefault();
         this.toggleMessageSelection(messageId);

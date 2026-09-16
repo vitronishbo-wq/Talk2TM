@@ -31,6 +31,11 @@ import {
   isAppleMobileDevice,
   PWAPromptBar,
 } from '../src/ui/pwa-prompt';
+import {
+  getHiddenMessageIds,
+  hideMessagesLocally,
+  isMessageHiddenLocally,
+} from '../src/storage/indexeddb';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -403,6 +408,52 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(typeof PWAPromptBar === 'function', 'PWAPromptBar deve ser uma classe exportada');
     assert(typeof isStandaloneMode === 'function', 'isStandaloneMode deve ser função exportada');
     assert(typeof isAppleMobileDevice === 'function', 'isAppleMobileDevice deve ser função exportada');
+  });
+
+  // 26. Exclusão Local (Tombstone): Persistência por roomId e por dispositivo
+  check('Exclusão Local: Tombstone marca mensagens como ocultadas localmente de forma idempotente', () => {
+    const testRoom = 'sala-teste-tombstone';
+    const msgId1 = 'msg_001_truman';
+    const msgId2 = 'msg_002_maezinha';
+
+    assert(!isMessageHiddenLocally(testRoom, msgId1), 'Mensagem nova não deve estar oculta');
+    assert(!isMessageHiddenLocally(testRoom, msgId2), 'Mensagem nova não deve estar oculta');
+
+    hideMessagesLocally(testRoom, [msgId1, msgId2]);
+
+    assert(isMessageHiddenLocally(testRoom, msgId1) === true, 'msgId1 deve estar marcada como oculta');
+    assert(isMessageHiddenLocally(testRoom, msgId2) === true, 'msgId2 deve estar marcada como oculta');
+
+    const hiddenSet = getHiddenMessageIds(testRoom);
+    assert(hiddenSet.has(msgId1) && hiddenSet.has(msgId2), 'Set de IDs ocultos deve conter ambos');
+    assert(isMessageHiddenLocally('outra-sala', msgId1) === false, 'Tombstones devem ser isolados por roomId');
+  });
+
+  // 27. Cenário Crítico: Mensagem no Firestore -> apagada localmente -> listener onSnapshot descarta
+  check('Cenário Crítico: Listener Firestore filtra mensagens apagadas localmente antes de salvar ou renderizar', () => {
+    const testRoom = 'sala-sync-critica';
+    const msgDeleted = 'msg_firestore_deleted_locally';
+    const msgKept = 'msg_firestore_kept';
+
+    hideMessagesLocally(testRoom, [msgDeleted]);
+
+    const incomingFirestoreBatch = [
+      { messageId: msgDeleted, text: 'Segredo apagado', senderId: 'truman' },
+      { messageId: msgKept, text: 'Mensagem ativa', senderId: 'maezinha' },
+    ];
+
+    // Simula lógica idêntica à do subscribeToMessages
+    const processedForRender: string[] = [];
+    for (const msg of incomingFirestoreBatch) {
+      if (isMessageHiddenLocally(testRoom, msg.messageId)) {
+        continue; // Filtro estrito antes de renderizar
+      }
+      processedForRender.push(msg.messageId);
+    }
+
+    assert(processedForRender.length === 1, 'Deve conter somente 1 mensagem');
+    assert(processedForRender[0] === msgKept, 'A mensagem mantida deve ser msgKept');
+    assert(!processedForRender.includes(msgDeleted), 'A mensagem apagada localmente NUNCA deve ser processada');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);

@@ -1,7 +1,7 @@
 import { Message, Room, UserSession } from '../types';
 
 const DB_NAME = 'talk2tm_local_v1';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbInstance: IDBDatabase | null = null;
 
@@ -27,6 +27,12 @@ export async function getLocalDB(): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains('outbox')) {
         db.createObjectStore('outbox', { keyPath: 'messageId' });
+      }
+
+      // Store para mensagens apagadas/ocultadas localmente neste dispositivo
+      if (!db.objectStoreNames.contains('hidden_messages')) {
+        const hiddenStore = db.createObjectStore('hidden_messages', { keyPath: 'key' });
+        hiddenStore.createIndex('room', 'room', { unique: false });
       }
     };
 
@@ -62,38 +68,110 @@ export async function saveLocalMessage(msg: Message): Promise<void> {
 
 /**
  * Tombstone local: Mensagens apagadas apenas neste dispositivo
+ * Armazenamento multi-camada: Memória (acesso síncrono O(1) ultra-rápido) +
+ * IndexedDB (para escalabilidade durável e ilimitada) +
+ * localStorage (cache espelho imediato).
  */
 const HIDDEN_KEY_PREFIX = 'talk2tm_hidden_';
+const inMemoryHiddenSets: Map<string, Set<string>> = new Map();
 
 export function getHiddenMessageIds(roomId: string): Set<string> {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const raw = window.localStorage.getItem(`${HIDDEN_KEY_PREFIX}${roomId}`);
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) {
-          return new Set(arr);
+  let set = inMemoryHiddenSets.get(roomId);
+  if (!set) {
+    set = new Set<string>();
+    // Inicializa a partir do localStorage para disponibilidade síncrona imediata
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const raw = window.localStorage.getItem(`${HIDDEN_KEY_PREFIX}${roomId}`);
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) {
+            arr.forEach((id) => set!.add(id));
+          }
         }
       }
+    } catch {
+      // Falha silenciosa
     }
-  } catch {
-    // Falha silenciosa se armazenamento restrito
+    inMemoryHiddenSets.set(roomId, set);
   }
-  return new Set();
+  return set;
+}
+
+/**
+ * Carrega a lista completa de IDs ocultos do IndexedDB para a memória da sessão
+ */
+export async function loadHiddenMessagesFromDB(roomId: string): Promise<Set<string>> {
+  const currentSet = getHiddenMessageIds(roomId);
+  if (typeof indexedDB === 'undefined') {
+    return currentSet;
+  }
+  try {
+    const db = await getLocalDB();
+    if (db.objectStoreNames.contains('hidden_messages')) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('hidden_messages', 'readonly');
+        const store = tx.objectStore('hidden_messages');
+        const index = store.index('room');
+        const req = index.openCursor(IDBKeyRange.only(roomId));
+        req.onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+          if (cursor) {
+            if (cursor.value && cursor.value.messageId) {
+              currentSet.add(cursor.value.messageId);
+            }
+            cursor.continue();
+          } else {
+            resolve();
+          }
+        };
+        req.onerror = () => reject(tx.error);
+      });
+    }
+  } catch (err) {
+    console.debug('Talk2TM [Storage]: Erro ao carregar tombstones do IndexedDB:', err);
+  }
+  return currentSet;
 }
 
 export function hideMessagesLocally(roomId: string, messageIds: string[]): void {
+  if (messageIds.length === 0) return;
+
+  const currentSet = getHiddenMessageIds(roomId);
+  messageIds.forEach((id) => currentSet.add(id));
+
+  // 1. Atualiza cache espelho no localStorage
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      const currentSet = getHiddenMessageIds(roomId);
-      messageIds.forEach((id) => currentSet.add(id));
       window.localStorage.setItem(
         `${HIDDEN_KEY_PREFIX}${roomId}`,
         JSON.stringify(Array.from(currentSet))
       );
     }
   } catch (err) {
-    console.debug('Talk2TM [Storage]: Erro ao salvar tombstone local:', err);
+    console.debug('Talk2TM [Storage]: Erro ao salvar tombstone local em localStorage:', err);
+  }
+
+  // 2. Persiste assincronamente no IndexedDB para durabilidade sem limitação de cota
+  if (typeof indexedDB !== 'undefined') {
+    getLocalDB()
+      .then((db) => {
+        if (!db.objectStoreNames.contains('hidden_messages')) return;
+        const tx = db.transaction('hidden_messages', 'readwrite');
+        const store = tx.objectStore('hidden_messages');
+        const now = new Date().toISOString();
+        messageIds.forEach((id) => {
+          store.put({
+            key: `${roomId}_${id}`,
+            room: roomId,
+            messageId: id,
+            hiddenAt: now,
+          });
+        });
+      })
+      .catch((err) => {
+        console.debug('Talk2TM [Storage]: Erro ao gravar hidden_messages no IndexedDB:', err);
+      });
   }
 }
 

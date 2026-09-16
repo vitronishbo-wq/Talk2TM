@@ -30,6 +30,10 @@ import {
   updateLocalLastRead,
   saveSession,
   getSession,
+  hideMessagesLocally,
+  isMessageHiddenLocally,
+  deleteLocalMessages,
+  loadHiddenMessagesFromDB,
 } from './storage/indexeddb';
 import {
   initFirebase,
@@ -123,6 +127,18 @@ export class Talk2TMApp {
       onSendMessage: (text: string) => this.sendMessage(text),
       onLoadOlder: () => this.loadOlderMessages(),
       onUpdateSettings: (settings: AppSettings) => this.updateSettings(settings),
+      onDeleteMessagesLocally: async (messageIds: string[]) => {
+        if (!this.currentSession) return;
+        const roomId = this.currentSession.roomId;
+        // 1. Marca tombstone no armazenamento local/IndexedDB
+        hideMessagesLocally(roomId, messageIds);
+        // 2. Remove do IndexedDB local
+        await deleteLocalMessages(messageIds);
+        // 3. Se houver mensagens no outbox ainda pendentes, remove para não enviar após apagadas
+        for (const id of messageIds) {
+          await removeFromOutbox(id).catch(() => {});
+        }
+      },
     });
 
     this.setupNetworkMonitoring();
@@ -178,11 +194,14 @@ export class Talk2TMApp {
     this.startSessionTimeout();
     this.resetInactivityTimer();
 
-    // 3. Carrega histórico local imediato do IndexedDB
+    // 3. Carrega histórico local imediato do IndexedDB (carregando tombstones antes)
     try {
+      await loadHiddenMessagesFromDB(roomId);
       const localHistory = await getLocalMessages(roomId, CONFIG.HISTORY_LIMIT);
       for (const msg of localHistory) {
-        this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+        if (!isMessageHiddenLocally(roomId, msg.messageId)) {
+          this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+        }
       }
       if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
         this.ui.setHasOlderMessages(true);
@@ -523,6 +542,11 @@ export class Talk2TMApp {
       async (incomingMessages) => {
         if (!this.currentSession) return;
         for (const msg of incomingMessages) {
+          // Filtro antes de renderizar e antes de re-salvar localmente:
+          // Se apagada neste dispositivo, ignora permanentemente
+          if (isMessageHiddenLocally(roomId, msg.messageId)) {
+            continue;
+          }
           await saveLocalMessage(msg);
           this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
         }
