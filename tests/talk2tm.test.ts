@@ -36,6 +36,11 @@ import {
   hideMessagesLocally,
   isMessageHiddenLocally,
 } from '../src/storage/indexeddb';
+import {
+  buildDeterministicConversationId,
+  conversationToRoom,
+} from '../src/conversation';
+import { Conversation } from '../src/types';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -504,6 +509,55 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     const mockTalkId = 'TM-K7P4-X92M';
     const internalEmail = `tm_${mockTalkId.toLowerCase().replace(/[^a-z0-9]/g, '_')}@talk2tm.internal`;
     assert(internalEmail === 'tm_tm_k7p4_x92m@talk2tm.internal', 'Email interno determinístico');
+  });
+
+  // 30. Phase 4 (Canal de Mensagens): Determinismo do ID de conversa bilateral
+  check('Fase 4: Determinismo e simetria do ID de conversa bilateral', () => {
+    const userA = 'TM-2K9P-X7M4';
+    const userB = 'TM-8W3J-L5N2';
+
+    const convId1 = buildDeterministicConversationId(userA, userB);
+    const convId2 = buildDeterministicConversationId(userB, userA);
+
+    assert(convId1 === convId2, 'IDs de conversa gerados em ordens inversas devem ser estritamente idênticos');
+    assert(convId1.startsWith('conv_'), 'Prefixo de conversa bilateral deve ser conv_');
+    assert(convId1.includes(userA) && convId1.includes(userB), 'Deve conter os dois participantes');
+  });
+
+  // 31. Phase 4 (Canal de Mensagens): Mapeamento de Conversation para modelo Room com recibos
+  check('Fase 4: Mapeamento de Conversation para Room com recibos de leitura', () => {
+    const mockConv: Conversation = {
+      conversationId: 'conv_TM-2K9P-X7M4_TM-8W3J-L5N2',
+      participantA: 'uid_a',
+      participantB: 'uid_b',
+      displayNameA: 'Truman',
+      displayNameB: 'Mãezinha',
+      talk2tmIdA: 'TM-2K9P-X7M4',
+      talk2tmIdB: 'TM-8W3J-L5N2',
+      lastReadA: '2026-03-20T10:00:00.000Z',
+      lastReadB: '2026-03-20T10:05:00.000Z',
+      createdAt: '2026-03-20T09:00:00.000Z',
+      updatedAt: '2026-03-20T10:05:00.000Z',
+    };
+
+    const room = conversationToRoom(mockConv);
+    assert(room.roomId === mockConv.conversationId, 'roomId deve refletir conversationId');
+    assert(room.participantAName === 'Truman', 'Nome do participante A preservado');
+    assert(room.participantBName === 'Mãezinha', 'Nome do participante B preservado');
+    assert(room.lastReadA === '2026-03-20T10:00:00.000Z', 'lastReadA preservado');
+    assert(room.lastReadB === '2026-03-20T10:05:00.000Z', 'lastReadB preservado');
+    assert(room.lastRead['Truman'] === '2026-03-20T10:00:00.000Z', 'Mapa lastRead por nome mapeado');
+  });
+
+  // 32. Phase 4 (Canal de Mensagens): Isolamento de tombstones por conversationId
+  check('Fase 4: Exclusão local (tombstones) isolada e persistente por canal conversationId', () => {
+    const convId = 'conv_TM-ALPHA_TM-BETA';
+    const otherConvId = 'conv_TM-GAMMA_TM-DELTA';
+    const msgId = `${convId}_cli_12345`;
+
+    hideMessagesLocally(convId, [msgId]);
+    assert(isMessageHiddenLocally(convId, msgId) === true, 'Mensagem deve estar marcada como hidden no convId');
+    assert(isMessageHiddenLocally(otherConvId, msgId) === false, 'Mensagem não deve afetar outros canais de conversa');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);

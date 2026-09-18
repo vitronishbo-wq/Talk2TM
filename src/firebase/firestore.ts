@@ -27,7 +27,7 @@ import {
   Unsubscribe,
   serverTimestamp,
 } from 'firebase/firestore';
-import { Message, Room } from '../types';
+import { Conversation, ConversationMessage, Message, Room } from '../types';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
 
 export enum OperationType {
@@ -763,4 +763,244 @@ export function getPartnerLastRead(
   if (room.participantAName === partnerName && room.lastReadA) return room.lastReadA;
   if (room.participantBName === partnerName && room.lastReadB) return room.lastReadB;
   return null;
+}
+
+/**
+ * Envia mensagem para o canal da conversa bilateral (conversations/{conversationId}/messages/{messageId}).
+ * Respeita a regra de segurança isConversationParticipant e senderId == request.auth.uid.
+ */
+export async function sendFirestoreConversationMessage(msg: Message | ConversationMessage): Promise<void> {
+  const { db } = await initFirebase();
+  if (!db) return;
+
+  if (!isAuthValidAndNonAnonymous()) {
+    console.warn('Talk2TM [Guard]: Escrita rejeitada em sendFirestoreConversationMessage — usuário não autenticado ou anônimo.');
+    throw new Error('Operação cancelada: requer autenticação não-anônima ativa.');
+  }
+
+  const authUser = firebaseAuth?.currentUser;
+  const effectiveSenderId = authUser ? authUser.uid : msg.senderId;
+  const conversationId = ('conversationId' in msg && msg.conversationId) ? msg.conversationId : ('room' in msg ? msg.room : '');
+
+  if (!conversationId) {
+    throw new Error('conversationId obrigatório para enviar mensagem de conversa.');
+  }
+
+  const docRef = doc(db, 'conversations', conversationId, 'messages', msg.messageId);
+  const nowIso = msg.createdAt || new Date().toISOString();
+
+  const payload: ConversationMessage = {
+    messageId: msg.messageId,
+    conversationId,
+    senderId: effectiveSenderId,
+    senderTalk2tmId: ('senderTalk2tmId' in msg && msg.senderTalk2tmId) ? msg.senderTalk2tmId : ('sender' in msg ? msg.sender : ''),
+    text: msg.text,
+    clientId: msg.clientId,
+    createdAt: nowIso,
+    status: 'synced',
+  };
+
+  try {
+    await setDoc(docRef, payload);
+    // Atualiza updatedAt na conversa em segundo plano
+    try {
+      const convDocRef = doc(db, 'conversations', conversationId);
+      await updateDoc(convDocRef, {
+        updatedAt: nowIso,
+      });
+    } catch {
+      // Ignora erro não-bloqueante na atualização do pai
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `conversations/${conversationId}/messages/${msg.messageId}`);
+  }
+}
+
+/**
+ * Escuta mensagens de uma conversa em tempo real
+ */
+export function subscribeToConversationMessages(
+  conversationId: string,
+  onNewMessages: (messages: Message[]) => void,
+  onError: (err: Error) => void
+): Unsubscribe | null {
+  if (!firestoreDb || !isAuthValidAndNonAnonymous()) {
+    console.debug('Talk2TM [Guard]: subscribeToConversationMessages retido — autenticação necessária.');
+    return null;
+  }
+
+  let activeUnsubscribe: Unsubscribe | null = null;
+
+  const startListening = (withOrderBy: boolean) => {
+    try {
+      const messagesCollection = collection(firestoreDb!, 'conversations', conversationId, 'messages');
+      const q = withOrderBy
+        ? query(messagesCollection, orderBy('createdAt', 'desc'), limit(50))
+        : query(messagesCollection, limit(100));
+
+      activeUnsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          const messages: Message[] = [];
+          snapshot.forEach((d) => {
+            const data = d.data() as any;
+            messages.push({
+              messageId: data.messageId || d.id,
+              room: conversationId,
+              conversationId: conversationId,
+              sender: data.senderTalk2tmId || data.sender || '',
+              senderTalk2tmId: data.senderTalk2tmId || '',
+              senderId: data.senderId,
+              text: data.text,
+              clientId: data.clientId,
+              createdAt: data.createdAt,
+              status: 'synced',
+            });
+          });
+          // Ordem cronológica ascendente cliente-side
+          messages.sort((a, b) => (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
+          onNewMessages(messages);
+        },
+        (err) => {
+          if (withOrderBy) {
+            console.warn('Talk2TM: Listener de conversa com orderBy pendente. Ativando listener resiliente...', err);
+            startListening(false);
+          } else {
+            console.warn('Erro no listener de mensagens da conversa:', err);
+            onError(err);
+          }
+        }
+      );
+    } catch (e) {
+      if (withOrderBy) {
+        startListening(false);
+      } else {
+        onError(e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  };
+
+  startListening(true);
+
+  return () => {
+    if (activeUnsubscribe) {
+      activeUnsubscribe();
+    }
+  };
+}
+
+/**
+ * Escuta atualizações do documento da conversa em tempo real
+ */
+export function subscribeToConversation(
+  conversationId: string,
+  onConversationUpdate: (conv: Conversation) => void
+): Unsubscribe | null {
+  if (!firestoreDb || !isAuthValidAndNonAnonymous()) {
+    console.debug('Talk2TM [Guard]: subscribeToConversation retido — autenticação necessária.');
+    return null;
+  }
+
+  const docRef = doc(firestoreDb, 'conversations', conversationId);
+  return onSnapshot(
+    docRef,
+    (snap) => {
+      if (snap.exists()) {
+        onConversationUpdate(snap.data() as Conversation);
+      }
+    },
+    (err) => {
+      console.warn('Erro no listener da conversa:', err);
+    }
+  );
+}
+
+/**
+ * Atualiza carimbo de leitura de conversa bilateral
+ */
+export async function updateConversationLastRead(
+  conversationId: string,
+  userId: string,
+  _userName: string,
+  readAtIso: string
+): Promise<void> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db) return;
+  if (!isAuthValidAndNonAnonymous()) return;
+
+  try {
+    const convDocRef = doc(db, 'conversations', conversationId);
+    const snap = await getDoc(convDocRef);
+    if (!snap.exists()) return;
+    const conv = snap.data() as Conversation;
+
+    const updates: Record<string, any> = {
+      updatedAt: readAtIso,
+    };
+    if (conv.participantA === userId) {
+      updates.lastReadA = readAtIso;
+    } else if (conv.participantB === userId) {
+      updates.lastReadB = readAtIso;
+    }
+
+    await updateDoc(convDocRef, updates);
+  } catch (error) {
+    console.debug('Talk2TM: Falha silenciosa ao sincronizar lastRead na conversa:', error);
+  }
+}
+
+/**
+ * Obtém ou cria uma conversa bilateral entre dois participantes
+ */
+export async function getOrCreateConversation(
+  userA: { uid: string; talk2tmId: string; displayName: string },
+  userB: { uid: string; talk2tmId: string; displayName: string }
+): Promise<Conversation> {
+  const { db } = await initFirebase();
+  const sortedUids = [userA.uid, userB.uid].sort();
+  const conversationId = `conv_${sortedUids[0]}_${sortedUids[1]}`;
+
+  const isAFirst = userA.uid === sortedUids[0];
+  const pA = isAFirst ? userA : userB;
+  const pB = isAFirst ? userB : userA;
+
+  const now = new Date().toISOString();
+
+  if (db && isAuthValidAndNonAnonymous()) {
+    try {
+      const convRef = doc(db, 'conversations', conversationId);
+      const snap = await getDoc(convRef);
+      if (snap.exists()) {
+        return snap.data() as Conversation;
+      }
+      const newConv: Conversation = {
+        conversationId,
+        participantA: pA.uid,
+        participantB: pB.uid,
+        talk2tmIdA: pA.talk2tmId,
+        talk2tmIdB: pB.talk2tmId,
+        displayNameA: pA.displayName,
+        displayNameB: pB.displayName,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await setDoc(convRef, newConv);
+      return newConv;
+    } catch (e) {
+      console.warn('Erro ao consultar/criar conversa no Firestore, operando com fallback local:', e);
+    }
+  }
+
+  // Fallback offline
+  return {
+    conversationId,
+    participantA: pA.uid,
+    participantB: pB.uid,
+    talk2tmIdA: pA.talk2tmId,
+    talk2tmIdB: pB.talk2tmId,
+    displayNameA: pA.displayName,
+    displayNameB: pB.displayName,
+    createdAt: now,
+    updatedAt: now,
+  };
 }

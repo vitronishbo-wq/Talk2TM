@@ -39,15 +39,20 @@ import {
   initFirebase,
   joinFirestoreRoom,
   sendFirestoreMessage,
+  sendFirestoreConversationMessage,
   subscribeToMessages,
+  subscribeToConversationMessages,
   subscribeToRoom,
+  subscribeToConversation,
   restoreAuthSession,
   silentAuthenticateWithEmail,
   isAuthValidAndNonAnonymous,
   waitForAuthCompletion,
   getCurrentAuthUser,
   updateFirestoreLastRead,
+  updateConversationLastRead,
 } from './firebase/firestore';
+import { conversationToRoom } from './conversation';
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
@@ -135,9 +140,9 @@ export class Talk2TMApp {
       onUpdateSettings: (settings: AppSettings) => this.updateSettings(settings),
       onDeleteMessagesLocally: async (messageIds: string[]) => {
         if (!this.currentSession) return;
-        const roomId = this.currentSession.roomId;
-        // 1. Marca tombstone no armazenamento local/IndexedDB
-        hideMessagesLocally(roomId, messageIds);
+        const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+        // 1. Marca tombstone no armazenamento local/IndexedDB para o canal ativo
+        hideMessagesLocally(channelId, messageIds);
         // 2. Remove do IndexedDB local
         await deleteLocalMessages(messageIds);
         // 3. Se houver mensagens no outbox ainda pendentes, remove para não enviar após apagadas
@@ -398,12 +403,21 @@ export class Talk2TMApp {
 
     // 3. Atualiza no Firestore se online e autenticado
     if (navigator.onLine && isAuthValidAndNonAnonymous()) {
-      await updateFirestoreLastRead(
-        this.currentSession.roomId,
-        this.currentSession.userId,
-        this.currentSession.displayName,
-        nowIso
-      );
+      if (this.currentSession.conversationId) {
+        await updateConversationLastRead(
+          this.currentSession.conversationId,
+          this.currentSession.userId,
+          this.currentSession.displayName,
+          nowIso
+        );
+      } else {
+        await updateFirestoreLastRead(
+          this.currentSession.roomId,
+          this.currentSession.userId,
+          this.currentSession.displayName,
+          nowIso
+        );
+      }
     }
   }
 
@@ -417,8 +431,9 @@ export class Talk2TMApp {
       return;
     }
 
+    const channelId = this.currentSession.conversationId || this.currentSession.roomId;
     const clientId = generateId('cli');
-    const messageId = `${this.currentSession.roomId}_${clientId}`;
+    const messageId = `${channelId}_${clientId}`;
     const nowIso = new Date().toISOString();
 
     const currentAuth = getCurrentAuthUser();
@@ -430,9 +445,11 @@ export class Talk2TMApp {
 
     const msg: Message = {
       messageId,
-      room: this.currentSession.roomId,
+      room: channelId,
+      conversationId: this.currentSession.conversationId,
       sender: this.currentSession.displayName,
       senderId: effectiveSenderId,
+      senderTalk2tmId: this.currentSession.talk2tmId,
       text: sanitized.text,
       clientId,
       createdAt: nowIso,
@@ -452,7 +469,11 @@ export class Talk2TMApp {
       }
       if (isAuthValidAndNonAnonymous()) {
         try {
-          await sendFirestoreMessage(msg);
+          if (this.currentSession.conversationId) {
+            await sendFirestoreConversationMessage(msg);
+          } else {
+            await sendFirestoreMessage(msg);
+          }
           await removeFromOutbox(msg.messageId);
           const syncedMsg: Message = { ...msg, status: 'synced' };
           await saveLocalMessage(syncedMsg);
@@ -468,7 +489,8 @@ export class Talk2TMApp {
     if (!this.currentSession) return;
     this.resetInactivityTimer();
 
-    const currentMessages = await getLocalMessages(this.currentSession.roomId, 1000);
+    const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+    const currentMessages = await getLocalMessages(channelId, 1000);
     if (currentMessages.length === 0) {
       this.ui.setHasOlderMessages(false);
       return;
@@ -476,7 +498,7 @@ export class Talk2TMApp {
 
     const oldestDate = currentMessages[0].createdAt;
     const olderMessages = await getOlderLocalMessages(
-      this.currentSession.roomId,
+      channelId,
       oldestDate,
       CONFIG.HISTORY_LIMIT
     );
@@ -520,7 +542,11 @@ export class Talk2TMApp {
 
     for (const msg of pending) {
       try {
-        await sendFirestoreMessage(msg);
+        if (msg.conversationId) {
+          await sendFirestoreConversationMessage(msg);
+        } else {
+          await sendFirestoreMessage(msg);
+        }
         await removeFromOutbox(msg.messageId);
         const syncedMsg: Message = { ...msg, status: 'synced' };
         await saveLocalMessage(syncedMsg);
@@ -533,40 +559,75 @@ export class Talk2TMApp {
     this.setConnectionState('online');
   }
 
-  private setupRealtimeListeners(roomId: string): void {
+  private setupRealtimeListeners(channelId: string): void {
     if (this.unsubscribeMessages) this.unsubscribeMessages();
     if (this.unsubscribeRoom) this.unsubscribeRoom();
 
-    this.unsubscribeRoom = subscribeToRoom(roomId, (updatedRoom) => {
-      this.currentRoom = updatedRoom;
-      saveLocalRoom(updatedRoom);
-      if (this.currentSession) {
-        this.ui.updateRoomInfo(updatedRoom, this.currentSession);
-        this.ui.updateReadReceipts(updatedRoom, this.currentSession);
-      }
-    });
+    const isConversation = Boolean(this.currentSession?.conversationId);
 
-    this.unsubscribeMessages = subscribeToMessages(
-      roomId,
-      async (incomingMessages) => {
-        if (!this.currentSession) return;
-        for (const msg of incomingMessages) {
-          // Filtro antes de renderizar e antes de re-salvar localmente:
-          // Se apagada neste dispositivo, ignora permanentemente
-          if (isMessageHiddenLocally(roomId, msg.messageId)) {
-            continue;
+    if (isConversation && this.currentSession?.conversationId) {
+      const convId = this.currentSession.conversationId;
+      this.unsubscribeRoom = subscribeToConversation(convId, (conv) => {
+        const roomEquivalent = conversationToRoom(conv);
+        this.currentRoom = roomEquivalent;
+        saveLocalRoom(roomEquivalent);
+        if (this.currentSession) {
+          this.ui.updateRoomInfo(roomEquivalent, this.currentSession);
+          this.ui.updateReadReceipts(roomEquivalent, this.currentSession);
+        }
+      });
+
+      this.unsubscribeMessages = subscribeToConversationMessages(
+        convId,
+        async (incomingMessages) => {
+          if (!this.currentSession) return;
+          for (const msg of incomingMessages) {
+            if (isMessageHiddenLocally(convId, msg.messageId)) {
+              continue;
+            }
+            await saveLocalMessage(msg);
+            this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
           }
-          await saveLocalMessage(msg);
-          this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+          if (this.ui.isChatActive()) {
+            this.markChatAsRead();
+          }
+        },
+        (err) => {
+          console.warn('Listener Firestore da conversa offline:', err);
         }
-        if (this.ui.isChatActive()) {
-          this.markChatAsRead();
+      );
+    } else {
+      this.unsubscribeRoom = subscribeToRoom(channelId, (updatedRoom) => {
+        this.currentRoom = updatedRoom;
+        saveLocalRoom(updatedRoom);
+        if (this.currentSession) {
+          this.ui.updateRoomInfo(updatedRoom, this.currentSession);
+          this.ui.updateReadReceipts(updatedRoom, this.currentSession);
         }
-      },
-      (err) => {
-        console.warn('Listener Firestore offline:', err);
-      }
-    );
+      });
+
+      this.unsubscribeMessages = subscribeToMessages(
+        channelId,
+        async (incomingMessages) => {
+          if (!this.currentSession) return;
+          for (const msg of incomingMessages) {
+            // Filtro antes de renderizar e antes de re-salvar localmente:
+            // Se apagada neste dispositivo, ignora permanentemente
+            if (isMessageHiddenLocally(channelId, msg.messageId)) {
+              continue;
+            }
+            await saveLocalMessage(msg);
+            this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+          }
+          if (this.ui.isChatActive()) {
+            this.markChatAsRead();
+          }
+        },
+        (err) => {
+          console.warn('Listener Firestore offline:', err);
+        }
+      );
+    }
   }
 
   private setupActivityListeners(): void {
@@ -718,6 +779,38 @@ export class Talk2TMApp {
     }, 800);
 
     return identity.talk2tmId;
+  }
+
+  /**
+   * Conecta a sessão ativa a um canal de conversa bilateral (Fase 4).
+   * Carrega histórico local com tombstones, vincula listeners em tempo real e sincroniza outbox.
+   */
+  public async connectToConversation(conversationId: string): Promise<void> {
+    if (!this.currentSession) return;
+    this.currentSession.conversationId = conversationId;
+    saveSession(this.currentSession);
+
+    // Carrega mensagens locais do IndexedDB para a conversa respeitando tombstones
+    try {
+      await loadHiddenMessagesFromDB(conversationId);
+      const localHistory = await getLocalMessages(conversationId, CONFIG.HISTORY_LIMIT);
+      this.ui.clearMessages();
+      for (const msg of localHistory) {
+        if (!isMessageHiddenLocally(conversationId, msg.messageId)) {
+          this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+        }
+      }
+      if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
+        this.ui.setHasOlderMessages(true);
+      }
+    } catch (err) {
+      console.warn('Erro ao carregar mensagens locais da conversa:', err);
+    }
+
+    // Configura listeners em tempo real para conversations/{conversationId}
+    this.setupRealtimeListeners(conversationId);
+    this.markChatAsRead();
+    await this.syncPendingOutbox();
   }
 }
 

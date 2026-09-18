@@ -29,6 +29,8 @@ export interface Message {
   clientId: string;
   createdAt: string;
   status?: MessageStatus;
+  conversationId?: string;
+  senderTalk2tmId?: string;
 }
 
 export interface UserSession {
@@ -36,6 +38,7 @@ export interface UserSession {
   displayName: string;
   roomId: string;
   talk2tmId?: string;
+  conversationId?: string;
 }
 
 export interface ChatConfig {

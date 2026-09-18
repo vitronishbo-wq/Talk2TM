@@ -1,7 +1,7 @@
-import { Message, Room, UserSession } from '../types';
+import { Conversation, ConversationMessage, Message, Room, UserSession } from '../types';
 
 const DB_NAME = 'talk2tm_local_v1';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbInstance: IDBDatabase | null = null;
 
@@ -16,6 +16,10 @@ export async function getLocalDB(): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains('rooms')) {
         db.createObjectStore('rooms', { keyPath: 'roomId' });
+      }
+
+      if (!db.objectStoreNames.contains('conversations')) {
+        db.createObjectStore('conversations', { keyPath: 'conversationId' });
       }
 
       if (!db.objectStoreNames.contains('messages')) {
@@ -51,8 +55,9 @@ export async function getLocalDB(): Promise<IDBDatabase> {
  * Salva ou atualiza uma mensagem localmente garantindo idempotência
  */
 export async function saveLocalMessage(msg: Message): Promise<void> {
+  const channelId = msg.conversationId || msg.room;
   // Se a mensagem foi marcada como ocultada/apagada localmente neste dispositivo, ignora
-  if (isMessageHiddenLocally(msg.room, msg.messageId)) {
+  if (isMessageHiddenLocally(channelId, msg.messageId) || isMessageHiddenLocally(msg.room, msg.messageId)) {
     return;
   }
 
@@ -380,4 +385,69 @@ export function clearSession(): void {
   } catch {
     // Falha silenciosa
   }
+}
+
+/**
+ * Persistência local ultra-rápida para entidade Conversation
+ */
+export async function saveLocalConversation(conv: Conversation): Promise<void> {
+  const db = await getLocalDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('conversations', 'readwrite');
+    tx.objectStore('conversations').put(conv);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getLocalConversation(conversationId: string): Promise<Conversation | null> {
+  const db = await getLocalDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('conversations', 'readonly');
+    const request = tx.objectStore('conversations').get(conversationId);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getAllLocalConversations(): Promise<Conversation[]> {
+  const db = await getLocalDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('conversations', 'readonly');
+    const request = tx.objectStore('conversations').getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * Salva mensagem de conversa unificada com idempotência e suporte offline
+ */
+export async function saveLocalConversationMessage(msg: ConversationMessage | Message): Promise<void> {
+  const channelId = ('conversationId' in msg && msg.conversationId) ? msg.conversationId : ('room' in msg ? msg.room : '');
+  const unifiedMsg: Message = {
+    messageId: msg.messageId,
+    room: channelId,
+    conversationId: channelId,
+    sender: ('sender' in msg && msg.sender) ? msg.sender : (('senderTalk2tmId' in msg && msg.senderTalk2tmId) ? msg.senderTalk2tmId : ''),
+    senderId: msg.senderId,
+    senderTalk2tmId: ('senderTalk2tmId' in msg && msg.senderTalk2tmId) ? msg.senderTalk2tmId : undefined,
+    text: msg.text,
+    clientId: msg.clientId,
+    createdAt: msg.createdAt,
+    status: msg.status || 'synced',
+  };
+  return saveLocalMessage(unifiedMsg);
+}
+
+export async function getLocalConversationMessages(conversationId: string, limitCount = 50): Promise<Message[]> {
+  return getLocalMessages(conversationId, limitCount);
+}
+
+export async function getOlderLocalConversationMessages(
+  conversationId: string,
+  beforeIsoDate: string,
+  limitCount = 50
+): Promise<Message[]> {
+  return getOlderLocalMessages(conversationId, beforeIsoDate, limitCount);
 }
