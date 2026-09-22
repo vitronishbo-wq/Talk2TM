@@ -2,21 +2,18 @@
  * Talk2TM — Módulo de Observabilidade
  * 
  * Integração:
- * - Sentry: Monitoramento de erros, exceções não tratadas e rejeições de Promise (Free Tier).
- * - Better Stack Telemetry: Encaminhamento opcional de telemetria/logs estruturados (Free Tier).
+ * - Sentry: Monitoramento de erros, exceções não tratadas e rejeições de Promise no Frontend (Free Tier).
  * 
  * Regras:
- * - ZERO credenciais no código: DSN e Tokens lidos exclusivamente de variáveis de ambiente (VITE_*).
- * - ZERO custo: opera apenas nos limites gratuitos sem necessidade de cartão.
- * - Falha graciosa: se as variáveis não estiverem definidas, o app opera normalmente sem erros.
+ * - ZERO credenciais no código: DSN lido exclusivamente de variáveis de ambiente públicas (VITE_SENTRY_DSN).
+ * - Sem chamadas de ingestão direta de logs de servidor (Better Stack / Logtail) no frontend para prevenir vazamento de tokens e 401.
+ * - Falha graciosa: se o DSN não for configurado, a aplicação opera normalmente sem erros.
  * - Proteção de dados: higienização de senhas/PINs para nunca vazarem em eventos.
  */
 
 import * as Sentry from '@sentry/browser';
-import { Logtail } from '@logtail/browser';
 
 let sentryInitialized = false;
-let logtailClient: Logtail | null = null;
 
 // Padrões sensíveis para sanitização antes do envio a provedores externos
 const SENSITIVE_PATTERNS = [
@@ -69,7 +66,7 @@ export function isValidSentryDsn(dsn: string | undefined | null): boolean {
 export function initObservability(): void {
   if (typeof window === 'undefined') return;
 
-  // 1. Sentry Frontend
+  // Sentry Frontend
   const rawSentryDsn = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SENTRY_DSN)?.trim();
   if (isValidSentryDsn(rawSentryDsn)) {
     try {
@@ -109,22 +106,6 @@ export function initObservability(): void {
     );
   }
 
-  // 2. Better Stack Telemetry (Logtail Browser)
-  const logtailToken = (
-    typeof import.meta !== 'undefined'
-      ? (import.meta.env?.VITE_BETTERSTACK_TOKEN || import.meta.env?.VITE_LOGTAIL_SOURCE_TOKEN || '')
-      : ''
-  ).trim();
-
-  if (logtailToken && logtailToken.length > 0) {
-    try {
-      logtailClient = new Logtail(logtailToken);
-      console.log('[Observabilidade] Better Stack Telemetry inicializado com sucesso.');
-    } catch (err) {
-      console.warn('[Observabilidade] Falha ao inicializar Better Stack:', err);
-    }
-  }
-
   // Handlers globais adicionais para garantir captura mesmo em cenários extremos
   window.addEventListener('error', (event) => {
     captureException(event.error || event.message, {
@@ -146,7 +127,6 @@ export function initObservability(): void {
  * Captura exceções e erros de inicialização ou chamadas de API
  */
 export function captureException(error: unknown, context?: Record<string, unknown>): void {
-  // Sempre registra no console local para depuração
   if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
     console.error('[Observabilidade:Exception]', error, context);
   }
@@ -168,15 +148,6 @@ export function captureException(error: unknown, context?: Record<string, unknow
       });
     } catch (err) {
       console.warn('[Observabilidade] Erro ao enviar exceção ao Sentry:', err);
-    }
-  }
-
-  if (logtailClient) {
-    try {
-      const msg = error instanceof Error ? error.message : String(error);
-      logtailClient.error(sanitizeString(msg), context);
-    } catch {
-      // Ignora falhas de telemetria para não quebrar a aplicação
     }
   }
 }
@@ -203,20 +174,6 @@ export function captureMessage(
       // Falha graciosa
     }
   }
-
-  if (logtailClient) {
-    try {
-      if (level === 'error') {
-        logtailClient.error(safeMessage, context);
-      } else if (level === 'warning') {
-        logtailClient.warn(safeMessage, context);
-      } else {
-        logtailClient.info(safeMessage, context);
-      }
-    } catch {
-      // Falha graciosa
-    }
-  }
 }
 
 /**
@@ -225,6 +182,6 @@ export function captureMessage(
 export function getObservabilityStatus(): { sentry: boolean; betterstack: boolean } {
   return {
     sentry: sentryInitialized,
-    betterstack: logtailClient !== null,
+    betterstack: false,
   };
 }

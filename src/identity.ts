@@ -84,9 +84,14 @@ export function talk2tmIdToInternalEmail(talk2tmId: string): string {
 /**
  * Salva identidade no armazenamento local seguro do dispositivo.
  */
-export function saveLocalIdentity(identity: LocalIdentity): void {
+export function saveLocalIdentity(
+  identity: LocalIdentity,
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+): void {
   try {
-    localStorage.setItem(LOCAL_IDENTITY_KEY, JSON.stringify(identity));
+    const s = storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+    if (!s) return;
+    s.setItem(LOCAL_IDENTITY_KEY, JSON.stringify(identity));
   } catch {
     // Falha silenciosa se armazenamento restrito
   }
@@ -95,9 +100,13 @@ export function saveLocalIdentity(identity: LocalIdentity): void {
 /**
  * Recupera a identidade ativa configurada no dispositivo.
  */
-export function getLocalIdentity(): LocalIdentity | null {
+export function getLocalIdentity(
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+): LocalIdentity | null {
   try {
-    const raw = localStorage.getItem(LOCAL_IDENTITY_KEY);
+    const s = storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+    if (!s) return null;
+    const raw = s.getItem(LOCAL_IDENTITY_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && parsed.talk2tmId && parsed.uid) {
@@ -112,9 +121,13 @@ export function getLocalIdentity(): LocalIdentity | null {
 /**
  * Limpa identidade do dispositivo.
  */
-export function clearLocalIdentity(): void {
+export function clearLocalIdentity(
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+): void {
   try {
-    localStorage.removeItem(LOCAL_IDENTITY_KEY);
+    const s = storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+    if (!s) return;
+    s.removeItem(LOCAL_IDENTITY_KEY);
   } catch {
     // Falha silenciosa
   }

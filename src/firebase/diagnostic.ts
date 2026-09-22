@@ -17,6 +17,7 @@ import {
   onSnapshot,
   doc,
   setDoc,
+  getDoc,
   serverTimestamp,
   Unsubscribe,
 } from 'firebase/firestore';
@@ -25,10 +26,18 @@ import {
   ensureFirebaseAuth,
   silentAuthenticateWithEmail,
   joinFirestoreRoom,
+  getFirebaseDB,
+  getFirebaseAuth,
 } from './firestore';
 import { Message } from '../types';
 import { ACCESS_CONFIG } from '../config';
 import { generateId } from '../utils/sanitize';
+import {
+  createTalk2TMIdentity,
+  restoreLocalIdentity,
+  getLocalIdentity,
+  LocalIdentity,
+} from '../identity';
 
 export interface DiagnosticOptions {
   roomId?: string;
@@ -258,3 +267,122 @@ export async function testRealtimeSyncAtoB(options?: DiagnosticOptions): Promise
     };
   }
 }
+
+export interface IdentityAcceptanceResult {
+  success: boolean;
+  step: string;
+  nickname: string;
+  talk2tmId?: string;
+  uid?: string;
+  internalEmail?: string;
+  userDocExists?: boolean;
+  userProfileDocExists?: boolean;
+  restoredUid?: string;
+  restoredTalk2tmId?: string;
+  restoredDisplayName?: string;
+  elapsedMs?: number;
+  error?: string;
+}
+
+/**
+ * Teste de Aceitação Controlado — Cadastramento Assistido / Onboarding
+ * Executa o ciclo de vida completo:
+ * 1. Apelido
+ * 2. Geração do código TM-XXXX-XXXX
+ * 3. Criação de credencial segura no Firebase Auth
+ * 4. Gravação de users/{uid}
+ * 5. Gravação de userProfiles/{talk2tmId}
+ * 6. Simulação de fechar/reabrir app e restauração da identidade
+ */
+export async function testIdentityAcceptanceFlow(
+  nickname: string = 'QA_Aceitacao'
+): Promise<IdentityAcceptanceResult> {
+  const startTime = Date.now();
+  console.log('%c[Talk2TM] Iniciando Teste de Aceitação: Cadastramento Assistido...%c', 'font-weight: bold; color: #38bdf8;', 'color: inherit;');
+  console.log(`• Apelido de Teste: "${nickname}"`);
+
+  let currentStep = 'init_firebase';
+  try {
+    initFirebase();
+    const auth = getFirebaseAuth();
+    const db = getFirebaseDB();
+
+    if (!auth || !db) {
+      throw new Error('Serviço Firebase não disponível.');
+    }
+
+    // Passo 1 & 2: Criação da Identidade (TM-XXXX-XXXX + Firebase Auth + Firestore)
+    currentStep = 'create_identity_flow';
+    console.log('[1/4] Gerando código e registrando credencial no Firebase Auth...');
+    const identity = await createTalk2TMIdentity(nickname);
+    console.log(`✔ Identidade gerada: ${identity.talk2tmId} (UID: ${identity.uid})`);
+    console.log(`✔ E-mail interno: ${identity.internalEmail}`);
+
+    // Passo 3: Verificação de users/{uid}
+    currentStep = 'verify_users_doc';
+    console.log('[2/4] Verificando existência de users/{uid} no Firestore...');
+    const userSnap = await getDoc(doc(db, 'users', identity.uid));
+    const userDocExists = userSnap.exists();
+    if (!userDocExists) {
+      throw new Error(`Documento users/${identity.uid} não foi encontrado no Firestore.`);
+    }
+    console.log(`✔ Documento users/${identity.uid} confirmado.`);
+
+    // Passo 4: Verificação de userProfiles/{talk2tmId}
+    currentStep = 'verify_user_profile_doc';
+    console.log('[3/4] Verificando existência de userProfiles/{talk2tmId} no Firestore...');
+    const profileSnap = await getDoc(doc(db, 'userProfiles', identity.talk2tmId));
+    const userProfileDocExists = profileSnap.exists();
+    if (!userProfileDocExists) {
+      throw new Error(`Documento userProfiles/${identity.talk2tmId} não foi encontrado no Firestore.`);
+    }
+    console.log(`✔ Documento userProfiles/${identity.talk2tmId} confirmado.`);
+
+    // Passo 5: Simulação de Fechamento e Reabertura do App (Restauração)
+    currentStep = 'restore_identity';
+    console.log('[4/4] Simulando reinício do app e restaurando identidade via cache local...');
+    const restored = await restoreLocalIdentity();
+    if (!restored || restored.talk2tmId !== identity.talk2tmId || restored.uid !== identity.uid) {
+      throw new Error('Falha na restauração da identidade após fechar/reabrir.');
+    }
+    console.log(`✔ Identidade restaurada com sucesso: ${restored.talk2tmId} (${restored.displayName})`);
+
+    const elapsedMs = Date.now() - startTime;
+    console.log(
+      `%c[Talk2TM] ✔ TESTE DE ACEITAÇÃO 100% APROVADO em ${elapsedMs}ms%c\nTodos os elos do fluxo foram validados no Firebase em produção.`,
+      'font-weight: bold; color: #10b981;',
+      'color: inherit;'
+    );
+
+    return {
+      success: true,
+      step: 'completed',
+      nickname,
+      talk2tmId: identity.talk2tmId,
+      uid: identity.uid,
+      internalEmail: identity.internalEmail,
+      userDocExists: true,
+      userProfileDocExists: true,
+      restoredUid: restored.uid,
+      restoredTalk2tmId: restored.talk2tmId,
+      restoredDisplayName: restored.displayName,
+      elapsedMs,
+    };
+  } catch (err: unknown) {
+    const elapsedMs = Date.now() - startTime;
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `%c[Talk2TM] ✖ FALHA NO TESTE DE ACEITAÇÃO no passo "${currentStep}": ${errorMsg}%c`,
+      'font-weight: bold; color: #ef4444;',
+      'color: inherit;'
+    );
+    return {
+      success: false,
+      step: currentStep,
+      nickname,
+      elapsedMs,
+      error: errorMsg,
+    };
+  }
+}
+

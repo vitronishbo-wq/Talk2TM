@@ -49,12 +49,14 @@ import {
   isAuthValidAndNonAnonymous,
   waitForAuthCompletion,
   getCurrentAuthUser,
+  getFirebaseAuth,
   updateFirestoreLastRead,
   updateConversationLastRead,
 } from './firebase/firestore';
 import { conversationToRoom } from './conversation';
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
 import {
   createTalk2TMIdentity,
@@ -248,23 +250,46 @@ export class Talk2TMApp {
   }
 
   /**
-   * Conecta ao Firestore em segundo plano com timeout de resiliência
+   * Conecta ao Firestore em segundo plano com timeout de resiliência e amarração estrita de ciclo de vida:
+   * 1. Aguarda a consolidação do Firebase Auth (waitForAuthCompletion)
+   * 2. Confirma a existência/gravação do participante na sala com o UID real
+   * 3. Apenas depois inicia os listeners do Firestore em tempo real
    */
   private async connectFirestoreBackground(roomId: string, userId: string, user: string): Promise<void> {
-    // 1. Aguarda autenticação não-anônima ativa
-    if (!isAuthValidAndNonAnonymous()) {
-      await waitForAuthCompletion(2500);
+    // 1. Aguarda rigorosamente a consolidação do Firebase Auth não-anônimo
+    let effectiveUid = getCurrentAuthUser()?.uid;
+    if (!isAuthValidAndNonAnonymous() || !effectiveUid) {
+      const authUser = await waitForAuthCompletion(4000);
+      effectiveUid = authUser?.uid || getCurrentAuthUser()?.uid;
     }
 
-    if (!isAuthValidAndNonAnonymous()) {
-      console.debug('Talk2TM [Guard]: Conexão Firestore em background suspensa — aguardando autenticação não-anônima.');
+    if (!effectiveUid || !isAuthValidAndNonAnonymous()) {
+      console.debug('Talk2TM [Guard]: Conexão Firestore em background retida — aguardando consolidação do Firebase Auth.');
       this.setConnectionState('offline');
+
+      // Escuta reativa: quando a autenticação consolidar no Firebase Auth, re-dispara a amarração automaticamente
+      const auth = getFirebaseAuth();
+      if (auth) {
+        const unsub = onAuthStateChanged(auth, (resolvedUser) => {
+          if (resolvedUser && !resolvedUser.isAnonymous) {
+            unsub();
+            console.info(`Talk2TM [Guard]: Auth consolidado (${resolvedUser.uid}). Conectando Firestore com UID real...`);
+            this.connectFirestoreBackground(roomId, resolvedUser.uid, user);
+          }
+        });
+      }
       return;
+    }
+
+    // Atualiza a sessão ativa com o UID real do Firebase Auth
+    if (this.currentSession && this.currentSession.userId !== effectiveUid) {
+      this.currentSession.userId = effectiveUid;
+      saveSession(this.currentSession);
     }
 
     try {
       // 2. Garante PRIMEIRO que a sala exista no Firestore e que o participante com seu UID real esteja registrado
-      const joinResult = await joinFirestoreRoom(roomId, userId, user);
+      const joinResult = await joinFirestoreRoom(roomId, effectiveUid, user);
 
       if (joinResult && joinResult.success && joinResult.room) {
         this.currentRoom = joinResult.room;
@@ -274,7 +299,7 @@ export class Talk2TMApp {
           this.ui.updateReadReceipts(this.currentRoom, this.currentSession);
         }
 
-        // 3. AGORA que a sala existe e o participante está registrado e autenticado, ativa os listeners em tempo real
+        // 3. SOMENTE AGORA que a sala existe e o participante com seu UID real está autenticado e confirmado, ativa os listeners
         this.setupRealtimeListeners(roomId);
 
         // 4. Marca como lido com a sala conectada
@@ -560,8 +585,30 @@ export class Talk2TMApp {
   }
 
   private setupRealtimeListeners(channelId: string): void {
-    if (this.unsubscribeMessages) this.unsubscribeMessages();
-    if (this.unsubscribeRoom) this.unsubscribeRoom();
+    if (this.unsubscribeMessages) {
+      this.unsubscribeMessages();
+      this.unsubscribeMessages = null;
+    }
+    if (this.unsubscribeRoom) {
+      this.unsubscribeRoom();
+      this.unsubscribeRoom = null;
+    }
+
+    // Guarda estrita de ciclo de vida: nunca instancia listeners antes da autenticação consolidada
+    if (!isAuthValidAndNonAnonymous()) {
+      console.debug('Talk2TM [Guard]: setupRealtimeListeners aguardando consolidação do Firebase Auth...');
+      const auth = getFirebaseAuth();
+      if (auth) {
+        const unsubAuth = onAuthStateChanged(auth, (user) => {
+          if (user && !user.isAnonymous) {
+            unsubAuth();
+            console.debug('Talk2TM [Guard]: Auth resolvido, ativando listeners em tempo real...');
+            this.setupRealtimeListeners(channelId);
+          }
+        });
+      }
+      return;
+    }
 
     const isConversation = Boolean(this.currentSession?.conversationId);
 
@@ -805,6 +852,11 @@ export class Talk2TMApp {
       }
     } catch (err) {
       console.warn('Erro ao carregar mensagens locais da conversa:', err);
+    }
+
+    // Garante consolidação do Firebase Auth antes de amarrar listeners na conversa
+    if (!isAuthValidAndNonAnonymous()) {
+      await waitForAuthCompletion(3000);
     }
 
     // Configura listeners em tempo real para conversations/{conversationId}

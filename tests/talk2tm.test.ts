@@ -48,6 +48,15 @@ import {
   getObservabilityStatus,
   isValidSentryDsn,
 } from '../src/observability';
+import {
+  generateTalk2TMId,
+  talk2tmIdToInternalEmail,
+  saveLocalIdentity,
+  getLocalIdentity,
+  clearLocalIdentity,
+  LocalIdentity,
+} from '../src/identity';
+import { testIdentityAcceptanceFlow } from '../src/firebase/diagnostic';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -593,6 +602,50 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       erroCaptura = true;
     }
     assert(erroCaptura === false, 'captureException e captureMessage não devem lançar exceções não tratadas');
+  });
+
+  // 34. Teste de Aceitação: Ciclo de vida completo do Cadastramento Assistido
+  check('Cadastramento Assistido: Ciclo de vida controlado da identidade e persistência local', () => {
+    // 1. Apelido e Geração do Talk2TM ID
+    const apelido = 'Truman_QA';
+    const talk2tmId = generateTalk2TMId();
+    assert(talk2tmId.startsWith('TM-'), 'Código gerado deve começar com TM-');
+    assert(talk2tmId.length === 12, 'Código deve ter 12 caracteres (TM-XXXX-XXXX)');
+
+    // 2. E-mail interno associado à infraestrutura
+    const emailInterno = talk2tmIdToInternalEmail(talk2tmId);
+    assert(emailInterno.endsWith('@talk2tm.internal'), 'E-mail interno deve pertencer ao domínio @talk2tm.internal');
+
+    // 3. Simulação de Persistência no Dispositivo (localStorage)
+    const memoryStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => memoryStore[k] || null,
+      setItem: (k: string, v: string) => { memoryStore[k] = v; },
+      removeItem: (k: string) => { delete memoryStore[k]; },
+    };
+
+    const mockIdentity: LocalIdentity = {
+      uid: 'uid_test_acceptance_123',
+      talk2tmId,
+      displayName: apelido,
+      internalEmail: emailInterno,
+      internalSecret: 'sec_1234567890!@',
+      createdAt: new Date().toISOString(),
+    };
+
+    saveLocalIdentity(mockIdentity, mockStorage);
+    const restored = getLocalIdentity(mockStorage);
+    assert(restored !== null, 'Identidade deve ser salva no armazenamento local');
+    assert(restored?.talk2tmId === talk2tmId, 'Código restaurado deve ser idêntico');
+    assert(restored?.uid === mockIdentity.uid, 'UID restaurado deve ser idêntico');
+    assert(restored?.displayName === apelido, 'Apelido restaurado deve ser idêntico');
+
+    // 4. Limpeza e restauração limpa
+    clearLocalIdentity(mockStorage);
+    assert(getLocalIdentity(mockStorage) === null, 'Após limpeza, a identidade local deve ser nula');
+
+    // 5. Contrato da função de teste de aceitação de produção
+    assert(typeof testIdentityAcceptanceFlow === 'function', 'testIdentityAcceptanceFlow deve ser função exportada');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
