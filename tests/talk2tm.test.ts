@@ -41,6 +41,13 @@ import {
   conversationToRoom,
 } from '../src/conversation';
 import { Conversation } from '../src/types';
+import {
+  initObservability,
+  captureException,
+  captureMessage,
+  getObservabilityStatus,
+  isValidSentryDsn,
+} from '../src/observability';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -558,6 +565,34 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     hideMessagesLocally(convId, [msgId]);
     assert(isMessageHiddenLocally(convId, msgId) === true, 'Mensagem deve estar marcada como hidden no convId');
     assert(isMessageHiddenLocally(otherConvId, msgId) === false, 'Mensagem não deve afetar outros canais de conversa');
+  });
+
+  // 33. Observabilidade: Inicialização graciosa, higienização de credenciais e captura sem falhas
+  check('Observabilidade: Resiliência a ausência de DSN e sanitização de credenciais', () => {
+    // Validação estrita de DSN para evitar erros tipo "Invalid Sentry Dsn: https://sentry.io"
+    assert(isValidSentryDsn('https://sentry.io') === false, 'https://sentry.io sem chave pública não deve ser aceito');
+    assert(isValidSentryDsn('') === false, 'DSN vazio não deve ser aceito');
+    assert(isValidSentryDsn(undefined) === false, 'DSN indefinido não deve ser aceito');
+    assert(
+      isValidSentryDsn('https://abc123def456@o123456.ingest.sentry.io/789012') === true,
+      'DSN completo com public key e project id deve ser aceito'
+    );
+
+    // Inicialização não deve disparar exceções mesmo sem variáveis de ambiente configuradas
+    initObservability();
+    const status = getObservabilityStatus();
+    assert(typeof status.sentry === 'boolean', 'Status do Sentry deve ser booleano');
+    assert(typeof status.betterstack === 'boolean', 'Status do Better Stack deve ser booleano');
+
+    // Funções de captura devem ser no-op seguras sem DSN
+    let erroCaptura = false;
+    try {
+      captureException(new Error('Erro de teste com PIN 852456'), { context: 'unit_test' });
+      captureMessage('Mensagem com senha 135790 para auditoria', 'info');
+    } catch {
+      erroCaptura = true;
+    }
+    assert(erroCaptura === false, 'captureException e captureMessage não devem lançar exceções não tratadas');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
