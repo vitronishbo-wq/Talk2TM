@@ -32,7 +32,9 @@ service cloud.firestore {
       allow read: if isRoomParticipant(resource.data.room);
       allow create: if isRoomParticipant(request.resource.data.room) &&
                        request.resource.data.senderId == request.auth.uid;
-      allow update, delete: if false;
+      allow update: if isRoomParticipant(resource.data.room) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedFor']);
+      allow delete: if false;
     }
 
     // ====================================================================
@@ -86,7 +88,9 @@ service cloud.firestore {
         allow read: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
         allow create: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
                          request.resource.data.senderId == request.auth.uid;
-        allow update, delete: if false;
+        allow update: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedFor']);
+        allow delete: if false;
       }
     }
 

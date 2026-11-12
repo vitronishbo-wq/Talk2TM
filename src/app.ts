@@ -52,6 +52,7 @@ import {
   getFirebaseAuth,
   updateFirestoreLastRead,
   updateConversationLastRead,
+  markFirestoreMessagesDeletedForUser,
 } from './firebase/firestore';
 import { conversationToRoom } from './conversation';
 import { ChatUI } from './ui/dom';
@@ -143,6 +144,9 @@ export class Talk2TMApp {
       onDeleteMessagesLocally: async (messageIds: string[]) => {
         if (!this.currentSession) return;
         const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+        const isConv = Boolean(this.currentSession.conversationId);
+        const effectiveUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+
         // 1. Marca tombstone no armazenamento local/IndexedDB para o canal ativo
         hideMessagesLocally(channelId, messageIds);
         // 2. Remove do IndexedDB local
@@ -150,6 +154,13 @@ export class Talk2TMApp {
         // 3. Se houver mensagens no outbox ainda pendentes, remove para não enviar após apagadas
         for (const id of messageIds) {
           await removeFromOutbox(id).catch(() => {});
+        }
+        // 4. Marca na nuvem como apagada para este usuário (Opção 2 - deletedFor: [uid])
+        // Garante que, ao abrir a conta em qualquer outro aparelho, as mensagens não reapareçam
+        if (effectiveUid) {
+          markFirestoreMessagesDeletedForUser(channelId, messageIds, effectiveUid, isConv).catch((e) => {
+            console.warn('Erro ao sincronizar exclusão com o Firestore:', e);
+          });
         }
       },
       onCreateIdentity: async (displayName: string) => {
@@ -628,7 +639,14 @@ export class Talk2TMApp {
         convId,
         async (incomingMessages) => {
           if (!this.currentSession) return;
+          const myUid = this.currentSession.userId;
           for (const msg of incomingMessages) {
+            // Se foi marcada como deletada para este usuário na nuvem, garante tombstone local e não exibe
+            if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(myUid)) {
+              hideMessagesLocally(convId, [msg.messageId]);
+              await deleteLocalMessages([msg.messageId]);
+              continue;
+            }
             if (isMessageHiddenLocally(convId, msg.messageId)) {
               continue;
             }
@@ -657,7 +675,14 @@ export class Talk2TMApp {
         channelId,
         async (incomingMessages) => {
           if (!this.currentSession) return;
+          const myUid = this.currentSession.userId;
           for (const msg of incomingMessages) {
+            // Se foi marcada como deletada para este usuário na nuvem, garante tombstone local e não exibe
+            if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(myUid)) {
+              hideMessagesLocally(channelId, [msg.messageId]);
+              await deleteLocalMessages([msg.messageId]);
+              continue;
+            }
             // Filtro antes de renderizar e antes de re-salvar localmente:
             // Se apagada neste dispositivo, ignora permanentemente
             if (isMessageHiddenLocally(channelId, msg.messageId)) {
@@ -781,6 +806,8 @@ export class Talk2TMApp {
       try {
         const localHistory = await getLocalMessages(savedSession.roomId, CONFIG.HISTORY_LIMIT);
         for (const msg of localHistory) {
+          if (isMessageHiddenLocally(savedSession.roomId, msg.messageId)) continue;
+          if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(savedSession.userId)) continue;
           this.ui.appendOrUpdateMessage(msg, msg.senderId === savedSession.userId);
         }
       } catch (e) {
@@ -864,9 +891,9 @@ export class Talk2TMApp {
       const localHistory = await getLocalMessages(conversationId, CONFIG.HISTORY_LIMIT);
       this.ui.clearMessages();
       for (const msg of localHistory) {
-        if (!isMessageHiddenLocally(conversationId, msg.messageId)) {
-          this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
-        }
+        if (isMessageHiddenLocally(conversationId, msg.messageId)) continue;
+        if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(this.currentSession.userId)) continue;
+        this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
       }
       if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
         this.ui.setHasOlderMessages(true);

@@ -26,6 +26,8 @@ import {
   onSnapshot,
   Unsubscribe,
   serverTimestamp,
+  arrayUnion,
+  writeBatch,
 } from 'firebase/firestore';
 import { Conversation, ConversationMessage, Message, Room } from '../types';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
@@ -653,9 +655,14 @@ export function subscribeToMessages(
       activeUnsubscribe = onSnapshot(
         q,
         (snapshot) => {
+          const currentUid = getCurrentAuthUser()?.uid;
           const messages: Message[] = [];
           snapshot.forEach((d) => {
             const data = d.data() as Message;
+            // Se a mensagem foi marcada como apagada para este usuário na nuvem, ignora
+            if (currentUid && data.deletedFor && Array.isArray(data.deletedFor) && data.deletedFor.includes(currentUid)) {
+              return;
+            }
             messages.push({
               ...data,
               status: 'synced',
@@ -841,9 +848,14 @@ export function subscribeToConversationMessages(
       activeUnsubscribe = onSnapshot(
         q,
         (snapshot) => {
+          const currentUid = getCurrentAuthUser()?.uid;
           const messages: Message[] = [];
           snapshot.forEach((d) => {
             const data = d.data() as any;
+            // Se a mensagem foi marcada como apagada para este usuário na nuvem, ignora
+            if (currentUid && data.deletedFor && Array.isArray(data.deletedFor) && data.deletedFor.includes(currentUid)) {
+              return;
+            }
             messages.push({
               messageId: data.messageId || d.id,
               room: conversationId,
@@ -855,6 +867,7 @@ export function subscribeToConversationMessages(
               clientId: data.clientId,
               createdAt: data.createdAt,
               status: 'synced',
+              deletedFor: data.deletedFor || [],
             });
           });
           // Ordem cronológica ascendente cliente-side
@@ -1003,4 +1016,35 @@ export async function getOrCreateConversation(
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * Marca mensagens como deletadas na nuvem para o usuário especificado (deletedFor: [uid]).
+ * Isso impede que as mensagens voltem a aparecer quando a mesma conta for aberta em outros aparelhos,
+ * mantendo o histórico visível apenas para o outro participante da conversa.
+ */
+export async function markFirestoreMessagesDeletedForUser(
+  channelId: string,
+  messageIds: string[],
+  userId: string,
+  isConversation: boolean = false
+): Promise<void> {
+  if (!firestoreDb || messageIds.length === 0 || !userId) return;
+
+  try {
+    const batch = writeBatch(firestoreDb);
+    for (const msgId of messageIds) {
+      const docRef = isConversation
+        ? doc(firestoreDb, 'conversations', channelId, 'messages', msgId)
+        : doc(firestoreDb, 'messages', msgId);
+
+      batch.update(docRef, {
+        deletedFor: arrayUnion(userId),
+      });
+    }
+    await batch.commit();
+    console.info(`Talk2TM [Sync]: ${messageIds.length} mensagens marcadas como excluídas no Firestore para ${userId}`);
+  } catch (err) {
+    console.warn('Erro ao marcar mensagens como excluídas no Firestore:', err);
+  }
 }

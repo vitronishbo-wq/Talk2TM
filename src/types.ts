@@ -31,6 +31,7 @@ export interface Message {
   status?: MessageStatus;
   conversationId?: string;
   senderTalk2tmId?: string;
+  deletedFor?: string[];
 }
 
 export interface UserSession {
