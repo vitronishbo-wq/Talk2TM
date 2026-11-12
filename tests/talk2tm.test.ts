@@ -163,7 +163,8 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(getUserByPin('135790') === 'Mãezinha', 'Senha 135790 deve entrar como Mãezinha');
     assert(getUserByPin('000000') === null, 'Senha desconhecida deve retornar null');
     assert(ACCESS_CONFIG.USERS.length === 2, 'Exatamente dois usuários no sistema');
-    assert(DEFAULT_SETTINGS.inactivityLockSeconds === 5, 'Inatividade padrão de 5 segundos');
+    assert(DEFAULT_SETTINGS.inactivityLockSeconds === 300, 'Inatividade padrão de 5 minutos (300 segundos)');
+    assert(DEFAULT_SETTINGS.sessionTimeoutMinutes === 5, 'Tempo de sessão padrão de 5 minutos');
   });
 
   // 8. Verificação de Senha em app.ts ('852456' -> Truman, '135790' -> Mãezinha)
@@ -591,7 +592,7 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     initObservability();
     const status = getObservabilityStatus();
     assert(typeof status.sentry === 'boolean', 'Status do Sentry deve ser booleano');
-    assert(typeof status.betterstack === 'boolean', 'Status do Better Stack deve ser booleano');
+    assert(status.betterstack === false, 'Better Stack deve estar estritamente desativado no frontend');
 
     // Funções de captura devem ser no-op seguras sem DSN
     let erroCaptura = false;

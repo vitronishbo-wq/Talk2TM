@@ -58,12 +58,12 @@ export function getUserByPin(pin: string): AllowedUser | null {
 
 export interface AppSettings {
   sessionTimeoutMinutes: number; // 0 = desativado, ou 1, 5, 15, 30, 60
-  inactivityLockSeconds: number; // 0 = desativado, 5 = 5 segundos sem teclar, 10, 30, etc.
+  inactivityLockSeconds: number; // 0 = desativado, 60 = 1 min, 300 = 5 min (padrão), etc.
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  sessionTimeoutMinutes: 15,
-  inactivityLockSeconds: 5, // Padrão conforme solicitado pelo usuário (5 segundos sem teclar bloqueia)
+  sessionTimeoutMinutes: 5, // Padrão pré-definido de 5 minutos
+  inactivityLockSeconds: 300, // Padrão pré-definido de 5 minutos (300 segundos sem teclar bloqueia)
 };
 
 export function loadSettings(): AppSettings {
@@ -71,9 +71,14 @@ export function loadSettings(): AppSettings {
     const raw = localStorage.getItem('ttm_settings');
     if (raw) {
       const parsed = JSON.parse(raw);
+      // Migração de segurança: se o valor salvo for a versão antiga de 5 segundos, migra para os 300 segundos (5 minutos) padrão
+      const savedInactivity = typeof parsed.inactivityLockSeconds === 'number'
+        ? (parsed.inactivityLockSeconds === 5 ? DEFAULT_SETTINGS.inactivityLockSeconds : parsed.inactivityLockSeconds)
+        : DEFAULT_SETTINGS.inactivityLockSeconds;
+
       return {
         sessionTimeoutMinutes: typeof parsed.sessionTimeoutMinutes === 'number' ? parsed.sessionTimeoutMinutes : DEFAULT_SETTINGS.sessionTimeoutMinutes,
-        inactivityLockSeconds: typeof parsed.inactivityLockSeconds === 'number' ? parsed.inactivityLockSeconds : DEFAULT_SETTINGS.inactivityLockSeconds,
+        inactivityLockSeconds: savedInactivity,
       };
     }
   } catch (err) {

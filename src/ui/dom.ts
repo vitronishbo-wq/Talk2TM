@@ -516,8 +516,8 @@ export class ChatUI {
 
     const sessionOptions = [
       { val: 1, label: '1 minuto' },
-      { val: 5, label: '5 minutos' },
-      { val: 15, label: '15 minutos (recomendado)' },
+      { val: 5, label: '5 minutos (padrão)' },
+      { val: 15, label: '15 minutos' },
       { val: 30, label: '30 minutos' },
       { val: 60, label: '60 minutos' },
       { val: 0, label: 'Desativado' },
@@ -536,7 +536,7 @@ export class ChatUI {
     sessionGroup.appendChild(sessionLabel);
     sessionGroup.appendChild(this.sessionSelectEl);
 
-    // Configuração 2: Bloqueio por Inatividade (5 segundos sem teclar)
+    // Configuração 2: Bloqueio por Inatividade (5 minutos sem teclar padrão)
     const inactivityGroup = document.createElement('div');
     inactivityGroup.className = 'ttm-setting-group';
 
@@ -548,10 +548,11 @@ export class ChatUI {
     this.inactivitySelectEl.className = 'ttm-select';
 
     const inactivityOptions = [
-      { val: 5, label: '5 segundos (conforme solicitado)' },
-      { val: 10, label: '10 segundos' },
-      { val: 30, label: '30 segundos' },
-      { val: 60, label: '60 segundos' },
+      { val: 60, label: '1 minuto' },
+      { val: 120, label: '2 minutos' },
+      { val: 300, label: '5 minutos (padrão)' },
+      { val: 600, label: '10 minutos' },
+      { val: 900, label: '15 minutos' },
       { val: 0, label: 'Desativado' },
     ];
 
@@ -617,7 +618,10 @@ export class ChatUI {
 
   private updateInactivityBadge(): void {
     if (this.settings.inactivityLockSeconds > 0) {
-      this.inactivityNoticeEl.textContent = `[auto-lock: ${this.settings.inactivityLockSeconds}s]`;
+      const label = this.settings.inactivityLockSeconds >= 60
+        ? `${Math.round(this.settings.inactivityLockSeconds / 60)}m`
+        : `${this.settings.inactivityLockSeconds}s`;
+      this.inactivityNoticeEl.textContent = `[auto-lock: ${label}]`;
       this.inactivityNoticeEl.style.display = 'inline-block';
     } else {
       this.inactivityNoticeEl.textContent = '';
