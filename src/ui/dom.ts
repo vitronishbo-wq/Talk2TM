@@ -50,11 +50,14 @@ export class ChatUI {
   private loadOlderBtn!: HTMLButtonElement;
   private sendFormEl!: HTMLFormElement;
 
-  // Modo de Seleção e Exclusão Local Minimalista (1 a 1 + Apagar + Clicar fora para cancelar)
+  // Modo de Seleção e Exclusão Local Minimalista (1 a 1 + Selecionar Tudo + Apagar)
   private isSelectionMode: boolean = false;
   private selectedMessageIds: Set<string> = new Set();
   private selectionBarEl!: HTMLElement;
+  private selectAllBtnEl!: HTMLButtonElement;
+  private cancelSelectionBtnEl!: HTMLButtonElement;
   private deleteBtnEl!: HTMLButtonElement;
+  private selectModeBtn!: HTMLButtonElement;
   private isConfirmPending: boolean = false;
   private confirmTimerId: ReturnType<typeof setTimeout> | null = null;
 
@@ -388,11 +391,28 @@ export class ChatUI {
       this.events.onLoadOlder();
     });
 
+    this.selectModeBtn = document.createElement('button');
+    this.selectModeBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-sel-top';
+    this.selectModeBtn.textContent = '[selecionar tudo]';
+    this.selectModeBtn.title = 'Selecionar todas as mensagens da conversa';
+    this.selectModeBtn.addEventListener('click', () => {
+      if (this.renderedMessageIds.size === 0) {
+        this.showTemporaryNotice('Nenhuma mensagem na conversa.');
+        return;
+      }
+      if (this.isSelectionMode) {
+        this.exitSelectionMode();
+      } else {
+        this.selectAllMessages();
+      }
+    });
+
     this.inactivityNoticeEl = document.createElement('span');
     this.inactivityNoticeEl.className = 'ttm-lock-badge';
     this.updateInactivityBadge();
 
     topBar.appendChild(this.loadOlderBtn);
+    topBar.appendChild(this.selectModeBtn);
     topBar.appendChild(this.inactivityNoticeEl);
     this.chatViewEl.appendChild(topBar);
 
@@ -463,10 +483,36 @@ export class ChatUI {
       this.msgInputEl.focus();
     });
 
-    // Barra Ultra-Minimalista: Apenas botão direto 'Apagar' (ou 'Confirmar?')
+    // Barra de Seleção e Exclusão (Selecionar Tudo + Cancelar + Apagar)
     this.selectionBarEl = document.createElement('div');
     this.selectionBarEl.className = 'ttm-selection-bar';
     this.selectionBarEl.style.display = 'none';
+
+    const selectionLeft = document.createElement('div');
+    selectionLeft.className = 'ttm-selection-left';
+
+    this.selectAllBtnEl = document.createElement('button');
+    this.selectAllBtnEl.type = 'button';
+    this.selectAllBtnEl.className = 'ttm-btn ttm-btn-sel-all';
+    this.selectAllBtnEl.textContent = '[selecionar tudo]';
+    this.selectAllBtnEl.title = 'Alternar seleção de todas as mensagens';
+    this.selectAllBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleSelectAll();
+    });
+
+    this.cancelSelectionBtnEl = document.createElement('button');
+    this.cancelSelectionBtnEl.type = 'button';
+    this.cancelSelectionBtnEl.className = 'ttm-btn ttm-btn-sel-cancel';
+    this.cancelSelectionBtnEl.textContent = '[cancelar]';
+    this.cancelSelectionBtnEl.title = 'Cancelar modo de seleção';
+    this.cancelSelectionBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.exitSelectionMode();
+    });
+
+    selectionLeft.appendChild(this.selectAllBtnEl);
+    selectionLeft.appendChild(this.cancelSelectionBtnEl);
 
     this.deleteBtnEl = document.createElement('button');
     this.deleteBtnEl.type = 'button';
@@ -478,6 +524,7 @@ export class ChatUI {
       this.handleDeleteBtnClick();
     });
 
+    this.selectionBarEl.appendChild(selectionLeft);
     this.selectionBarEl.appendChild(this.deleteBtnEl);
 
     this.chatViewEl.appendChild(this.sendFormEl);
@@ -1130,6 +1177,49 @@ export class ChatUI {
     this.updateSelectionUI();
   }
 
+  /**
+   * Seleciona todas as mensagens renderizadas na tela para exclusão
+   */
+  public selectAllMessages(): void {
+    if (this.renderedMessageIds.size === 0) return;
+
+    this.isSelectionMode = true;
+    this.selectedMessageIds.clear();
+    this.renderedMessageIds.forEach((id) => this.selectedMessageIds.add(id));
+
+    this.msgListEl.classList.add('ttm-selecting-mode');
+
+    // Destaca todas as linhas renderizadas
+    this.renderedMessageIds.forEach((id) => {
+      const row = document.getElementById(`ttm-msg-${id}`);
+      if (row) {
+        row.classList.add('ttm-msg-selected');
+      }
+    });
+
+    if (!this.roomInfoEl.hasAttribute('data-original-info')) {
+      this.roomInfoEl.setAttribute('data-original-info', this.roomInfoEl.textContent || '');
+    }
+
+    this.sendFormEl.style.display = 'none';
+    this.selectionBarEl.style.display = 'flex';
+    this.resetDeleteButtonState();
+    this.updateSelectionUI();
+  }
+
+  /**
+   * Alterna entre selecionar todas e desmarcar tudo
+   */
+  public toggleSelectAll(): void {
+    const total = this.renderedMessageIds.size;
+    const isAllSelected = total > 0 && this.selectedMessageIds.size === total;
+    if (isAllSelected) {
+      this.exitSelectionMode();
+    } else {
+      this.selectAllMessages();
+    }
+  }
+
   public toggleMessageSelection(messageId: string): void {
     if (this.selectedMessageIds.has(messageId)) {
       this.selectedMessageIds.delete(messageId);
@@ -1158,8 +1248,18 @@ export class ChatUI {
 
   private updateSelectionUI(): void {
     const count = this.selectedMessageIds.size;
-    const text = count === 1 ? '1 selecionada' : `${count} selecionadas`;
+    const total = this.renderedMessageIds.size;
+    const isAll = total > 0 && count === total;
+    const text = isAll ? `Todas selecionadas (${count})` : (count === 1 ? '1 selecionada' : `${count} selecionadas`);
     this.roomInfoEl.textContent = text;
+
+    if (this.selectAllBtnEl) {
+      this.selectAllBtnEl.textContent = isAll ? '[desmarcar tudo]' : '[selecionar tudo]';
+    }
+
+    if (this.selectModeBtn) {
+      this.selectModeBtn.textContent = this.isSelectionMode ? '[sair seleção]' : '[selecionar tudo]';
+    }
 
     if (!this.isConfirmPending) {
       this.deleteBtnEl.textContent = count > 1 ? `Apagar (${count})` : 'Apagar';
@@ -1210,6 +1310,8 @@ export class ChatUI {
         this.events.onDeleteMessagesLocally(ids);
       }
       this.removeMessages(ids);
+      const count = ids.length;
+      this.showTemporaryNotice(count > 1 ? `${count} mensagens apagadas deste dispositivo.` : 'Mensagem apagada deste dispositivo.');
     }
     this.exitSelectionMode();
   }
@@ -1227,6 +1329,10 @@ export class ChatUI {
 
     this.selectionBarEl.style.display = 'none';
     this.sendFormEl.style.display = 'block';
+
+    if (this.selectModeBtn) {
+      this.selectModeBtn.textContent = '[selecionar tudo]';
+    }
 
     const originalText = this.roomInfoEl.getAttribute('data-original-info');
     if (originalText !== null) {

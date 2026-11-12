@@ -680,21 +680,80 @@ html, body {
   margin: -2px -6px;
 }
 
-/* Barra Compacta de Exclusão (Apenas botão 'Apagar' / 'Confirmar?') */
+/* Barra Compacta de Exclusão e Seleção Geral */
 .ttm-selection-bar {
   padding: 10px 14px max(12px, env(safe-area-inset-bottom)) 14px;
   border-top: 1px solid var(--border-color);
   background-color: var(--bg-dark);
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
+  gap: 8px;
   min-height: 67px;
+}
+
+.ttm-selection-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ttm-btn-sel-all {
+  height: 42px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  border: 1px solid var(--border-color);
+  background-color: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.ttm-btn-sel-all:hover,
+.ttm-btn-sel-all:active {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-bright);
+}
+
+.ttm-btn-sel-cancel {
+  height: 42px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  background-color: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.ttm-btn-sel-cancel:hover,
+.ttm-btn-sel-cancel:active {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: var(--text-bright);
+}
+
+.ttm-btn-sel-top {
+  font-size: 11px;
+  padding: 2px 8px;
+  height: 24px;
+  line-height: 18px;
+  opacity: 0.8;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.ttm-btn-sel-top:hover {
+  opacity: 1;
 }
 
 .ttm-btn-compact-del {
   height: 44px;
-  min-width: 130px;
-  padding: 0 20px;
+  min-width: 120px;
+  padding: 0 16px;
   font-size: 14px;
   font-weight: 600;
   border-radius: 8px;

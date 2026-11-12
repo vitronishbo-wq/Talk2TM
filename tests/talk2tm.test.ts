@@ -677,6 +677,25 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     }
   });
 
+  // 36. Selecionar Tudo e Apagar em Lote: Tombstones locais simultâneos
+  check('Exclusão em Lote: Selecionar tudo e aplicar tombstones locais a múltiplas mensagens', () => {
+    const channelId = 'channel_batch_delete_test';
+    const messageIds = ['msg_batch_1', 'msg_batch_2', 'msg_batch_3', 'msg_batch_4'];
+
+    // Antes da exclusão, nenhuma está oculta
+    messageIds.forEach((id) => {
+      assert(isMessageHiddenLocally(channelId, id) === false, `Mensagem ${id} não deve estar oculta antes da exclusão`);
+    });
+
+    // Executa exclusão em lote de todas as selecionadas
+    hideMessagesLocally(channelId, messageIds);
+
+    // Todas devem estar ocultas no canal
+    messageIds.forEach((id) => {
+      assert(isMessageHiddenLocally(channelId, id) === true, `Mensagem ${id} deve estar oculta após selecionar tudo e apagar`);
+    });
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
