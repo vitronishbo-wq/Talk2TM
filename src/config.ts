@@ -59,11 +59,13 @@ export function getUserByPin(pin: string): AllowedUser | null {
 export interface AppSettings {
   sessionTimeoutMinutes: number; // 0 = desativado, ou 1, 5, 15, 30, 60
   inactivityLockSeconds: number; // 0 = desativado, 60 = 1 min, 300 = 5 min (padrão), etc.
+  version?: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   sessionTimeoutMinutes: 5, // Padrão pré-definido de 5 minutos
   inactivityLockSeconds: 300, // Padrão pré-definido de 5 minutos (300 segundos sem teclar bloqueia)
+  version: 2,
 };
 
 export function loadSettings(): AppSettings {
@@ -71,20 +73,32 @@ export function loadSettings(): AppSettings {
     const raw = localStorage.getItem('ttm_settings');
     if (raw) {
       const parsed = JSON.parse(raw);
-      // Migração de segurança: se o valor salvo for a versão antiga de 5 segundos, migra para os 300 segundos (5 minutos) padrão
-      const savedInactivity = typeof parsed.inactivityLockSeconds === 'number'
-        ? (parsed.inactivityLockSeconds === 5 ? DEFAULT_SETTINGS.inactivityLockSeconds : parsed.inactivityLockSeconds)
-        : DEFAULT_SETTINGS.inactivityLockSeconds;
+      // Migração automática transparente:
+      // Se for a versão antiga (versão < 2 ou sem versão) ou se a inatividade salva for menor que 60 segundos
+      // (ex: os antigos 5s, 10s ou 30s que fechavam a calculadora na cara do usuário),
+      // migra imediatamente para 300s (5 minutos) e persiste no localStorage sem esforço do usuário.
+      if (!parsed.version || parsed.version < 2 || (typeof parsed.inactivityLockSeconds === 'number' && parsed.inactivityLockSeconds > 0 && parsed.inactivityLockSeconds < 60)) {
+        const migrated: AppSettings = {
+          sessionTimeoutMinutes: typeof parsed.sessionTimeoutMinutes === 'number' && parsed.sessionTimeoutMinutes > 0 ? parsed.sessionTimeoutMinutes : DEFAULT_SETTINGS.sessionTimeoutMinutes,
+          inactivityLockSeconds: DEFAULT_SETTINGS.inactivityLockSeconds,
+          version: 2,
+        };
+        saveSettings(migrated);
+        return migrated;
+      }
 
       return {
         sessionTimeoutMinutes: typeof parsed.sessionTimeoutMinutes === 'number' ? parsed.sessionTimeoutMinutes : DEFAULT_SETTINGS.sessionTimeoutMinutes,
-        inactivityLockSeconds: savedInactivity,
+        inactivityLockSeconds: typeof parsed.inactivityLockSeconds === 'number' ? parsed.inactivityLockSeconds : DEFAULT_SETTINGS.inactivityLockSeconds,
+        version: 2,
       };
     }
   } catch (err) {
     console.warn('Erro ao carregar configurações locais:', err);
   }
-  return { ...DEFAULT_SETTINGS };
+  const initial = { ...DEFAULT_SETTINGS };
+  saveSettings(initial);
+  return initial;
 }
 
 export function saveSettings(settings: AppSettings): void {

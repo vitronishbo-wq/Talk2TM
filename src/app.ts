@@ -717,7 +717,14 @@ export class Talk2TMApp {
       navigator.serviceWorker
         .register('/sw.js')
         .then((reg) => {
+          // Se já houver uma nova versão aguardando ativação, ativa imediatamente
+          if (reg.waiting) {
+            reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+          }
+
+          // Checa atualização no servidor imediatamente
           reg.update().catch(() => {});
+
           reg.onupdatefound = () => {
             const installing = reg.installing;
             if (installing) {
@@ -728,6 +735,20 @@ export class Talk2TMApp {
               };
             }
           };
+
+          // Auto-atualização transparente quando o usuário reabre ou foca no app
+          window.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+              reg.update().catch(() => {});
+            }
+          });
+
+          // Verificação periódica em segundo plano a cada 60 segundos
+          setInterval(() => {
+            if (navigator.onLine) {
+              reg.update().catch(() => {});
+            }
+          }, 60 * 1000);
         })
         .catch((err) => console.debug('Service Worker erro:', err));
 

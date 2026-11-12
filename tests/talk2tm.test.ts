@@ -2,7 +2,7 @@
  * Talk2TM — Suite de Testes Autônoma (Camada 25)
  */
 
-import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser } from '../src/config';
+import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser, loadSettings, saveSettings } from '../src/config';
 import { sanitizeMessageText, sanitizeName, sanitizeRoom, generateId } from '../src/utils/sanitize';
 import { verifyPassword, PASSWORDS } from '../src/app';
 import { Room } from '../src/types';
@@ -647,6 +647,34 @@ export function runTalk2TMTests(): { passed: number; total: number } {
 
     // 5. Contrato da função de teste de aceitação de produção
     assert(typeof testIdentityAcceptanceFlow === 'function', 'testIdentityAcceptanceFlow deve ser função exportada');
+  });
+
+  // 35. Migração transparente de configurações para 5 minutos padrão
+  check('PWA: Migração automática de configurações legadas para 5 minutos padrão', () => {
+    // Simula armazenamento com valor legado de 5 segundos que causava fechamento abrupto
+    const fakeStorage: Record<string, string> = {
+      ttm_settings: JSON.stringify({ sessionTimeoutMinutes: 15, inactivityLockSeconds: 5 }),
+    };
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (key: string) => fakeStorage[key] || null,
+      setItem: (key: string, val: string) => { fakeStorage[key] = val; },
+      removeItem: (key: string) => { delete fakeStorage[key]; },
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+
+    try {
+      const loaded = loadSettings();
+      assert(loaded.inactivityLockSeconds === 300, 'Configuração legada de 5s deve migrar automaticamente para 300s (5min)');
+      assert(loaded.version === 2, 'Versão das configurações deve ser atualizada para 2');
+      const persisted = JSON.parse(fakeStorage.ttm_settings);
+      assert(persisted.inactivityLockSeconds === 300, 'Novo valor de 300s deve ser persistido no localStorage sem esforço');
+      assert(persisted.version === 2, 'Versão 2 deve ser persistida');
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
