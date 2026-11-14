@@ -27,6 +27,8 @@ export class MobileCalculator {
   private displayEl!: HTMLElement;
   private expressionEl!: HTMLElement;
   private rootEl!: HTMLElement;
+  private manualBtnEl!: HTMLButtonElement;
+  private hasUnreadDotState: boolean = false;
   private isVisible: boolean = true;
 
   constructor(container: HTMLElement, callbacks: CalculatorCallbacks) {
@@ -52,14 +54,24 @@ export class MobileCalculator {
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
     manualBtn.className = 'calc-manual-btn';
-    manualBtn.textContent = 'DEG';
     manualBtn.title = 'Modo Graus / Radianos';
+
+    const degText = document.createElement('span');
+    degText.textContent = 'DEG';
+
+    const degDot = document.createElement('span');
+    degDot.className = 'calc-deg-dot';
+    degDot.setAttribute('aria-hidden', 'true');
+
+    manualBtn.appendChild(degText);
+    manualBtn.appendChild(degDot);
     manualBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (this.callbacks.onOpenManualEntry) {
         this.callbacks.onOpenManualEntry();
       }
     });
+    this.manualBtnEl = manualBtn;
 
     topBar.appendChild(topLabel);
     topBar.appendChild(manualBtn);
@@ -345,6 +357,20 @@ export class MobileCalculator {
       default:
         return secondOperand;
     }
+  }
+
+  public setUnreadDot(active: boolean): void {
+    this.hasUnreadDotState = active;
+    if (!this.manualBtnEl) return;
+    if (active) {
+      this.manualBtnEl.classList.add('calc-deg-unread');
+    } else {
+      this.manualBtnEl.classList.remove('calc-deg-unread');
+    }
+  }
+
+  public hasUnreadDot(): boolean {
+    return this.hasUnreadDotState;
   }
 
   public show(): void {

@@ -15,7 +15,7 @@ import {
   loadSettings,
   saveSettings,
 } from './config';
-import { ConnectionState, Message, Room, UserSession } from './types';
+import { Conversation, ConnectionState, Message, Room, UserSession } from './types';
 import { generateId, sanitizeMessageText } from './utils/sanitize';
 import {
   addToOutbox,
@@ -34,6 +34,10 @@ import {
   isMessageHiddenLocally,
   deleteLocalMessages,
   loadHiddenMessagesFromDB,
+  saveMonitorContext,
+  getMonitorContext,
+  saveLocalLastReadTimestamp,
+  getLocalLastReadTimestamp,
 } from './storage/indexeddb';
 import {
   initFirebase,
@@ -53,7 +57,15 @@ import {
   updateFirestoreLastRead,
   updateConversationLastRead,
   markFirestoreMessagesDeletedForUser,
+  fetchLatestMessagesFromServer,
+  fetchChannelMetadataFromServer,
 } from './firebase/firestore';
+import {
+  hasUnreadIncomingMessage,
+  getSelfLastReadFromChannel,
+  maxIsoDate,
+  normalizeAndDeduplicateMessages,
+} from './utils/unread';
 import { conversationToRoom } from './conversation';
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
@@ -131,6 +143,15 @@ export class Talk2TMApp {
   private inactivityTimerId: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeMessages: Unsubscribe | null = null;
   private unsubscribeRoom: Unsubscribe | null = null;
+
+  // Monitoramento passivo desacoplado da sessão PIN (apenas para ponto discreto no DEG)
+  private unsubscribeMonitorMessages: Unsubscribe | null = null;
+  private unsubscribeMonitorChannel: Unsubscribe | null = null;
+  private unsubscribeMonitorAuthWait: Unsubscribe | null = null;
+  private cachedMonitorMessages: Message[] = [];
+  private cachedMonitorChannel: Room | Conversation | null = null;
+  private lastWakeUpFetchTime: number = 0;
+  private isWakingUp: boolean = false;
 
   constructor(container: HTMLElement) {
     this.appSettings = loadSettings();
@@ -211,34 +232,45 @@ export class Talk2TMApp {
     this.currentSession = session;
     this.currentRoom = roomToUse;
     saveSession(session);
+    this.persistMonitorContext(session);
     saveLocalRoom(roomToUse).catch(console.warn);
+
+    // Interrompe monitor passivo enquanto o chat ativo assume o canal
+    this.stopBackgroundMonitor();
 
     // 1. DESBLOQUEIO IMEDIATO DA INTERFACE DO CHAT (Zero latência)
     this.ui.showChatView(session, roomToUse);
     this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
 
-    // 2. Inicia temporizadores de sessão e inatividade (5 segundos sem teclar)
+    // 2. Inicia temporizadores de sessão e inatividade (5 minutos padrão)
     this.startSessionTimeout();
     this.resetInactivityTimer();
 
     // 3. Carrega histórico local imediato do IndexedDB (carregando tombstones antes)
+    let latestLocalIso: string | null = null;
     try {
       await loadHiddenMessagesFromDB(roomId);
       const localHistory = await getLocalMessages(roomId, CONFIG.HISTORY_LIMIT);
-      for (const msg of localHistory) {
-        if (!isMessageHiddenLocally(roomId, msg.messageId)) {
-          this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+      const normalized = normalizeAndDeduplicateMessages(localHistory, userId, (id) =>
+        isMessageHiddenLocally(roomId, id)
+      );
+      for (const msg of normalized) {
+        this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+        if (!latestLocalIso || msg.createdAt > latestLocalIso) {
+          latestLocalIso = msg.createdAt;
         }
       }
-      if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
+      if (normalized.length >= CONFIG.HISTORY_LIMIT) {
         this.ui.setHasOlderMessages(true);
       }
     } catch (dbErr) {
       console.warn('Erro ao ler mensagens locais:', dbErr);
     }
 
-    // Registra leitura imediata do chat pelo participante
-    this.markChatAsRead();
+    // Se offline, marca somente até o último item local consultado e apaga o indicador local
+    if (!navigator.onLine && this.ui.isChatActive()) {
+      await this.markChatAsRead(false, latestLocalIso || undefined);
+    }
 
     // Layer 4 — 2. Complete Silent Auth (if new session)
     // Autenticação transparente sem prompt visual na calculadora
@@ -249,9 +281,10 @@ export class Talk2TMApp {
       roomToUse.participantA = effectiveUid;
       this.currentSession = session;
       saveSession(session);
+      this.persistMonitorContext(session);
     }
 
-    // Layer 4 — 3. Initialize Firestore Listeners
+    // Layer 4 — 3. Initialize Firestore Listeners + Sincronização imediata das mensagens pendentes
     await this.connectFirestoreBackground(roomId, effectiveUid, user);
 
     // Layer 4 — 4. Flush Offline Outbox
@@ -296,6 +329,7 @@ export class Talk2TMApp {
     if (this.currentSession && this.currentSession.userId !== effectiveUid) {
       this.currentSession.userId = effectiveUid;
       saveSession(this.currentSession);
+      this.persistMonitorContext(this.currentSession);
     }
 
     try {
@@ -313,8 +347,12 @@ export class Talk2TMApp {
         // 3. SOMENTE AGORA que a sala existe e o participante com seu UID real está autenticado e confirmado, ativa os listeners
         this.setupRealtimeListeners(roomId);
 
-        // 4. Marca como lido com a sala conectada
-        this.markChatAsRead();
+        // 4. Busca mensagens mais recentes do servidor e só então marca como consultadas/apaga o indicador
+        await this.refreshLatestChannelFromServer(roomId, false, effectiveUid);
+
+        if (this.ui.isChatActive() && this.currentSession) {
+          await this.markChatAsRead(true);
+        }
 
         // 5. Sincroniza mensagens que estavam pendentes no outbox
         await this.syncPendingOutbox();
@@ -376,6 +414,15 @@ export class Talk2TMApp {
   public lockToCalculator(): void {
     this.stopAllTimers();
     this.ui.showCalculatorView();
+    // Se a sessão ainda existe, reavalia mensagens recentes locais; se expirou, o monitor passivo assume
+    if (!this.currentSession) {
+      this.startBackgroundMonitor();
+    } else {
+      const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+      getLocalMessages(channelId, CONFIG.HISTORY_LIMIT)
+        .then((msgs) => this.evaluateUnreadIndicator(msgs, this.currentRoom))
+        .catch(() => {});
+    }
   }
 
   public leaveSession(): void {
@@ -391,17 +438,30 @@ export class Talk2TMApp {
     this.currentSession = null;
     this.currentRoom = null;
     clearSession();
+    // Limpa mensagens do DOM ao encerrar sessão protegida por PIN
+    this.ui.clearMessages();
+    // Inicia monitor passivo na calculadora sem manter sessão PIN desbloqueada
+    this.startBackgroundMonitor();
   }
 
   private lastMarkedReadTime: number = 0;
 
   /**
-   * Salva e sincroniza a leitura do chat pelo participante atual
+   * Salva e sincroniza a leitura do chat pelo participante atual.
+   * Só apaga o indicador do DEG quando as mensagens pendentes tiverem sido efetivamente consultadas.
    */
-  public async markChatAsRead(): Promise<void> {
+  public async markChatAsRead(forceSync: boolean = false, customReadAtIso?: string): Promise<void> {
     if (!this.currentSession) return;
     const now = Date.now();
-    const nowIso = new Date(now).toISOString();
+    const nowIso = customReadAtIso || new Date(now).toISOString();
+    const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+
+    // Persiste carimbo local monotônico para evitar falsos não-lidos após bloqueio/reabertura
+    saveLocalLastReadTimestamp(channelId, nowIso);
+
+    if (this.ui.isChatActive()) {
+      this.ui.setCalculatorUnreadDot(false);
+    }
 
     try {
       // 1. Salva localmente no IndexedDB imediatamente
@@ -432,7 +492,7 @@ export class Talk2TMApp {
     }
 
     // 2. Throttle para chamadas de rede no Firestore (1.5s)
-    if (now - this.lastMarkedReadTime < 1500) {
+    if (!forceSync && now - this.lastMarkedReadTime < 1500) {
       return;
     }
     this.lastMarkedReadTime = now;
@@ -640,6 +700,7 @@ export class Talk2TMApp {
         async (incomingMessages) => {
           if (!this.currentSession) return;
           const myUid = this.currentSession.userId;
+          const visibleIncoming: Message[] = [];
           for (const msg of incomingMessages) {
             // Se foi marcada como deletada para este usuário na nuvem, garante tombstone local e não exibe
             if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(myUid)) {
@@ -651,10 +712,15 @@ export class Talk2TMApp {
               continue;
             }
             await saveLocalMessage(msg);
-            this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+            visibleIncoming.push(msg);
+            if (this.ui.isChatActive()) {
+              this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+            }
           }
           if (this.ui.isChatActive()) {
-            this.markChatAsRead();
+            await this.markChatAsRead();
+          } else {
+            await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
           }
         },
         (err) => {
@@ -676,6 +742,7 @@ export class Talk2TMApp {
         async (incomingMessages) => {
           if (!this.currentSession) return;
           const myUid = this.currentSession.userId;
+          const visibleIncoming: Message[] = [];
           for (const msg of incomingMessages) {
             // Se foi marcada como deletada para este usuário na nuvem, garante tombstone local e não exibe
             if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(myUid)) {
@@ -689,16 +756,318 @@ export class Talk2TMApp {
               continue;
             }
             await saveLocalMessage(msg);
-            this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+            visibleIncoming.push(msg);
+            if (this.ui.isChatActive()) {
+              this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+            }
           }
           if (this.ui.isChatActive()) {
-            this.markChatAsRead();
+            await this.markChatAsRead();
+          } else {
+            await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
           }
         },
         (err) => {
           console.warn('Listener Firestore offline:', err);
         }
       );
+    }
+  }
+
+  /**
+   * Persiste contexto mínimo para monitoramento passivo sem desbloquear sessão PIN
+   */
+  private persistMonitorContext(session: UserSession): void {
+    const channelId = session.conversationId || session.roomId;
+    saveMonitorContext({
+      channelId,
+      isConversation: Boolean(session.conversationId),
+      userId: session.userId,
+      displayName: session.displayName,
+    });
+  }
+
+  /**
+   * Encerra listeners do monitor passivo quando o chat está ativo ou antes de recriar conexão
+   */
+  private stopBackgroundMonitor(): void {
+    if (this.unsubscribeMonitorMessages) {
+      this.unsubscribeMonitorMessages();
+      this.unsubscribeMonitorMessages = null;
+    }
+    if (this.unsubscribeMonitorChannel) {
+      this.unsubscribeMonitorChannel();
+      this.unsubscribeMonitorChannel = null;
+    }
+    if (this.unsubscribeMonitorAuthWait) {
+      this.unsubscribeMonitorAuthWait();
+      this.unsubscribeMonitorAuthWait = null;
+    }
+  }
+
+  /**
+   * Monitor passivo e desacoplado da sessão protegida por PIN:
+   * Quando a calculadora está visível (mesmo após expirar o tempo de sessão),
+   * acompanha mensagens recebidas apenas para atualizar o ponto discreto de 6px em DEG.
+   */
+  public startBackgroundMonitor(forceReattach: boolean = false): void {
+    if (this.currentSession && this.ui.isChatActive()) {
+      return;
+    }
+
+    const ctx = getMonitorContext();
+    if (!ctx) return;
+
+    if (!isAuthValidAndNonAnonymous()) {
+      const auth = getFirebaseAuth();
+      if (auth && !this.unsubscribeMonitorAuthWait) {
+        this.unsubscribeMonitorAuthWait = onAuthStateChanged(auth, (resolvedUser) => {
+          if (resolvedUser && !resolvedUser.isAnonymous) {
+            if (this.unsubscribeMonitorAuthWait) {
+              this.unsubscribeMonitorAuthWait();
+              this.unsubscribeMonitorAuthWait = null;
+            }
+            this.startBackgroundMonitor(true);
+            void this.handleAppWakeUp(true);
+          }
+        });
+      }
+      return;
+    }
+
+    if (forceReattach) {
+      this.stopBackgroundMonitor();
+    } else if (this.unsubscribeMonitorMessages) {
+      return;
+    }
+
+    const effectiveUid = getCurrentAuthUser()?.uid || ctx.userId;
+
+    if (ctx.isConversation) {
+      this.unsubscribeMonitorChannel = subscribeToConversation(ctx.channelId, (conv) => {
+        this.cachedMonitorChannel = conv;
+        void this.evaluateUnreadIndicator(this.cachedMonitorMessages, conv);
+      });
+
+      this.unsubscribeMonitorMessages = subscribeToConversationMessages(
+        ctx.channelId,
+        async (incoming) => {
+          const visible: Message[] = [];
+          await loadHiddenMessagesFromDB(ctx.channelId).catch(() => {});
+          for (const msg of incoming) {
+            if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(effectiveUid)) {
+              hideMessagesLocally(ctx.channelId, [msg.messageId]);
+              await deleteLocalMessages([msg.messageId]).catch(() => {});
+              continue;
+            }
+            if (isMessageHiddenLocally(ctx.channelId, msg.messageId)) {
+              continue;
+            }
+            await saveLocalMessage(msg).catch(() => {});
+            visible.push(msg);
+          }
+          this.cachedMonitorMessages = visible;
+          await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
+        },
+        (err) => {
+          console.debug('Talk2TM [Monitor]: listener em espera:', err?.message);
+        }
+      );
+    } else {
+      this.unsubscribeMonitorChannel = subscribeToRoom(ctx.channelId, (room) => {
+        this.cachedMonitorChannel = room;
+        saveLocalRoom(room).catch(() => {});
+        void this.evaluateUnreadIndicator(this.cachedMonitorMessages, room);
+      });
+
+      this.unsubscribeMonitorMessages = subscribeToMessages(
+        ctx.channelId,
+        async (incoming) => {
+          const visible: Message[] = [];
+          await loadHiddenMessagesFromDB(ctx.channelId).catch(() => {});
+          for (const msg of incoming) {
+            if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(effectiveUid)) {
+              hideMessagesLocally(ctx.channelId, [msg.messageId]);
+              await deleteLocalMessages([msg.messageId]).catch(() => {});
+              continue;
+            }
+            if (isMessageHiddenLocally(ctx.channelId, msg.messageId)) {
+              continue;
+            }
+            await saveLocalMessage(msg).catch(() => {});
+            visible.push(msg);
+          }
+          this.cachedMonitorMessages = visible;
+          await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
+        },
+        (err) => {
+          console.debug('Talk2TM [Monitor]: listener em espera:', err?.message);
+        }
+      );
+    }
+  }
+
+  /**
+   * Avalia com precisão se há mensagens novas não consultadas e atualiza apenas o ponto discreto do DEG.
+   */
+  private async evaluateUnreadIndicator(
+    messages: Message[],
+    channelMeta?: Room | Conversation | null
+  ): Promise<void> {
+    if (this.ui.isChatActive()) {
+      this.ui.setCalculatorUnreadDot(false);
+      return;
+    }
+
+    const ctx = getMonitorContext();
+    const channelId =
+      this.currentSession?.conversationId ||
+      this.currentSession?.roomId ||
+      ctx?.channelId ||
+      ACCESS_CONFIG.DEFAULT_ROOM;
+
+    const myUid = getCurrentAuthUser()?.uid || this.currentSession?.userId || ctx?.userId || '';
+    const myDisplayName = this.currentSession?.displayName || ctx?.displayName || '';
+
+    const localRoomFallback = channelMeta || this.currentRoom || (await getLocalRoom(channelId).catch(() => null));
+    const localStoredRead = getLocalLastReadTimestamp(channelId);
+    const channelSelfRead = getSelfLastReadFromChannel(localRoomFallback, myUid, myDisplayName);
+    const lastReadIso = maxIsoDate(localStoredRead, channelSelfRead);
+
+    let candidateMessages = messages;
+    if (candidateMessages.length === 0) {
+      candidateMessages = await getLocalMessages(channelId, CONFIG.HISTORY_LIMIT).catch(() => []);
+    }
+
+    const hasUnread = hasUnreadIncomingMessage({
+      messages: candidateMessages,
+      myUid,
+      myDisplayName,
+      lastReadIso,
+      isHiddenFn: (id) => isMessageHiddenLocally(channelId, id),
+    });
+
+    this.ui.setCalculatorUnreadDot(hasUnread);
+  }
+
+  /**
+   * Busca mensagens e metadados recentes diretamente do servidor para o canal informado,
+   * garantindo atualização imediata após acordar do repouso ou ao entrar no chat.
+   */
+  private async refreshLatestChannelFromServer(
+    channelId: string,
+    isConversation: boolean,
+    myUid: string
+  ): Promise<Message[]> {
+    if (!navigator.onLine || !isAuthValidAndNonAnonymous()) {
+      return [];
+    }
+
+    const [latestMessages, latestMeta] = await Promise.all([
+      fetchLatestMessagesFromServer(channelId, isConversation, myUid).catch(() => []),
+      fetchChannelMetadataFromServer(channelId, isConversation).catch(() => null),
+    ]);
+
+    if (latestMeta) {
+      this.cachedMonitorChannel = latestMeta;
+      if (isConversation && 'conversationId' in latestMeta) {
+        const roomEquiv = conversationToRoom(latestMeta);
+        this.currentRoom = roomEquiv;
+        saveLocalRoom(roomEquiv).catch(() => {});
+        if (this.currentSession) {
+          this.ui.updateRoomInfo(roomEquiv, this.currentSession);
+          this.ui.updateReadReceipts(roomEquiv, this.currentSession);
+        }
+      } else if ('roomId' in latestMeta) {
+        this.currentRoom = latestMeta;
+        saveLocalRoom(latestMeta).catch(() => {});
+        if (this.currentSession) {
+          this.ui.updateRoomInfo(latestMeta, this.currentSession);
+          this.ui.updateReadReceipts(latestMeta, this.currentSession);
+        }
+      }
+    }
+
+    const visible: Message[] = [];
+    await loadHiddenMessagesFromDB(channelId).catch(() => {});
+    for (const msg of latestMessages) {
+      if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(myUid)) {
+        hideMessagesLocally(channelId, [msg.messageId]);
+        await deleteLocalMessages([msg.messageId]).catch(() => {});
+        continue;
+      }
+      if (isMessageHiddenLocally(channelId, msg.messageId)) {
+        continue;
+      }
+      await saveLocalMessage(msg).catch(() => {});
+      visible.push(msg);
+      if (this.currentSession && this.ui.isChatActive()) {
+        this.ui.appendOrUpdateMessage(msg, msg.senderId === myUid);
+      }
+    }
+
+    return visible;
+  }
+
+  /**
+   * Recuperação ao retornar do repouso (visibilitychange / focus / online):
+   * Reconecta listeners caso o socket do SO tenha dormido e consulta o servidor diretamente.
+   */
+  public async handleAppWakeUp(force: boolean = false): Promise<void> {
+    if (this.isWakingUp) return;
+    const now = Date.now();
+    if (!force && now - this.lastWakeUpFetchTime < 800) {
+      return;
+    }
+
+    if (!navigator.onLine) return;
+
+    this.isWakingUp = true;
+    const elapsedSinceLastWake = now - this.lastWakeUpFetchTime;
+    this.lastWakeUpFetchTime = now;
+
+    try {
+      if (!isAuthValidAndNonAnonymous()) {
+        await restoreAuthSession(1500);
+      }
+      if (!isAuthValidAndNonAnonymous()) {
+        return;
+      }
+
+      if (this.currentSession) {
+        const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+        const isConv = Boolean(this.currentSession.conversationId);
+        const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+
+        // Reanexa listeners se ficou tempo suficiente em repouso para o WebSocket cair
+        if (force || elapsedSinceLastWake > 15000 || !this.unsubscribeMessages) {
+          this.setupRealtimeListeners(channelId);
+        }
+
+        const visible = await this.refreshLatestChannelFromServer(channelId, isConv, myUid);
+        if (this.ui.isChatActive()) {
+          await this.markChatAsRead();
+          await this.syncPendingOutbox();
+        } else {
+          await this.evaluateUnreadIndicator(visible, this.currentRoom);
+        }
+      } else {
+        const ctx = getMonitorContext();
+        if (!ctx) return;
+
+        const effectiveUid = getCurrentAuthUser()?.uid || ctx.userId;
+        if (force || elapsedSinceLastWake > 15000 || !this.unsubscribeMonitorMessages) {
+          this.startBackgroundMonitor(true);
+        }
+
+        const visible = await this.refreshLatestChannelFromServer(ctx.channelId, ctx.isConversation, effectiveUid);
+        this.cachedMonitorMessages = visible;
+        await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
+      }
+    } catch (err) {
+      console.debug('Talk2TM [WakeUp]: sincronização em segundo plano adiou:', err);
+    } finally {
+      this.isWakingUp = false;
     }
   }
 
@@ -715,21 +1084,20 @@ export class Talk2TMApp {
     window.addEventListener('pointerdown', renewActivity, { passive: true });
 
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && this.currentSession && this.ui.isChatActive()) {
-        this.markChatAsRead();
+      if (document.visibilityState === 'visible') {
+        void this.handleAppWakeUp();
       }
     });
     window.addEventListener('focus', () => {
-      if (this.currentSession && this.ui.isChatActive()) {
-        this.markChatAsRead();
-      }
+      void this.handleAppWakeUp();
     });
   }
 
   private setupNetworkMonitoring(): void {
     window.addEventListener('online', () => {
       this.setConnectionState('online');
-      this.syncPendingOutbox();
+      void this.syncPendingOutbox();
+      void this.handleAppWakeUp(true);
     });
 
     window.addEventListener('offline', () => {
@@ -797,27 +1165,41 @@ export class Talk2TMApp {
     const savedSession = getSession();
     if (savedSession && isAuthValidAndNonAnonymous()) {
       this.currentSession = savedSession;
+      this.persistMonitorContext(savedSession);
       const savedRoom = await getLocalRoom(savedSession.roomId).catch(() => null);
       if (savedRoom) this.currentRoom = savedRoom;
       this.ui.showChatView(savedSession, savedRoom || undefined);
       this.startSessionTimeout();
       this.resetInactivityTimer();
 
+      const channelId = savedSession.conversationId || savedSession.roomId;
+      let latestLocalIso: string | null = null;
       try {
-        const localHistory = await getLocalMessages(savedSession.roomId, CONFIG.HISTORY_LIMIT);
-        for (const msg of localHistory) {
-          if (isMessageHiddenLocally(savedSession.roomId, msg.messageId)) continue;
-          if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(savedSession.userId)) continue;
+        await loadHiddenMessagesFromDB(channelId);
+        const localHistory = await getLocalMessages(channelId, CONFIG.HISTORY_LIMIT);
+        const normalized = normalizeAndDeduplicateMessages(localHistory, savedSession.userId, (id) =>
+          isMessageHiddenLocally(channelId, id)
+        );
+        for (const msg of normalized) {
           this.ui.appendOrUpdateMessage(msg, msg.senderId === savedSession.userId);
+          if (!latestLocalIso || msg.createdAt > latestLocalIso) {
+            latestLocalIso = msg.createdAt;
+          }
         }
       } catch (e) {
         console.warn('Erro ao restaurar histórico de mensagens:', e);
       }
 
-      this.markChatAsRead();
+      if (!navigator.onLine && this.ui.isChatActive()) {
+        await this.markChatAsRead(false, latestLocalIso || undefined);
+      }
 
-      // Layer 4 — 3. Initialize Firestore Listeners
-      await this.connectFirestoreBackground(savedSession.roomId, savedSession.userId, savedSession.displayName);
+      // Layer 4 — 3. Initialize Firestore Listeners + Sync imediato ao entrar
+      if (savedSession.conversationId) {
+        await this.connectToConversation(savedSession.conversationId);
+      } else {
+        await this.connectFirestoreBackground(savedSession.roomId, savedSession.userId, savedSession.displayName);
+      }
 
       // Layer 4 — 4. Flush Offline Outbox
       await this.syncPendingOutbox();
@@ -832,6 +1214,14 @@ export class Talk2TMApp {
 
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
     this.ui.showCalculatorView();
+
+    // Calculadora visível ao abrir PWA: ativa monitor passivo se já houver contexto e auth válidos
+    if (getMonitorContext()) {
+      this.startBackgroundMonitor();
+      if (navigator.onLine && isAuthValidAndNonAnonymous()) {
+        void this.handleAppWakeUp(true);
+      }
+    }
   }
 
   /**
@@ -863,10 +1253,12 @@ export class Talk2TMApp {
     this.currentSession = session;
     this.currentRoom = roomToUse;
     saveSession(session);
+    this.persistMonitorContext(session);
     saveLocalRoom(roomToUse).catch(console.warn);
 
     // Desbloqueio imediato da interface do chat com o novo código
     setTimeout(() => {
+      this.stopBackgroundMonitor();
       this.ui.showChatView(session, roomToUse);
       this.setConnectionState(navigator.onLine ? 'online' : 'offline');
       this.startSessionTimeout();
@@ -884,22 +1276,33 @@ export class Talk2TMApp {
     if (!this.currentSession) return;
     this.currentSession.conversationId = conversationId;
     saveSession(this.currentSession);
+    this.persistMonitorContext(this.currentSession);
+    this.stopBackgroundMonitor();
 
     // Carrega mensagens locais do IndexedDB para a conversa respeitando tombstones
+    let latestLocalIso: string | null = null;
     try {
       await loadHiddenMessagesFromDB(conversationId);
       const localHistory = await getLocalMessages(conversationId, CONFIG.HISTORY_LIMIT);
+      const normalized = normalizeAndDeduplicateMessages(localHistory, this.currentSession.userId, (id) =>
+        isMessageHiddenLocally(conversationId, id)
+      );
       this.ui.clearMessages();
-      for (const msg of localHistory) {
-        if (isMessageHiddenLocally(conversationId, msg.messageId)) continue;
-        if (msg.deletedFor && Array.isArray(msg.deletedFor) && msg.deletedFor.includes(this.currentSession.userId)) continue;
+      for (const msg of normalized) {
         this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+        if (!latestLocalIso || msg.createdAt > latestLocalIso) {
+          latestLocalIso = msg.createdAt;
+        }
       }
-      if (localHistory.length >= CONFIG.HISTORY_LIMIT) {
+      if (normalized.length >= CONFIG.HISTORY_LIMIT) {
         this.ui.setHasOlderMessages(true);
       }
     } catch (err) {
       console.warn('Erro ao carregar mensagens locais da conversa:', err);
+    }
+
+    if (!navigator.onLine && this.ui.isChatActive()) {
+      await this.markChatAsRead(false, latestLocalIso || undefined);
     }
 
     // Garante consolidação do Firebase Auth antes de amarrar listeners na conversa
@@ -907,9 +1310,13 @@ export class Talk2TMApp {
       await waitForAuthCompletion(3000);
     }
 
-    // Configura listeners em tempo real para conversations/{conversationId}
+    // Configura listeners em tempo real para conversations/{conversationId} e sincroniza do servidor
     this.setupRealtimeListeners(conversationId);
-    this.markChatAsRead();
+    const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    await this.refreshLatestChannelFromServer(conversationId, true, myUid);
+    if (this.ui.isChatActive()) {
+      await this.markChatAsRead(true);
+    }
     await this.syncPendingOutbox();
   }
 }

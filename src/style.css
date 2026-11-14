@@ -175,6 +175,9 @@ html, body {
 }
 
 .calc-manual-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: transparent;
   border: none;
   color: #484f58;
@@ -188,6 +191,19 @@ html, body {
 
 .calc-manual-btn:hover {
   color: #8b949e;
+}
+
+.calc-deg-dot {
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #f85149;
+  flex-shrink: 0;
+}
+
+.calc-manual-btn.calc-deg-unread .calc-deg-dot {
+  display: inline-block;
 }
 
 .calc-display-box {

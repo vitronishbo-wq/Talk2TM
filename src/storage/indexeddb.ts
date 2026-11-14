@@ -451,3 +451,83 @@ export async function getOlderLocalConversationMessages(
 ): Promise<Message[]> {
   return getOlderLocalMessages(conversationId, beforeIsoDate, limitCount);
 }
+
+// ============================================================================
+// Contexto de Monitoramento em Segundo Plano & Carimbo Local de Leitura
+// Nunca substitui nem desbloqueia a sessão protegida por PIN (talk2tm_session).
+// ============================================================================
+
+export interface MonitorContext {
+  channelId: string;
+  isConversation: boolean;
+  userId: string;
+  displayName: string;
+}
+
+const MONITOR_CONTEXT_KEY = 'talk2tm_monitor_v1';
+const LAST_READ_KEY_PREFIX = 'ttm_last_read_';
+
+export function saveMonitorContext(context: MonitorContext): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(MONITOR_CONTEXT_KEY, JSON.stringify(context));
+    }
+  } catch {
+    // Falha silenciosa
+  }
+}
+
+export function getMonitorContext(): MonitorContext | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(MONITOR_CONTEXT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<MonitorContext>;
+    if (!parsed || typeof parsed.channelId !== 'string' || typeof parsed.userId !== 'string') {
+      return null;
+    }
+    return {
+      channelId: parsed.channelId,
+      isConversation: Boolean(parsed.isConversation),
+      userId: parsed.userId,
+      displayName: parsed.displayName || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function clearMonitorContext(): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(MONITOR_CONTEXT_KEY);
+    }
+  } catch {
+    // Falha silenciosa
+  }
+}
+
+export function saveLocalLastReadTimestamp(channelId: string, readAtIso: string): void {
+  if (!channelId || !readAtIso) return;
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const key = `${LAST_READ_KEY_PREFIX}${channelId}`;
+    const existing = localStorage.getItem(key);
+    if (!existing || readAtIso > existing) {
+      localStorage.setItem(key, readAtIso);
+    }
+  } catch {
+    // Falha silenciosa
+  }
+}
+
+export function getLocalLastReadTimestamp(channelId: string): string | null {
+  if (!channelId) return null;
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage.getItem(`${LAST_READ_KEY_PREFIX}${channelId}`);
+  } catch {
+    return null;
+  }
+}
+

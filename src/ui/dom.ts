@@ -742,6 +742,14 @@ export class ChatUI {
     return this.chatViewEl ? this.chatViewEl.style.display === 'flex' : false;
   }
 
+  public setCalculatorUnreadDot(active: boolean): void {
+    this.calculator.setUnreadDot(active);
+  }
+
+  public hasCalculatorUnreadDot(): boolean {
+    return this.calculator.hasUnreadDot();
+  }
+
   public clearMessages(): void {
     this.renderedMessageIds.clear();
     this.renderedMessages.clear();
@@ -859,12 +867,15 @@ export class ChatUI {
     const statusInfo = this.computeMessageStatus(msg, isSelf);
 
     const existingRow = document.getElementById(`ttm-msg-${msg.messageId}`);
-    if (existingRow) {
-      const statusSpan = existingRow.querySelector('.msg-status');
-      if (statusSpan && isSelf) {
-        statusSpan.textContent = statusInfo.text;
-        statusSpan.setAttribute('data-status', statusInfo.dataStatus);
-        if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
+    if (existingRow || this.renderedMessageIds.has(msg.messageId)) {
+      if (existingRow) {
+        existingRow.setAttribute('data-created-at', msg.createdAt);
+        const statusSpan = existingRow.querySelector('.msg-status');
+        if (statusSpan && isSelf) {
+          statusSpan.textContent = statusInfo.text;
+          statusSpan.setAttribute('data-status', statusInfo.dataStatus);
+          if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
+        }
       }
       return;
     }
@@ -872,6 +883,7 @@ export class ChatUI {
     const rowEl = document.createElement('div');
     rowEl.id = `ttm-msg-${msg.messageId}`;
     rowEl.className = 'ttm-msg-row';
+    rowEl.setAttribute('data-created-at', msg.createdAt);
     if (isSelf) {
       rowEl.classList.add('ttm-msg-self');
     }
@@ -930,10 +942,26 @@ export class ChatUI {
 
     this.attachMessageSelectionHandlers(rowEl, msg.messageId);
 
-    this.msgListEl.appendChild(rowEl);
-    this.renderedMessageIds.add(msg.messageId);
+    // Inserção cronológica estável para evitar desordem caso mensagens atrasadas cheguem fora de sequência
+    let insertBeforeNode: ChildNode | null = null;
+    const children = this.msgListEl.children;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const child = children[i] as HTMLElement;
+      const childCreatedAt = child.getAttribute('data-created-at');
+      if (childCreatedAt && childCreatedAt > msg.createdAt) {
+        insertBeforeNode = child;
+      } else {
+        break;
+      }
+    }
 
-    this.scrollToBottom();
+    if (insertBeforeNode) {
+      this.msgListEl.insertBefore(rowEl, insertBeforeNode);
+    } else {
+      this.msgListEl.appendChild(rowEl);
+      this.scrollToBottom();
+    }
+    this.renderedMessageIds.add(msg.messageId);
   }
 
   public prependMessages(messages: Message[], currentUserId: string): void {
@@ -952,6 +980,7 @@ export class ChatUI {
       const rowEl = document.createElement('div');
       rowEl.id = `ttm-msg-${msg.messageId}`;
       rowEl.className = 'ttm-msg-row';
+      rowEl.setAttribute('data-created-at', msg.createdAt);
       if (isSelf) {
         rowEl.classList.add('ttm-msg-self');
       }

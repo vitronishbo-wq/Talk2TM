@@ -16,6 +16,9 @@ import {
   Firestore,
   doc,
   getDoc,
+  getDocFromServer,
+  getDocs,
+  getDocsFromServer,
   setDoc,
   updateDoc,
   collection,
@@ -31,6 +34,7 @@ import {
 } from 'firebase/firestore';
 import { Conversation, ConversationMessage, Message, Room } from '../types';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
+import { selectLatestMessages } from '../utils/unread';
 
 export enum OperationType {
   CREATE = 'create',
@@ -644,12 +648,11 @@ export function subscribeToMessages(
             collection(firestoreDb!, 'messages'),
             where('room', '==', roomId),
             orderBy('createdAt', 'desc'),
-            limit(50)
+            limit(80)
           )
         : query(
             collection(firestoreDb!, 'messages'),
-            where('room', '==', roomId),
-            limit(100)
+            where('room', '==', roomId)
           );
 
       activeUnsubscribe = onSnapshot(
@@ -665,12 +668,12 @@ export function subscribeToMessages(
             }
             messages.push({
               ...data,
+              messageId: data.messageId || d.id,
               status: 'synced',
             });
           });
-          // Garante ordem cronológica estável cliente-side
-          messages.sort((a, b) => (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
-          onNewMessages(messages);
+          // Seleciona as mais recentes e ordena cronologicamente (nunca descarta recentes no fallback)
+          onNewMessages(selectLatestMessages(messages, 80));
         },
         (err) => {
           if (withOrderBy) {
@@ -842,8 +845,8 @@ export function subscribeToConversationMessages(
     try {
       const messagesCollection = collection(firestoreDb!, 'conversations', conversationId, 'messages');
       const q = withOrderBy
-        ? query(messagesCollection, orderBy('createdAt', 'desc'), limit(50))
-        : query(messagesCollection, limit(100));
+        ? query(messagesCollection, orderBy('createdAt', 'desc'), limit(80))
+        : query(messagesCollection);
 
       activeUnsubscribe = onSnapshot(
         q,
@@ -870,9 +873,8 @@ export function subscribeToConversationMessages(
               deletedFor: data.deletedFor || [],
             });
           });
-          // Ordem cronológica ascendente cliente-side
-          messages.sort((a, b) => (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
-          onNewMessages(messages);
+          // Seleciona as mais recentes e ordena cronologicamente (nunca descarta recentes no fallback)
+          onNewMessages(selectLatestMessages(messages, 80));
         },
         (err) => {
           if (withOrderBy) {
@@ -1048,3 +1050,112 @@ export async function markFirestoreMessagesDeletedForUser(
     console.warn('Erro ao marcar mensagens como excluídas no Firestore:', err);
   }
 }
+
+/**
+ * Busca diretamente no servidor Firestore as mensagens mais recentes de uma sala ou conversa.
+ * Essencial após retorno do PWA do repouso (visibilitychange / focus / online) para garantir
+ * recuperação imediata mesmo quando o WebSocket em segundo plano foi suspenso pelo sistema operacional.
+ */
+export async function fetchLatestMessagesFromServer(
+  channelId: string,
+  isConversation: boolean = false,
+  myUid?: string
+): Promise<Message[]> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
+    return [];
+  }
+
+  const effectiveUid = myUid || getCurrentAuthUser()?.uid || '';
+
+  const mapSnapshot = (snapshot: { forEach: (cb: (d: { id: string; data: () => any }) => void) => void }): Message[] => {
+    const messages: Message[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (effectiveUid && data.deletedFor && Array.isArray(data.deletedFor) && data.deletedFor.includes(effectiveUid)) {
+        return;
+      }
+      if (isConversation) {
+        messages.push({
+          messageId: data.messageId || d.id,
+          room: channelId,
+          conversationId: channelId,
+          sender: data.senderTalk2tmId || data.sender || '',
+          senderTalk2tmId: data.senderTalk2tmId || '',
+          senderId: data.senderId,
+          text: data.text,
+          clientId: data.clientId,
+          createdAt: data.createdAt,
+          status: 'synced',
+          deletedFor: data.deletedFor || [],
+        });
+      } else {
+        messages.push({
+          ...data,
+          messageId: data.messageId || d.id,
+          status: 'synced',
+        } as Message);
+      }
+    });
+    return selectLatestMessages(messages, 80);
+  };
+
+  const orderedQuery = isConversation
+    ? query(collection(db, 'conversations', channelId, 'messages'), orderBy('createdAt', 'desc'), limit(80))
+    : query(collection(db, 'messages'), where('room', '==', channelId), orderBy('createdAt', 'desc'), limit(80));
+
+  const unorderedQuery = isConversation
+    ? query(collection(db, 'conversations', channelId, 'messages'))
+    : query(collection(db, 'messages'), where('room', '==', channelId));
+
+  try {
+    const snap = await getDocsFromServer(orderedQuery);
+    return mapSnapshot(snap);
+  } catch {
+    // Pode falhar por índice composto ausente ou rede momentaneamente indisponível
+    try {
+      const snapUnordered = await getDocsFromServer(unorderedQuery);
+      return mapSnapshot(snapUnordered);
+    } catch {
+      try {
+        const cachedOrdered = await getDocs(orderedQuery);
+        return mapSnapshot(cachedOrdered);
+      } catch {
+        try {
+          const cachedUnordered = await getDocs(unorderedQuery);
+          return mapSnapshot(cachedUnordered);
+        } catch {
+          return [];
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Busca metadados atualizados da sala ou conversa diretamente do servidor
+ * para manter lastRead sincronizado entre dispositivos.
+ */
+export async function fetchChannelMetadataFromServer(
+  channelId: string,
+  isConversation: boolean = false
+): Promise<Room | Conversation | null> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
+    return null;
+  }
+
+  const docRef = isConversation ? doc(db, 'conversations', channelId) : doc(db, 'rooms', channelId);
+  try {
+    const snap = await getDocFromServer(docRef);
+    return snap.exists() ? (snap.data() as Room | Conversation) : null;
+  } catch {
+    try {
+      const cached = await getDoc(docRef);
+      return cached.exists() ? (cached.data() as Room | Conversation) : null;
+    } catch {
+      return null;
+    }
+  }
+}
+

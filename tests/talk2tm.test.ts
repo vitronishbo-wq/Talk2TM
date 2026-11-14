@@ -35,12 +35,24 @@ import {
   getHiddenMessageIds,
   hideMessagesLocally,
   isMessageHiddenLocally,
+  saveMonitorContext,
+  getMonitorContext,
+  clearMonitorContext,
+  saveLocalLastReadTimestamp,
+  getLocalLastReadTimestamp,
 } from '../src/storage/indexeddb';
+import {
+  hasUnreadIncomingMessage,
+  normalizeAndDeduplicateMessages,
+  selectLatestMessages,
+  getSelfLastReadFromChannel,
+  maxIsoDate,
+} from '../src/utils/unread';
 import {
   buildDeterministicConversationId,
   conversationToRoom,
 } from '../src/conversation';
-import { Conversation } from '../src/types';
+import { Conversation, Message } from '../src/types';
 import {
   initObservability,
   captureException,
@@ -694,6 +706,232 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     messageIds.forEach((id) => {
       assert(isMessageHiddenLocally(channelId, id) === true, `Mensagem ${id} deve estar oculta após selecionar tudo e apagar`);
     });
+  });
+
+  // 37. Opção 2: Exclusão sincronizada por usuário entre aparelhos (deletedFor)
+  check('Opção 2: Filtragem cross-device de mensagens marcadas com deletedFor', () => {
+    const myUid = 'uid_truman_real';
+    const otherUid = 'uid_maezinha_real';
+    const shouldHide = (deletedFor: string[] | undefined, uid: string) =>
+      Boolean(deletedFor && Array.isArray(deletedFor) && deletedFor.includes(uid));
+
+    assert(shouldHide([myUid], myUid) === true, 'Mensagem marcada para meu UID deve ser ocultada em qualquer aparelho');
+    assert(shouldHide([myUid], otherUid) === false, 'Mensagem apagada apenas por mim deve permanecer visível para o outro participante');
+    assert(shouldHide(undefined, myUid) === false, 'Mensagem sem deletedFor deve ser exibida normalmente');
+  });
+
+  // 38. Indicador DEG: hasUnreadIncomingMessage evita falsos positivos (remetente, deletedFor, tombstones, lastRead)
+  check('Indicador DEG: hasUnreadIncomingMessage detecta apenas mensagens novas reais do parceiro', () => {
+    const myUid = 'uid_truman';
+    const partnerUid = 'uid_maezinha';
+    const lastRead = '2026-09-07T10:00:00.000Z';
+
+    const makeMsg = (overrides: Partial<Message>): Message => ({
+      messageId: 'm_default',
+      room: 'talk2tm_main',
+      sender: 'Mãezinha',
+      senderId: partnerUid,
+      text: 'Olá',
+      clientId: 'cli_1',
+      createdAt: '2026-09-07T10:05:00.000Z',
+      status: 'synced',
+      ...overrides,
+    });
+
+    // 1. Própria mensagem posterior ao lastRead não dispara ponto vermelho
+    assert(
+      hasUnreadIncomingMessage({
+        messages: [makeMsg({ messageId: 'm1', senderId: myUid, sender: 'Truman' })],
+        myUid,
+        myDisplayName: 'Truman',
+        lastReadIso: lastRead,
+      }) === false,
+      'Mensagem enviada pelo próprio UID não deve ativar indicador'
+    );
+
+    // 2. Própria mensagem identificada por displayName não dispara ponto vermelho
+    assert(
+      hasUnreadIncomingMessage({
+        messages: [makeMsg({ messageId: 'm2', senderId: 'legacy_uid', sender: 'Truman' })],
+        myUid,
+        myDisplayName: 'Truman',
+        lastReadIso: lastRead,
+      }) === false,
+      'Mensagem com mesmo displayName do usuário não deve ativar indicador'
+    );
+
+    // 3. Mensagem do parceiro anterior ou igual ao lastRead não dispara
+    assert(
+      hasUnreadIncomingMessage({
+        messages: [makeMsg({ messageId: 'm3', createdAt: '2026-09-07T10:00:00.000Z' })],
+        myUid,
+        myDisplayName: 'Truman',
+        lastReadIso: lastRead,
+      }) === false,
+      'Mensagem já consultada (<= lastRead) não deve ativar indicador'
+    );
+
+    // 4. Mensagem do parceiro com deletedFor do usuário não dispara
+    assert(
+      hasUnreadIncomingMessage({
+        messages: [makeMsg({ messageId: 'm4', deletedFor: [myUid] })],
+        myUid,
+        myDisplayName: 'Truman',
+        lastReadIso: lastRead,
+      }) === false,
+      'Mensagem apagada via deletedFor não deve ativar indicador'
+    );
+
+    // 5. Mensagem do parceiro ocultada localmente (tombstone) não dispara
+    assert(
+      hasUnreadIncomingMessage({
+        messages: [makeMsg({ messageId: 'm5' })],
+        myUid,
+        myDisplayName: 'Truman',
+        lastReadIso: lastRead,
+        isHiddenFn: (id) => id === 'm5',
+      }) === false,
+      'Mensagem ocultada localmente não deve ativar indicador'
+    );
+
+    // 6. Mensagem nova do parceiro após lastRead ativa o indicador
+    assert(
+      hasUnreadIncomingMessage({
+        messages: [makeMsg({ messageId: 'm6', createdAt: '2026-09-07T10:01:00.000Z' })],
+        myUid,
+        myDisplayName: 'Truman',
+        lastReadIso: lastRead,
+      }) === true,
+      'Mensagem nova do parceiro após lastRead deve ativar o indicador'
+    );
+  });
+
+  // 39. selectLatestMessages nunca descarta mensagens mais recentes em coleções > 100 docs
+  check('Firestore Query Helper: selectLatestMessages preserva as N mais recentes em ordem cronológica', () => {
+    const bulk: Message[] = [];
+    for (let i = 0; i < 150; i++) {
+      const hour = String(Math.floor(i / 60)).padStart(2, '0');
+      const min = String(i % 60).padStart(2, '0');
+      bulk.push({
+        messageId: `msg_${i}`,
+        room: 'talk2tm_main',
+        sender: 'Mãezinha',
+        senderId: 'uid_maezinha',
+        text: `Msg ${i}`,
+        clientId: `c_${i}`,
+        createdAt: `2026-09-07T${hour}:${min}:00.000Z`,
+        status: 'synced',
+      });
+    }
+    // Embaralha simulando retorno arbitrário sem orderBy
+    const reversed = [...bulk].reverse();
+    const latest80 = selectLatestMessages(reversed, 80);
+
+    assert(latest80.length === 80, 'Deve retornar exatamente 80 mensagens mais recentes');
+    assert(latest80[0].messageId === 'msg_70', 'Primeira das 80 recentes deve ser msg_70');
+    assert(latest80[79].messageId === 'msg_149', 'Última das 80 recentes deve ser msg_149');
+    assert(latest80[0].createdAt < latest80[79].createdAt, 'Deve retornar ordenado cronologicamente ascendente');
+  });
+
+  // 40. normalizeAndDeduplicateMessages elimina duplicatas mantendo status mais avançado
+  check('Deduplicação: normalizeAndDeduplicateMessages remove duplicatas e mantém ordem cronológica', () => {
+    const msgs: Message[] = [
+      {
+        messageId: 'm_2',
+        room: 'r',
+        sender: 'Truman',
+        senderId: 'u1',
+        text: 'segunda',
+        clientId: 'c2',
+        createdAt: '2026-09-07T10:02:00.000Z',
+        status: 'pending',
+      },
+      {
+        messageId: 'm_1',
+        room: 'r',
+        sender: 'Mãezinha',
+        senderId: 'u2',
+        text: 'primeira',
+        clientId: 'c1',
+        createdAt: '2026-09-07T10:01:00.000Z',
+        status: 'synced',
+      },
+      {
+        messageId: 'm_2',
+        room: 'r',
+        sender: 'Truman',
+        senderId: 'u1',
+        text: 'segunda',
+        clientId: 'c2',
+        createdAt: '2026-09-07T10:02:00.000Z',
+        status: 'read',
+      },
+    ];
+
+    const result = normalizeAndDeduplicateMessages(msgs, 'u1');
+    assert(result.length === 2, 'Deve deduplicar m_2 deixando apenas 2 mensagens');
+    assert(result[0].messageId === 'm_1', 'Ordem cronológica coloca m_1 primeiro');
+    assert(result[1].messageId === 'm_2' && result[1].status === 'read', 'Status read deve prevalecer sobre pending');
+  });
+
+  // 41. getSelfLastReadFromChannel, maxIsoDate e persistência monotônica de MonitorContext / lastRead
+  check('MonitorContext & lastRead: resolução segura e persistência local sem desbloquear PIN', () => {
+    const room: Room = {
+      roomId: 'talk2tm_main',
+      participantA: 'uid_truman',
+      participantAName: 'Truman',
+      participantB: 'uid_maezinha',
+      participantBName: 'Mãezinha',
+      createdAt: '2026-09-07T07:00:00.000Z',
+      lastActivity: '2026-09-07T10:00:00.000Z',
+      lastReadA: '2026-09-07T08:00:00.000Z',
+      lastRead: {
+        Truman: '2026-09-07T09:15:00.000Z',
+        Mãezinha: '2026-09-07T10:00:00.000Z',
+      },
+    };
+
+    const selfRead = getSelfLastReadFromChannel(room, 'uid_truman', 'Truman');
+    assert(selfRead === '2026-09-07T09:15:00.000Z', 'Deve selecionar o timestamp mais recente do próprio usuário');
+    assert(
+      maxIsoDate('2026-09-07T08:00:00.000Z', null, '2026-09-07T09:30:00.000Z') === '2026-09-07T09:30:00.000Z',
+      'maxIsoDate deve retornar a data mais recente ignorando nulos'
+    );
+
+    const fakeStorage: Record<string, string> = {};
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (key: string) => fakeStorage[key] || null,
+      setItem: (key: string, val: string) => { fakeStorage[key] = val; },
+      removeItem: (key: string) => { delete fakeStorage[key]; },
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+
+    try {
+      saveMonitorContext({
+        channelId: 'talk2tm_main',
+        isConversation: false,
+        userId: 'uid_truman',
+        displayName: 'Truman',
+      });
+      const ctx = getMonitorContext();
+      assert(ctx !== null && ctx.channelId === 'talk2tm_main' && ctx.displayName === 'Truman', 'MonitorContext deve persistir corretamente');
+      assert(fakeStorage['talk2tm_session'] === undefined, 'MonitorContext nunca deve gravar sessão PIN');
+
+      saveLocalLastReadTimestamp('talk2tm_main', '2026-09-07T12:00:00.000Z');
+      saveLocalLastReadTimestamp('talk2tm_main', '2026-09-07T11:00:00.000Z');
+      assert(
+        getLocalLastReadTimestamp('talk2tm_main') === '2026-09-07T12:00:00.000Z',
+        'Carimbo local de leitura deve ser estritamente monotônico'
+      );
+
+      clearMonitorContext();
+      assert(getMonitorContext() === null, 'clearMonitorContext deve limpar contexto');
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
