@@ -595,6 +595,10 @@ export class ChatUI {
     this.inactivitySelectEl.className = 'ttm-select';
 
     const inactivityOptions = [
+      { val: 5, label: '5 segundos' },
+      { val: 10, label: '10 segundos' },
+      { val: 15, label: '15 segundos' },
+      { val: 30, label: '30 segundos' },
       { val: 60, label: '1 minuto' },
       { val: 120, label: '2 minutos' },
       { val: 300, label: '5 minutos (padrão)' },
@@ -628,6 +632,7 @@ export class ChatUI {
       this.settings = {
         sessionTimeoutMinutes: Number(this.sessionSelectEl.value),
         inactivityLockSeconds: Number(this.inactivitySelectEl.value),
+        version: 2,
       };
       this.events.onUpdateSettings(this.settings);
       this.updateInactivityBadge();

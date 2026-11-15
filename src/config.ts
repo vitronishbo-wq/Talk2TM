@@ -73,11 +73,10 @@ export function loadSettings(): AppSettings {
     const raw = localStorage.getItem('ttm_settings');
     if (raw) {
       const parsed = JSON.parse(raw);
-      // Migração automática transparente:
-      // Se for a versão antiga (versão < 2 ou sem versão) ou se a inatividade salva for menor que 60 segundos
-      // (ex: os antigos 5s, 10s ou 30s que fechavam a calculadora na cara do usuário),
-      // migra imediatamente para 300s (5 minutos) e persiste no localStorage sem esforço do usuário.
-      if (!parsed.version || parsed.version < 2 || (typeof parsed.inactivityLockSeconds === 'number' && parsed.inactivityLockSeconds > 0 && parsed.inactivityLockSeconds < 60)) {
+      // Migração automática transparente apenas para versões legadas (< 2):
+      // Garante que instalações antigas com 5s legado migrem para o padrão seguro de 5 minutos (300s),
+      // mas preserva qualquer escolha explícita em segundos ou minutos feita após a v2.
+      if (!parsed.version || parsed.version < 2) {
         const migrated: AppSettings = {
           sessionTimeoutMinutes: typeof parsed.sessionTimeoutMinutes === 'number' && parsed.sessionTimeoutMinutes > 0 ? parsed.sessionTimeoutMinutes : DEFAULT_SETTINGS.sessionTimeoutMinutes,
           inactivityLockSeconds: DEFAULT_SETTINGS.inactivityLockSeconds,
@@ -103,7 +102,11 @@ export function loadSettings(): AppSettings {
 
 export function saveSettings(settings: AppSettings): void {
   try {
-    localStorage.setItem('ttm_settings', JSON.stringify(settings));
+    const payload: AppSettings = {
+      ...settings,
+      version: settings.version ?? DEFAULT_SETTINGS.version,
+    };
+    localStorage.setItem('ttm_settings', JSON.stringify(payload));
   } catch (err) {
     console.warn('Erro ao salvar configurações locais:', err);
   }

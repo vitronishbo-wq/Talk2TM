@@ -934,6 +934,35 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     }
   });
 
+  // 42. Opções extras em segundos no bloqueio sem alterar o padrão de 5 minutos existente
+  check('Configurações: Opções extras em segundos são preservadas na v2 sem desfazer padrão de 5min', () => {
+    const fakeStorage: Record<string, string> = {};
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (key: string) => fakeStorage[key] || null,
+      setItem: (key: string, val: string) => { fakeStorage[key] = val; },
+      removeItem: (key: string) => { delete fakeStorage[key]; },
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+
+    try {
+      // 1. Instalação nova ou já na v2 mantém 5 minutos (300s) como padrão
+      const initial = loadSettings();
+      assert(initial.inactivityLockSeconds === 300, 'Padrão inicial deve permanecer 300s (5min)');
+      assert(initial.sessionTimeoutMinutes === 5, 'Tempo de sessão padrão deve permanecer 5min');
+
+      // 2. Usuário escolhe explicitamente uma opção extra em segundos (ex.: 15s)
+      saveSettings({ sessionTimeoutMinutes: 5, inactivityLockSeconds: 15 });
+      const reloaded = loadSettings();
+      assert(reloaded.inactivityLockSeconds === 15, 'Escolha explícita em segundos na v2 deve persistir');
+      assert(reloaded.version === 2, 'saveSettings deve manter version: 2');
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
