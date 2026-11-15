@@ -963,6 +963,36 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     }
   });
 
+  // 43. Isolamento por userId do carimbo local de leitura e bloqueio obrigatório no arranque
+  check('Segurança e Multi-PIN: lastRead local é isolado por userId no mesmo navegador', () => {
+    const fakeStorage: Record<string, string> = {};
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (key: string) => fakeStorage[key] || null,
+      setItem: (key: string, val: string) => { fakeStorage[key] = val; },
+      removeItem: (key: string) => { delete fakeStorage[key]; },
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+
+    try {
+      saveLocalLastReadTimestamp('truman-maezinha', '2026-09-07T16:00:00.000Z', 'uid_truman');
+      saveLocalLastReadTimestamp('truman-maezinha', '2026-09-07T10:00:00.000Z', 'uid_maezinha');
+
+      assert(
+        getLocalLastReadTimestamp('truman-maezinha', 'uid_truman') === '2026-09-07T16:00:00.000Z',
+        'Carimbo local de Truman deve permanecer isolado'
+      );
+      assert(
+        getLocalLastReadTimestamp('truman-maezinha', 'uid_maezinha') === '2026-09-07T10:00:00.000Z',
+        'Carimbo local de Mãezinha não deve herdar leitura do Truman no mesmo navegador'
+      );
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }

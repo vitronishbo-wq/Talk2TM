@@ -395,7 +395,6 @@ export class Talk2TMApp {
     if (this.appSettings.sessionTimeoutMinutes <= 0) return;
 
     this.sessionTimeoutId = setTimeout(() => {
-      this.leaveSession();
       this.lockToCalculator();
     }, this.appSettings.sessionTimeoutMinutes * 60 * 1000);
   }
@@ -412,17 +411,8 @@ export class Talk2TMApp {
   }
 
   public lockToCalculator(): void {
-    this.stopAllTimers();
+    this.leaveSession();
     this.ui.showCalculatorView();
-    // Se a sessão ainda existe, reavalia mensagens recentes locais; se expirou, o monitor passivo assume
-    if (!this.currentSession) {
-      this.startBackgroundMonitor();
-    } else {
-      const channelId = this.currentSession.conversationId || this.currentSession.roomId;
-      getLocalMessages(channelId, CONFIG.HISTORY_LIMIT)
-        .then((msgs) => this.evaluateUnreadIndicator(msgs, this.currentRoom))
-        .catch(() => {});
-    }
   }
 
   public leaveSession(): void {
@@ -456,8 +446,8 @@ export class Talk2TMApp {
     const nowIso = customReadAtIso || new Date(now).toISOString();
     const channelId = this.currentSession.conversationId || this.currentSession.roomId;
 
-    // Persiste carimbo local monotônico para evitar falsos não-lidos após bloqueio/reabertura
-    saveLocalLastReadTimestamp(channelId, nowIso);
+    // Persiste carimbo local monotônico por utilizador para evitar mistura ou falsos não-lidos
+    saveLocalLastReadTimestamp(channelId, nowIso, this.currentSession.userId);
 
     if (this.ui.isChatActive()) {
       this.ui.setCalculatorUnreadDot(false);
@@ -930,7 +920,7 @@ export class Talk2TMApp {
     const myDisplayName = this.currentSession?.displayName || ctx?.displayName || '';
 
     const localRoomFallback = channelMeta || this.currentRoom || (await getLocalRoom(channelId).catch(() => null));
-    const localStoredRead = getLocalLastReadTimestamp(channelId);
+    const localStoredRead = getLocalLastReadTimestamp(channelId, myUid);
     const channelSelfRead = getSelfLastReadFromChannel(localRoomFallback, myUid, myDisplayName);
     const lastReadIso = maxIsoDate(localStoredRead, channelSelfRead);
 
@@ -1161,61 +1151,59 @@ export class Talk2TMApp {
     // Layer 4 — 1. Restore Firebase Auth Session (onAuthStateChanged)
     await restoreAuthSession();
 
-    // Restaura sessão se houver dados salvos e autenticação válida ativa
+    // Segurança padrão: o PWA SEMPRE inicia bloqueado na calculadora.
+    // Mensagens nunca são exibidas automaticamente ao abrir o app sem digitar o PIN.
     const savedSession = getSession();
-    if (savedSession && isAuthValidAndNonAnonymous()) {
-      this.currentSession = savedSession;
-      this.persistMonitorContext(savedSession);
-      const savedRoom = await getLocalRoom(savedSession.roomId).catch(() => null);
-      if (savedRoom) this.currentRoom = savedRoom;
-      this.ui.showChatView(savedSession, savedRoom || undefined);
-      this.startSessionTimeout();
-      this.resetInactivityTimer();
-
-      const channelId = savedSession.conversationId || savedSession.roomId;
-      let latestLocalIso: string | null = null;
-      try {
-        await loadHiddenMessagesFromDB(channelId);
-        const localHistory = await getLocalMessages(channelId, CONFIG.HISTORY_LIMIT);
-        const normalized = normalizeAndDeduplicateMessages(localHistory, savedSession.userId, (id) =>
-          isMessageHiddenLocally(channelId, id)
-        );
-        for (const msg of normalized) {
-          this.ui.appendOrUpdateMessage(msg, msg.senderId === savedSession.userId);
-          if (!latestLocalIso || msg.createdAt > latestLocalIso) {
-            latestLocalIso = msg.createdAt;
-          }
-        }
-      } catch (e) {
-        console.warn('Erro ao restaurar histórico de mensagens:', e);
+    if (savedSession) {
+      if (!getMonitorContext()) {
+        this.persistMonitorContext(savedSession);
       }
+      clearSession();
+    }
+    this.currentSession = null;
+    this.currentRoom = null;
+    this.ui.clearMessages();
 
-      if (!navigator.onLine && this.ui.isChatActive()) {
-        await this.markChatAsRead(false, latestLocalIso || undefined);
+    // Migração silenciosa: se o aparelho já esteve autenticado anteriormente no Firebase Auth
+    // mas ainda não tem MonitorContext salvo, reconstrói o contexto passivo sem desbloquear o chat.
+    if (!getMonitorContext() && isAuthValidAndNonAnonymous()) {
+      const authUser = getCurrentAuthUser();
+      const email = authUser?.email || '';
+      if (authUser && email === 'truman@talk2tm.internal') {
+        saveMonitorContext({
+          channelId: ACCESS_CONFIG.DEFAULT_ROOM,
+          isConversation: false,
+          userId: authUser.uid,
+          displayName: 'Truman',
+        });
+      } else if (authUser && email === 'maezinha@talk2tm.internal') {
+        saveMonitorContext({
+          channelId: ACCESS_CONFIG.DEFAULT_ROOM,
+          isConversation: false,
+          userId: authUser.uid,
+          displayName: 'Mãezinha',
+        });
       }
-
-      // Layer 4 — 3. Initialize Firestore Listeners + Sync imediato ao entrar
-      if (savedSession.conversationId) {
-        await this.connectToConversation(savedSession.conversationId);
-      } else {
-        await this.connectFirestoreBackground(savedSession.roomId, savedSession.userId, savedSession.displayName);
-      }
-
-      // Layer 4 — 4. Flush Offline Outbox
-      await this.syncPendingOutbox();
-      return;
     }
 
-    // Se houver identidade local prévia salva da Fase 2, restaura silenciosamente
+    // Se houver identidade local prévia salva da Fase 2, restaura apenas metadados internos (sem abrir chat)
     const localIdentity = await restoreLocalIdentity().catch(() => null);
     if (localIdentity && isAuthValidAndNonAnonymous()) {
       console.info(`Talk2TM [Identity]: Identidade ${localIdentity.talk2tmId} restaurada para ${localIdentity.displayName}`);
+      if (!getMonitorContext()) {
+        saveMonitorContext({
+          channelId: ACCESS_CONFIG.DEFAULT_ROOM,
+          isConversation: false,
+          userId: localIdentity.uid,
+          displayName: localIdentity.displayName,
+        });
+      }
     }
 
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
     this.ui.showCalculatorView();
 
-    // Calculadora visível ao abrir PWA: ativa monitor passivo se já houver contexto e auth válidos
+    // Calculadora visível ao abrir PWA: ativa apenas o monitor passivo para o ponto no DEG
     if (getMonitorContext()) {
       this.startBackgroundMonitor();
       if (navigator.onLine && isAuthValidAndNonAnonymous()) {

@@ -507,11 +507,11 @@ export function clearMonitorContext(): void {
   }
 }
 
-export function saveLocalLastReadTimestamp(channelId: string, readAtIso: string): void {
+export function saveLocalLastReadTimestamp(channelId: string, readAtIso: string, userId?: string): void {
   if (!channelId || !readAtIso) return;
   try {
     if (typeof localStorage === 'undefined') return;
-    const key = `${LAST_READ_KEY_PREFIX}${channelId}`;
+    const key = userId ? `${LAST_READ_KEY_PREFIX}${channelId}_${userId}` : `${LAST_READ_KEY_PREFIX}${channelId}`;
     const existing = localStorage.getItem(key);
     if (!existing || readAtIso > existing) {
       localStorage.setItem(key, readAtIso);
@@ -521,11 +521,12 @@ export function saveLocalLastReadTimestamp(channelId: string, readAtIso: string)
   }
 }
 
-export function getLocalLastReadTimestamp(channelId: string): string | null {
+export function getLocalLastReadTimestamp(channelId: string, userId?: string): string | null {
   if (!channelId) return null;
   try {
     if (typeof localStorage === 'undefined') return null;
-    return localStorage.getItem(`${LAST_READ_KEY_PREFIX}${channelId}`);
+    const key = userId ? `${LAST_READ_KEY_PREFIX}${channelId}_${userId}` : `${LAST_READ_KEY_PREFIX}${channelId}`;
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
