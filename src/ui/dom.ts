@@ -831,15 +831,15 @@ export class ChatUI {
       return { text: '', dataStatus: 'incoming', title: '' };
     }
     if (msg.status === 'pending') {
-      return { text: '· ...', dataStatus: 'pending', title: 'Pendente de envio' };
+      return { text: '·', dataStatus: 'pending', title: 'Pendente de envio' };
     }
 
     const partnerReadTime = this.getPartnerLastReadTime();
-    if (partnerReadTime && partnerReadTime >= msg.createdAt) {
-      return { text: '✓✓ visto', dataStatus: 'read', title: 'Visto pelo parceiro' };
+    if (msg.status === 'read' || (partnerReadTime && partnerReadTime >= msg.createdAt)) {
+      return { text: '✓✓', dataStatus: 'read', title: 'Lida pelo parceiro' };
     }
 
-    return { text: '✓', dataStatus: 'synced', title: 'Enviado' };
+    return { text: '✓', dataStatus: 'synced', title: 'Enviada' };
   }
 
   public updateReadReceipts(room: Room, session: UserSession): void {
@@ -849,18 +849,29 @@ export class ChatUI {
     if (!partnerReadTime) return;
 
     for (const [messageId, item] of this.renderedMessages.entries()) {
-      if (item.isSelf && item.msg.status !== 'pending') {
+      const isOwn = item.isSelf || item.msg.sender === session.displayName || item.msg.senderId === session.userId;
+      if (isOwn && item.msg.status !== 'pending') {
+        item.isSelf = true;
         const isRead = partnerReadTime >= item.msg.createdAt;
         if (isRead) {
           item.msg.status = 'read';
           const row = document.getElementById(`ttm-msg-${messageId}`);
           if (row) {
-            const statusSpan = row.querySelector('.msg-status');
-            if (statusSpan) {
-              statusSpan.textContent = '✓✓ visto';
-              statusSpan.setAttribute('data-status', 'read');
-              statusSpan.setAttribute('title', 'Visto pelo parceiro');
+            row.classList.add('ttm-msg-self');
+            let statusSpan = row.querySelector('.msg-status') as HTMLElement | null;
+            if (!statusSpan) {
+              statusSpan = document.createElement('span');
+              statusSpan.className = 'msg-status';
+              const delBtn = row.querySelector('.ttm-msg-del');
+              if (delBtn) {
+                row.insertBefore(statusSpan, delBtn);
+              } else {
+                row.appendChild(statusSpan);
+              }
             }
+            statusSpan.textContent = '✓✓';
+            statusSpan.setAttribute('data-status', 'read');
+            statusSpan.setAttribute('title', 'Lida pelo parceiro');
           }
         }
       }
@@ -875,8 +886,19 @@ export class ChatUI {
     if (existingRow || this.renderedMessageIds.has(msg.messageId)) {
       if (existingRow) {
         existingRow.setAttribute('data-created-at', msg.createdAt);
-        const statusSpan = existingRow.querySelector('.msg-status');
-        if (statusSpan && isSelf) {
+        if (isSelf) {
+          existingRow.classList.add('ttm-msg-self');
+          let statusSpan = existingRow.querySelector('.msg-status') as HTMLElement | null;
+          if (!statusSpan) {
+            statusSpan = document.createElement('span');
+            statusSpan.className = 'msg-status';
+            const delBtn = existingRow.querySelector('.ttm-msg-del');
+            if (delBtn) {
+              existingRow.insertBefore(statusSpan, delBtn);
+            } else {
+              existingRow.appendChild(statusSpan);
+            }
+          }
           statusSpan.textContent = statusInfo.text;
           statusSpan.setAttribute('data-status', statusInfo.dataStatus);
           if (statusInfo.title) statusSpan.setAttribute('title', statusInfo.title);
@@ -975,7 +997,7 @@ export class ChatUI {
     this.renderedMessageIds.add(msg.messageId);
   }
 
-  public prependMessages(messages: Message[], currentUserId: string): void {
+  public prependMessages(messages: Message[], currentUserId: string, currentUserName?: string): void {
     if (messages.length === 0) return;
 
     const previousHeight = this.msgListEl.scrollHeight;
@@ -984,7 +1006,9 @@ export class ChatUI {
     messages.forEach((msg) => {
       if (this.renderedMessageIds.has(msg.messageId)) return;
 
-      const isSelf = msg.senderId === currentUserId;
+      const isSelf =
+        msg.senderId === currentUserId ||
+        (Boolean(currentUserName) && msg.sender === currentUserName);
       this.renderedMessages.set(msg.messageId, { msg, isSelf });
       const statusInfo = this.computeMessageStatus(msg, isSelf);
 

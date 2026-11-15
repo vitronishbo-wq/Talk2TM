@@ -667,9 +667,11 @@ html, body {
 }
 
 .ttm-msg-row .msg-status {
-  font-size: 11px;
+  display: inline-block;
+  font-size: 10.5px;
+  line-height: 1;
   color: var(--text-muted);
-  margin-left: 6px;
+  margin-left: 5px;
   user-select: none;
 }
 
@@ -683,7 +685,8 @@ html, body {
 
 .ttm-msg-row .msg-status[data-status="read"] {
   color: #38bdf8;
-  font-weight: 500;
+  letter-spacing: -1.5px;
+  font-weight: 600;
 }
 
 /* Modo de Seleção Minimalista e Compacto */

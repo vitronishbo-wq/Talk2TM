@@ -260,7 +260,7 @@ export class Talk2TMApp {
         isMessageHiddenLocally(roomId, id)
       );
       for (const msg of normalized) {
-        this.ui.appendOrUpdateMessage(msg, msg.senderId === userId);
+        this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, session));
         if (!latestLocalIso || msg.createdAt > latestLocalIso) {
           latestLocalIso = msg.createdAt;
         }
@@ -445,6 +445,19 @@ export class Talk2TMApp {
   private lastMarkedReadTime: number = 0;
 
   /**
+   * Identifica se uma mensagem pertence ao utilizador atual mesmo antes de o Firebase Auth
+   * consolidar o UID real (ex.: cache local com usr_truman/usr_maezinha vs uid real).
+   */
+  private isOwnMessage(msg: Message, session: UserSession): boolean {
+    const authUid = getCurrentAuthUser()?.uid;
+    return (
+      msg.senderId === session.userId ||
+      (Boolean(authUid) && msg.senderId === authUid) ||
+      (Boolean(session.displayName) && msg.sender === session.displayName)
+    );
+  }
+
+  /**
    * Salva e sincroniza a leitura do chat pelo participante atual.
    * Só apaga o indicador do DEG quando as mensagens pendentes tiverem sido efetivamente consultadas.
    */
@@ -606,7 +619,11 @@ export class Talk2TMApp {
     );
 
     if (olderMessages.length > 0) {
-      this.ui.prependMessages(olderMessages, this.currentSession.userId);
+      this.ui.prependMessages(
+        olderMessages,
+        this.currentSession.userId,
+        this.currentSession.displayName
+      );
     }
 
     if (olderMessages.length < CONFIG.HISTORY_LIMIT) {
@@ -712,7 +729,7 @@ export class Talk2TMApp {
           const syncedMsg: Message = { ...msg, status: 'synced' };
           await saveLocalMessage(syncedMsg);
           if (this.currentSession && this.ui.isChatActive()) {
-            this.ui.appendOrUpdateMessage(syncedMsg, syncedMsg.senderId === this.currentSession.userId);
+            this.ui.appendOrUpdateMessage(syncedMsg, this.isOwnMessage(syncedMsg, this.currentSession));
           }
         } catch (err) {
           hasFailures = true;
@@ -793,11 +810,14 @@ export class Talk2TMApp {
             await saveLocalMessage(msg);
             visibleIncoming.push(msg);
             if (this.ui.isChatActive()) {
-              this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+              this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
             }
           }
           if (this.ui.isChatActive()) {
-            await this.markChatAsRead();
+            const hasIncomingFromPartner = visibleIncoming.some(
+              (m) => !this.isOwnMessage(m, this.currentSession!)
+            );
+            await this.markChatAsRead(hasIncomingFromPartner);
           } else {
             await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
           }
@@ -837,11 +857,14 @@ export class Talk2TMApp {
             await saveLocalMessage(msg);
             visibleIncoming.push(msg);
             if (this.ui.isChatActive()) {
-              this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+              this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
             }
           }
           if (this.ui.isChatActive()) {
-            await this.markChatAsRead();
+            const hasIncomingFromPartner = visibleIncoming.some(
+              (m) => !this.isOwnMessage(m, this.currentSession!)
+            );
+            await this.markChatAsRead(hasIncomingFromPartner);
           } else {
             await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
           }
@@ -1081,7 +1104,7 @@ export class Talk2TMApp {
       await saveLocalMessage(msg).catch(() => {});
       visible.push(msg);
       if (this.currentSession && this.ui.isChatActive()) {
-        this.ui.appendOrUpdateMessage(msg, msg.senderId === myUid);
+        this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
       }
     }
 
@@ -1370,7 +1393,7 @@ export class Talk2TMApp {
       );
       this.ui.clearMessages();
       for (const msg of normalized) {
-        this.ui.appendOrUpdateMessage(msg, msg.senderId === this.currentSession.userId);
+        this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
         if (!latestLocalIso || msg.createdAt > latestLocalIso) {
           latestLocalIso = msg.createdAt;
         }

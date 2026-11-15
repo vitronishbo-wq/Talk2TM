@@ -1017,6 +1017,48 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(formatFullDateTime(twoDaysAgoMsg) === '13/11/2026 08:43', 'Tooltip completo deve conter DD/MM/AAAA HH:MM');
   });
 
+  // 45. Read Receipts: getPartnerLastRead escolhe carimbo mais recente por nome/UID e campos A/B
+  check('Read Receipts: getPartnerLastRead seleciona o carimbo mais recente do parceiro', () => {
+    const roomMixed: Room = {
+      roomId: 'talk2tm_main',
+      participantA: 'uid_truman_real',
+      participantAName: 'Truman',
+      participantB: 'uid_maezinha_real',
+      participantBName: 'Mãezinha',
+      createdAt: '2026-11-15T08:00:00.000Z',
+      lastActivity: '2026-11-15T12:30:00.000Z',
+      lastReadA: '2026-11-15T09:00:00.000Z',
+      lastReadB: '2026-11-15T10:00:00.000Z',
+      lastRead: {
+        Mãezinha: '2026-11-15T11:00:00.000Z',
+        uid_maezinha_real: '2026-11-15T12:30:00.000Z',
+      },
+    };
+
+    assert(
+      getPartnerLastRead(roomMixed, 'Truman', 'uid_truman_real') === '2026-11-15T12:30:00.000Z',
+      'Deve escolher o carimbo mais recente entre mapa lastRead por nome/UID e lastReadB'
+    );
+
+    const customRoom: Room = {
+      roomId: 'conv_custom',
+      participantA: 'uid_1',
+      participantAName: 'Alice',
+      participantB: 'uid_2',
+      participantBName: 'Bob',
+      createdAt: '2026-11-15T08:00:00.000Z',
+      lastActivity: '2026-11-15T11:15:00.000Z',
+      lastRead: {
+        uid_2: '2026-11-15T11:15:00.000Z',
+      },
+    };
+
+    assert(
+      getPartnerLastRead(customRoom, 'Alice', 'uid_1') === '2026-11-15T11:15:00.000Z',
+      'Deve resolver parceiro pelo UID mesmo com nomes personalizados'
+    );
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }

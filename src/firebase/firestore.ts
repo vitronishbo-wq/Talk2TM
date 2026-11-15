@@ -34,7 +34,7 @@ import {
 } from 'firebase/firestore';
 import { Conversation, ConversationMessage, Message, Room } from '../types';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
-import { selectLatestMessages } from '../utils/unread';
+import { maxIsoDate, selectLatestMessages } from '../utils/unread';
 
 export enum OperationType {
   CREATE = 'create',
@@ -763,16 +763,55 @@ export function getPartnerLastRead(
   currentUserId?: string
 ): string | null {
   if (!room) return null;
-  const partnerName = currentUserName === 'Truman' ? 'Mãezinha' : 'Truman';
-  const partnerId = room.participantAName === partnerName ? room.participantA : room.participantB;
 
-  if (room.lastRead) {
-    if (room.lastRead[partnerName]) return room.lastRead[partnerName];
-    if (partnerId && room.lastRead[partnerId]) return room.lastRead[partnerId];
+  let partnerName = currentUserName === 'Truman' ? 'Mãezinha' : 'Truman';
+  if (room.participantAName && room.participantBName) {
+    if (room.participantAName === currentUserName || (currentUserId && room.participantA === currentUserId)) {
+      partnerName = room.participantBName;
+    } else if (room.participantBName === currentUserName || (currentUserId && room.participantB === currentUserId)) {
+      partnerName = room.participantAName;
+    }
   }
-  if (room.participantAName === partnerName && room.lastReadA) return room.lastReadA;
-  if (room.participantBName === partnerName && room.lastReadB) return room.lastReadB;
-  return null;
+
+  let partnerId: string | null = null;
+  if (currentUserId) {
+    if (room.participantA === currentUserId) {
+      partnerId = room.participantB || null;
+    } else if (room.participantB === currentUserId) {
+      partnerId = room.participantA || null;
+    }
+  }
+  if (!partnerId) {
+    if (room.participantAName === partnerName) {
+      partnerId = room.participantA;
+    } else if (room.participantBName === partnerName) {
+      partnerId = room.participantB || null;
+    }
+  }
+
+  const candidates: Array<string | null | undefined> = [];
+  if (room.lastRead) {
+    if (partnerName && room.lastRead[partnerName]) {
+      candidates.push(room.lastRead[partnerName]);
+    }
+    if (partnerId && room.lastRead[partnerId]) {
+      candidates.push(room.lastRead[partnerId]);
+    }
+  }
+  if (
+    (partnerId && room.participantA === partnerId) ||
+    (partnerName && room.participantAName === partnerName)
+  ) {
+    candidates.push(room.lastReadA);
+  }
+  if (
+    (partnerId && room.participantB === partnerId) ||
+    (partnerName && room.participantBName === partnerName)
+  ) {
+    candidates.push(room.lastReadB);
+  }
+
+  return maxIsoDate(...candidates);
 }
 
 /**
