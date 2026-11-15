@@ -1,6 +1,6 @@
 import { ConnectionState, Message, Room, UserSession } from '../types';
 import { AppSettings, getUserByPin, AllowedUser } from '../config';
-import { formatTime } from '../utils/sanitize';
+import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
 import { MobileCalculator } from './calculator';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
@@ -889,6 +889,7 @@ export class ChatUI {
     rowEl.id = `ttm-msg-${msg.messageId}`;
     rowEl.className = 'ttm-msg-row';
     rowEl.setAttribute('data-created-at', msg.createdAt);
+    rowEl.setAttribute('data-date-key', getLocalDateKey(msg.createdAt));
     if (isSelf) {
       rowEl.classList.add('ttm-msg-self');
     }
@@ -909,6 +910,8 @@ export class ChatUI {
     const timeSpan = document.createElement('span');
     timeSpan.className = 'msg-time';
     timeSpan.textContent = `[${formatTime(msg.createdAt)}] `;
+    const fullDt = formatFullDateTime(msg.createdAt);
+    if (fullDt) timeSpan.title = fullDt;
 
     const senderSpan = document.createElement('span');
     senderSpan.className = 'msg-sender';
@@ -947,13 +950,14 @@ export class ChatUI {
 
     this.attachMessageSelectionHandlers(rowEl, msg.messageId);
 
-    // Inserção cronológica estável para evitar desordem caso mensagens atrasadas cheguem fora de sequência
+    // Inserção cronológica estável (ignora separadores de data durante a varredura)
     let insertBeforeNode: ChildNode | null = null;
     const children = this.msgListEl.children;
     for (let i = children.length - 1; i >= 0; i--) {
       const child = children[i] as HTMLElement;
       const childCreatedAt = child.getAttribute('data-created-at');
-      if (childCreatedAt && childCreatedAt > msg.createdAt) {
+      if (!childCreatedAt) continue;
+      if (childCreatedAt > msg.createdAt) {
         insertBeforeNode = child;
       } else {
         break;
@@ -962,8 +966,10 @@ export class ChatUI {
 
     if (insertBeforeNode) {
       this.msgListEl.insertBefore(rowEl, insertBeforeNode);
+      this.syncDateSeparators();
     } else {
       this.msgListEl.appendChild(rowEl);
+      this.syncDateSeparators();
       this.scrollToBottom();
     }
     this.renderedMessageIds.add(msg.messageId);
@@ -986,6 +992,7 @@ export class ChatUI {
       rowEl.id = `ttm-msg-${msg.messageId}`;
       rowEl.className = 'ttm-msg-row';
       rowEl.setAttribute('data-created-at', msg.createdAt);
+      rowEl.setAttribute('data-date-key', getLocalDateKey(msg.createdAt));
       if (isSelf) {
         rowEl.classList.add('ttm-msg-self');
       }
@@ -1006,6 +1013,8 @@ export class ChatUI {
       const timeSpan = document.createElement('span');
       timeSpan.className = 'msg-time';
       timeSpan.textContent = `[${formatTime(msg.createdAt)}] `;
+      const fullDt = formatFullDateTime(msg.createdAt);
+      if (fullDt) timeSpan.title = fullDt;
 
       const senderSpan = document.createElement('span');
       senderSpan.className = 'msg-sender';
@@ -1049,7 +1058,64 @@ export class ChatUI {
     });
 
     this.msgListEl.insertBefore(fragment, this.msgListEl.firstChild);
+    this.syncDateSeparators();
     this.msgListEl.scrollTop = this.msgListEl.scrollHeight - previousHeight;
+  }
+
+  /**
+   * Garante um único separador de data acima da primeira mensagem visível de cada dia.
+   * Mantém a lista limpa sem repetir a data em todas as mensagens e remove separadores órfãos.
+   */
+  private syncDateSeparators(): void {
+    if (!this.msgListEl) return;
+
+    const existingSeparators = Array.from(this.msgListEl.querySelectorAll('.ttm-date-separator')) as HTMLElement[];
+    const rows = Array.from(this.msgListEl.querySelectorAll('.ttm-msg-row')) as HTMLElement[];
+
+    if (rows.length === 0) {
+      existingSeparators.forEach((sep) => sep.remove());
+      return;
+    }
+
+    const neededBeforeRow = new Map<HTMLElement, { dateKey: string; label: string }>();
+    let prevDateKey = '';
+    const referenceNow = new Date();
+
+    for (const row of rows) {
+      const createdAt = row.getAttribute('data-created-at') || '';
+      const dateKey = row.getAttribute('data-date-key') || getLocalDateKey(createdAt);
+      if (dateKey && dateKey !== prevDateKey) {
+        const label = formatDateSeparatorLabel(createdAt, referenceNow);
+        if (label) {
+          neededBeforeRow.set(row, { dateKey, label });
+        }
+        prevDateKey = dateKey;
+      }
+    }
+
+    for (const sep of existingSeparators) {
+      const next = sep.nextElementSibling as HTMLElement | null;
+      const needed = next ? neededBeforeRow.get(next) : undefined;
+      if (!needed || sep.getAttribute('data-date-key') !== needed.dateKey) {
+        sep.remove();
+      } else {
+        const span = sep.querySelector('span');
+        if (span && span.textContent !== needed.label) {
+          span.textContent = needed.label;
+        }
+        neededBeforeRow.delete(next!);
+      }
+    }
+
+    for (const [row, info] of neededBeforeRow.entries()) {
+      const sepEl = document.createElement('div');
+      sepEl.className = 'ttm-date-separator';
+      sepEl.setAttribute('data-date-key', info.dateKey);
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = info.label;
+      sepEl.appendChild(labelSpan);
+      this.msgListEl.insertBefore(sepEl, row);
+    }
   }
 
   /**
@@ -1395,6 +1461,7 @@ export class ChatUI {
           if (row.parentNode) {
             row.parentNode.removeChild(row);
           }
+          this.syncDateSeparators();
         }, 200);
       }
     });

@@ -1108,13 +1108,19 @@ export async function fetchLatestMessagesFromServer(
     ? query(collection(db, 'conversations', channelId, 'messages'))
     : query(collection(db, 'messages'), where('room', '==', channelId));
 
+  const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([
+      promise,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error('firestore_server_timeout')), ms)),
+    ]);
+
   try {
-    const snap = await getDocsFromServer(orderedQuery);
+    const snap = await withTimeout(getDocsFromServer(orderedQuery), 4500);
     return mapSnapshot(snap);
   } catch {
-    // Pode falhar por índice composto ausente ou rede momentaneamente indisponível
+    // Pode falhar por índice composto ausente, timeout de socket ou rede momentaneamente indisponível
     try {
-      const snapUnordered = await getDocsFromServer(unorderedQuery);
+      const snapUnordered = await withTimeout(getDocsFromServer(unorderedQuery), 4500);
       return mapSnapshot(snapUnordered);
     } catch {
       try {
@@ -1147,7 +1153,10 @@ export async function fetchChannelMetadataFromServer(
 
   const docRef = isConversation ? doc(db, 'conversations', channelId) : doc(db, 'rooms', channelId);
   try {
-    const snap = await getDocFromServer(docRef);
+    const snap = await Promise.race([
+      getDocFromServer(docRef),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('firestore_meta_timeout')), 4000)),
+    ]);
     return snap.exists() ? (snap.data() as Room | Conversation) : null;
   } catch {
     try {

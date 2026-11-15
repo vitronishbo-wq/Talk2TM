@@ -152,6 +152,10 @@ export class Talk2TMApp {
   private cachedMonitorChannel: Room | Conversation | null = null;
   private lastWakeUpFetchTime: number = 0;
   private isWakingUp: boolean = false;
+  private outboxRetryTimerId: ReturnType<typeof setTimeout> | null = null;
+  private outboxRetryAttempt: number = 0;
+  private isSyncingOutbox: boolean = false;
+  private activeChatHeartbeatId: ReturnType<typeof setInterval> | null = null;
 
   constructor(container: HTMLElement) {
     this.appSettings = loadSettings();
@@ -242,9 +246,10 @@ export class Talk2TMApp {
     this.ui.showChatView(session, roomToUse);
     this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
 
-    // 2. Inicia temporizadores de sessão e inatividade (5 minutos padrão)
+    // 2. Inicia temporizadores de sessão, inatividade e sync leve de chat ativo
     this.startSessionTimeout();
     this.resetInactivityTimer();
+    this.startActiveChatSyncLoop();
 
     // 3. Carrega histórico local imediato do IndexedDB (carregando tombstones antes)
     let latestLocalIso: string | null = null;
@@ -417,6 +422,7 @@ export class Talk2TMApp {
 
   public leaveSession(): void {
     this.stopAllTimers();
+    this.stopActiveChatSyncLoop();
     if (this.unsubscribeMessages) {
       this.unsubscribeMessages();
       this.unsubscribeMessages = null;
@@ -430,6 +436,8 @@ export class Talk2TMApp {
     clearSession();
     // Limpa mensagens do DOM ao encerrar sessão protegida por PIN
     this.ui.clearMessages();
+    // Continua tentando drenar outbox pendente em segundo plano se houver Auth ativo
+    void this.syncPendingOutbox();
     // Inicia monitor passivo na calculadora sem manter sessão PIN desbloqueada
     this.startBackgroundMonitor();
   }
@@ -548,10 +556,10 @@ export class Talk2TMApp {
     this.markChatAsRead();
 
     // Explicit guard check: procede APENAS se auth.currentUser != null e auth.currentUser.isAnonymous === false.
-    // Evita envios remotos prematuros ou bloqueados pelas regras do Firestore
+    // Aguarda consolidação rápida do Auth se ainda estiver finalizando nos primeiros segundos após abrir o chat.
     if (navigator.onLine) {
       if (!isAuthValidAndNonAnonymous()) {
-        await restoreAuthSession(1000);
+        await waitForAuthCompletion(3000);
       }
       if (isAuthValidAndNonAnonymous()) {
         try {
@@ -563,11 +571,19 @@ export class Talk2TMApp {
           await removeFromOutbox(msg.messageId);
           const syncedMsg: Message = { ...msg, status: 'synced' };
           await saveLocalMessage(syncedMsg);
-          this.ui.appendOrUpdateMessage(syncedMsg, true);
+          if (this.currentSession && this.ui.isChatActive()) {
+            this.ui.appendOrUpdateMessage(syncedMsg, true);
+          }
+          return;
         } catch (error) {
-          console.warn('Mensagem mantida no outbox local:', error);
+          console.warn('Mensagem mantida no outbox local para reenvio automático:', error);
+          this.scheduleOutboxRetry();
         }
+      } else {
+        this.scheduleOutboxRetry();
       }
+    } else {
+      this.scheduleOutboxRetry();
     }
   }
 
@@ -608,41 +624,114 @@ export class Talk2TMApp {
     }
   }
 
-  private async syncPendingOutbox(): Promise<void> {
-    if (!navigator.onLine) return;
+  private scheduleOutboxRetry(): void {
+    if (this.outboxRetryTimerId) return;
+    const delays = [4000, 10000, 20000, 30000];
+    const delayMs = delays[Math.min(this.outboxRetryAttempt, delays.length - 1)];
+    this.outboxRetryAttempt++;
+    this.outboxRetryTimerId = setTimeout(() => {
+      this.outboxRetryTimerId = null;
+      void this.syncPendingOutbox();
+    }, delayMs);
+  }
 
-    // Camada 2.5: A inicialização do Firestore não deve disparar sincronização da outbox antes da conclusão da autenticação necessária
-    if (!isAuthValidAndNonAnonymous()) {
-      await waitForAuthCompletion(1500);
+  private startActiveChatSyncLoop(): void {
+    if (this.activeChatHeartbeatId) return;
+    this.activeChatHeartbeatId = setInterval(() => {
+      if (
+        !this.currentSession ||
+        !this.ui.isChatActive() ||
+        document.visibilityState !== 'visible' ||
+        !navigator.onLine ||
+        this.isWakingUp ||
+        !isAuthValidAndNonAnonymous()
+      ) {
+        return;
+      }
+      const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+      const isConv = Boolean(this.currentSession.conversationId);
+      const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+      void this.refreshLatestChannelFromServer(channelId, isConv, myUid).then(() => {
+        if (this.currentSession && this.ui.isChatActive()) {
+          void this.markChatAsRead();
+        }
+      });
+      void this.syncPendingOutbox();
+    }, 25000);
+  }
+
+  private stopActiveChatSyncLoop(): void {
+    if (this.activeChatHeartbeatId) {
+      clearInterval(this.activeChatHeartbeatId);
+      this.activeChatHeartbeatId = null;
     }
+  }
 
-    if (!isAuthValidAndNonAnonymous()) {
-      console.debug('Talk2TM [Guard]: syncPendingOutbox retido — aguardando autenticação não-anônima.');
+  private async syncPendingOutbox(): Promise<void> {
+    if (this.isSyncingOutbox) return;
+    if (!navigator.onLine) {
+      const offlinePending = await getOutboxMessages().catch(() => []);
+      if (offlinePending.length > 0) this.scheduleOutboxRetry();
       return;
     }
 
-    const pending = await getOutboxMessages();
-    if (pending.length === 0) return;
-
-    this.setConnectionState('sincronizando');
-
-    for (const msg of pending) {
-      try {
-        if (msg.conversationId) {
-          await sendFirestoreConversationMessage(msg);
-        } else {
-          await sendFirestoreMessage(msg);
-        }
-        await removeFromOutbox(msg.messageId);
-        const syncedMsg: Message = { ...msg, status: 'synced' };
-        await saveLocalMessage(syncedMsg);
-        this.ui.appendOrUpdateMessage(syncedMsg, syncedMsg.senderId === this.currentSession?.userId);
-      } catch (err) {
-        console.warn('Erro ao sincronizar mensagem pendente:', msg.messageId, err);
+    this.isSyncingOutbox = true;
+    try {
+      // Camada 2.5: Aguarda consolidação da autenticação necessária
+      if (!isAuthValidAndNonAnonymous()) {
+        await waitForAuthCompletion(2500);
       }
-    }
 
-    this.setConnectionState('online');
+      if (!isAuthValidAndNonAnonymous()) {
+        const pendingAuth = await getOutboxMessages().catch(() => []);
+        if (pendingAuth.length > 0) {
+          this.scheduleOutboxRetry();
+        }
+        return;
+      }
+
+      const pending = await getOutboxMessages();
+      if (pending.length === 0) {
+        this.outboxRetryAttempt = 0;
+        return;
+      }
+
+      if (this.currentSession && this.ui.isChatActive()) {
+        this.setConnectionState('sincronizando');
+      }
+
+      let hasFailures = false;
+      for (const msg of pending) {
+        try {
+          if (msg.conversationId) {
+            await sendFirestoreConversationMessage(msg);
+          } else {
+            await sendFirestoreMessage(msg);
+          }
+          await removeFromOutbox(msg.messageId);
+          const syncedMsg: Message = { ...msg, status: 'synced' };
+          await saveLocalMessage(syncedMsg);
+          if (this.currentSession && this.ui.isChatActive()) {
+            this.ui.appendOrUpdateMessage(syncedMsg, syncedMsg.senderId === this.currentSession.userId);
+          }
+        } catch (err) {
+          hasFailures = true;
+          console.warn('Erro ao sincronizar mensagem pendente:', msg.messageId, err);
+        }
+      }
+
+      if (this.currentSession && this.ui.isChatActive()) {
+        this.setConnectionState('online');
+      }
+
+      if (hasFailures) {
+        this.scheduleOutboxRetry();
+      } else {
+        this.outboxRetryAttempt = 0;
+      }
+    } finally {
+      this.isSyncingOutbox = false;
+    }
   }
 
   private setupRealtimeListeners(channelId: string): void {
@@ -1054,6 +1143,9 @@ export class Talk2TMApp {
         this.cachedMonitorMessages = visible;
         await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
       }
+
+      // Garante drenagem de mensagens pendentes no outbox mesmo em segundo plano
+      await this.syncPendingOutbox();
     } catch (err) {
       console.debug('Talk2TM [WakeUp]: sincronização em segundo plano adiou:', err);
     } finally {
@@ -1251,6 +1343,7 @@ export class Talk2TMApp {
       this.setConnectionState(navigator.onLine ? 'online' : 'offline');
       this.startSessionTimeout();
       this.resetInactivityTimer();
+      this.startActiveChatSyncLoop();
     }, 800);
 
     return identity.talk2tmId;

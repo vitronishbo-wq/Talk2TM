@@ -1,5 +1,5 @@
 // Talk2TM Minimalist Shell Service Worker
-const CACHE_NAME = 'talk2tm-shell-v4';
+const CACHE_NAME = 'talk2tm-shell-v5';
 const SHELL_ASSETS = [
   '/',
   '/index.html',

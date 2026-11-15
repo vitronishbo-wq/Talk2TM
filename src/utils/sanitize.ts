@@ -77,3 +77,71 @@ export function formatTime(isoString: string): string {
     return '--:--';
   }
 }
+
+/**
+ * Retorna chave de data local (YYYY-MM-DD) para agrupar mensagens por dia
+ */
+export function getLocalDateKey(isoString: string): string {
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return '';
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  } catch {
+    return '';
+  }
+}
+
+const WEEKDAYS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'] as const;
+
+/**
+ * Formata rótulo discreto para separador de dia ("Hoje · 15/11/2026", "Ontem · 14/11/2026", "Sex · 13/11/2026")
+ */
+export function formatDateSeparatorLabel(isoString: string, referenceNow: Date = new Date()): string {
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return '';
+
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const dateStr = `${dd}/${mm}/${yyyy}`;
+
+    const targetKey = getLocalDateKey(isoString);
+    const todayKey = getLocalDateKey(referenceNow.toISOString());
+
+    const yesterday = new Date(referenceNow.getFullYear(), referenceNow.getMonth(), referenceNow.getDate() - 1);
+    const yesterdayKey = getLocalDateKey(yesterday.toISOString());
+
+    if (targetKey === todayKey) {
+      return `Hoje · ${dateStr}`;
+    }
+    if (targetKey === yesterdayKey) {
+      return `Ontem · ${dateStr}`;
+    }
+    const weekday = WEEKDAYS_PT[d.getDay()];
+    return `${weekday} · ${dateStr}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Formata data e hora completas no fuso local (ex: "13/11/2026 08:43")
+ */
+export function formatFullDateTime(isoString: string): string {
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return '';
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+  } catch {
+    return '';
+  }
+}

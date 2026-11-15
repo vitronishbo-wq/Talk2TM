@@ -3,7 +3,15 @@
  */
 
 import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser, loadSettings, saveSettings } from '../src/config';
-import { sanitizeMessageText, sanitizeName, sanitizeRoom, generateId } from '../src/utils/sanitize';
+import {
+  sanitizeMessageText,
+  sanitizeName,
+  sanitizeRoom,
+  generateId,
+  getLocalDateKey,
+  formatDateSeparatorLabel,
+  formatFullDateTime,
+} from '../src/utils/sanitize';
 import { verifyPassword, PASSWORDS } from '../src/app';
 import { Room } from '../src/types';
 import { testRealtimeSyncAtoB } from '../src/firebase/diagnostic';
@@ -991,6 +999,22 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     } finally {
       globalThis.localStorage = originalLocalStorage;
     }
+  });
+
+  // 44. Sinalização de Data: separadores de dia (Hoje, Ontem, dias anteriores) e formatação completa
+  check('Sinalização de Data: formatDateSeparatorLabel identifica Hoje, Ontem e dias anteriores corretamente', () => {
+    const refNow = new Date(2026, 10, 15, 1, 15, 0); // 15/11/2026 01:15 local
+    const todayMsg = new Date(2026, 10, 15, 0, 5, 0).toISOString();
+    const yesterdayMsg = new Date(2026, 10, 14, 22, 40, 0).toISOString();
+    const twoDaysAgoMsg = new Date(2026, 10, 13, 8, 43, 0).toISOString();
+
+    assert(getLocalDateKey(todayMsg) === '2026-11-15', 'Chave local deve refletir 2026-11-15');
+    assert(getLocalDateKey(twoDaysAgoMsg) === '2026-11-13', 'Chave local deve refletir 2026-11-13');
+
+    assert(formatDateSeparatorLabel(todayMsg, refNow) === 'Hoje · 15/11/2026', 'Mensagem do mesmo dia deve mostrar Hoje');
+    assert(formatDateSeparatorLabel(yesterdayMsg, refNow) === 'Ontem · 14/11/2026', 'Mensagem de ontem deve mostrar Ontem');
+    assert(formatDateSeparatorLabel(twoDaysAgoMsg, refNow) === 'Sex · 13/11/2026', 'Mensagem de 2 dias atrás deve mostrar dia da semana e data');
+    assert(formatFullDateTime(twoDaysAgoMsg) === '13/11/2026 08:43', 'Tooltip completo deve conter DD/MM/AAAA HH:MM');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
