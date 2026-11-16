@@ -23,11 +23,23 @@ service cloud.firestore {
       return id is string && id.matches('^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$');
     }
 
+    function isValidStatus(status) {
+      return status in ['pending', 'synced', 'failed', 'read'];
+    }
+
+    function isValidOptionalServerTimestamp(data) {
+      return !('createdAtServer' in data) || data.createdAtServer is timestamp;
+    }
+
     function isLegacyPairEmail() {
       return isAuthenticated() && (
         request.auth.token.email == 'truman@talk2tm.internal' ||
         request.auth.token.email == 'maezinha@talk2tm.internal'
       );
+    }
+
+    function legacyDisplayNameForEmail() {
+      return request.auth.token.email == 'truman@talk2tm.internal' ? 'Truman' : 'Mãezinha';
     }
 
     // Validação estrita da política de eliminação individual (deletedFor)
@@ -40,6 +52,7 @@ service cloud.firestore {
              (
                (
                  (!('deletedFor' in existingData) || existingData.deletedFor == null || existingData.deletedFor.size() == 0) &&
+                 newData.deletedFor.size() == 1 &&
                  newData.deletedFor.hasOnly([request.auth.uid])
                ) ||
                (
@@ -60,33 +73,54 @@ service cloud.firestore {
     // ====================================================================
     function isRoomParticipant(roomId) {
       return isAuthenticated() &&
+        isLegacyPairEmail() &&
         isValidRoomId(roomId) &&
+        roomId == 'truman-maezinha' &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)) &&
         (
-          (isLegacyPairEmail() && roomId == 'truman-maezinha') ||
-          (
-            exists(/databases/$(database)/documents/rooms/$(roomId)) &&
-            (
-              request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantA ||
-              request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantB
-            )
-          )
+          request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.get('participantA', null) ||
+          request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.get('participantB', null)
         );
+    }
+
+    function canJoinOrRecoverLegacyRoom(roomData) {
+      return (
+               roomData.get('participantAName', null) == legacyDisplayNameForEmail() &&
+               (
+                 !(roomData.get('participantA', null) is string) ||
+                 roomData.get('participantA', '') == '' ||
+                 roomData.get('participantA', '').matches('^usr_.*')
+               )
+             ) ||
+             (
+               roomData.get('participantB', null) == null ||
+               roomData.get('participantB', null) == '' ||
+               (
+                 roomData.get('participantBName', null) == legacyDisplayNameForEmail() &&
+                 roomData.get('participantB', '') is string &&
+                 roomData.get('participantB', '').matches('^usr_.*')
+               )
+             );
     }
 
     match /rooms/{roomId} {
       allow get: if isAuthenticated() &&
                     isValidRoomId(roomId) &&
+                    isLegacyPairEmail() &&
+                    roomId == 'truman-maezinha' &&
                     (
-                      (isLegacyPairEmail() && roomId == 'truman-maezinha') ||
-                      (resource != null && (
-                        request.auth.uid == resource.data.participantA ||
-                        request.auth.uid == resource.data.participantB
-                      ))
+                      resource == null ||
+                      request.auth.uid == resource.data.get('participantA', null) ||
+                      request.auth.uid == resource.data.get('participantB', null) ||
+                      canJoinOrRecoverLegacyRoom(resource.data)
                     );
-      allow list: if isAuthenticated() && (
-                     request.auth.uid == resource.data.participantA ||
-                     request.auth.uid == resource.data.participantB
-                   );
+      allow list: if isAuthenticated() &&
+                     isLegacyPairEmail() &&
+                     resource.data.roomId == 'truman-maezinha' &&
+                     (
+                       request.auth.uid == resource.data.participantA ||
+                       request.auth.uid == resource.data.participantB
+                     );
       allow create: if isAuthenticated() &&
                        isValidRoomId(roomId) &&
                        isLegacyPairEmail() &&
@@ -95,48 +129,102 @@ service cloud.firestore {
                        request.resource.data.keys().hasOnly(['roomId', 'participantA', 'participantAName', 'participantB', 'participantBName', 'lastReadA', 'lastReadB', 'lastRead', 'createdAt', 'lastActivity']) &&
                        request.resource.data.roomId == roomId &&
                        request.resource.data.participantA == request.auth.uid &&
-                       request.resource.data.participantAName is string &&
-                       request.resource.data.participantAName.size() >= 1 &&
-                       request.resource.data.participantAName.size() <= 30 &&
+                       request.resource.data.participantAName == legacyDisplayNameForEmail() &&
                        (!('participantB' in request.resource.data) || request.resource.data.participantB == null || request.resource.data.participantB == '') &&
+                       (!('participantBName' in request.resource.data) || request.resource.data.participantBName == null || request.resource.data.participantBName == '') &&
                        request.resource.data.createdAt is string &&
-                       request.resource.data.lastActivity is string;
+                       request.resource.data.createdAt.size() >= 1 &&
+                       request.resource.data.lastActivity is string &&
+                       request.resource.data.lastActivity.size() >= 1;
       allow update: if isAuthenticated() &&
                        isValidRoomId(roomId) &&
+                       isLegacyPairEmail() &&
+                       roomId == 'truman-maezinha' &&
                        (
-                         request.auth.uid == resource.data.participantA ||
-                         request.auth.uid == resource.data.participantB ||
-                         (isLegacyPairEmail() && roomId == 'truman-maezinha')
+                         request.auth.uid == resource.data.get('participantA', null) ||
+                         request.auth.uid == resource.data.get('participantB', null) ||
+                         canJoinOrRecoverLegacyRoom(resource.data)
                        ) &&
                        request.resource.data.roomId == resource.data.roomId &&
                        request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.lastActivity is string &&
+                       request.resource.data.lastActivity.size() >= 1 &&
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                          'participantA', 'participantB', 'participantAName', 'participantBName',
                          'lastRead', 'lastReadA', 'lastReadB', 'lastActivity'
                        ]) &&
-                       (request.resource.data.participantA == resource.data.participantA || (isLegacyPairEmail() && request.resource.data.participantA == request.auth.uid)) &&
-                       (request.resource.data.participantB == resource.data.participantB || (isLegacyPairEmail() && request.resource.data.participantB == request.auth.uid));
+                       (!('participantB' in request.resource.data) || request.resource.data.participantB == null || request.resource.data.participantB == '' || request.resource.data.participantA != request.resource.data.participantB) &&
+                       (!('participantBName' in request.resource.data) || request.resource.data.participantBName == null || request.resource.data.participantBName == '' || request.resource.data.participantAName != request.resource.data.participantBName) &&
+                       (
+                         request.resource.data.participantA == resource.data.participantA ||
+                         (
+                           resource.data.get('participantAName', null) == legacyDisplayNameForEmail() &&
+                           (
+                             !(resource.data.get('participantA', null) is string) ||
+                             resource.data.get('participantA', '') == '' ||
+                             resource.data.get('participantA', '').matches('^usr_.*')
+                           ) &&
+                           request.resource.data.participantA == request.auth.uid
+                         )
+                       ) &&
+                       (
+                         request.resource.data.get('participantB', null) == resource.data.get('participantB', null) ||
+                         (
+                           (
+                             resource.data.get('participantB', null) == null ||
+                             resource.data.get('participantB', null) == '' ||
+                             (
+                               resource.data.get('participantBName', null) == legacyDisplayNameForEmail() &&
+                               resource.data.get('participantB', '') is string &&
+                               resource.data.get('participantB', '').matches('^usr_.*')
+                             )
+                           ) &&
+                           request.resource.data.participantB == request.auth.uid
+                         )
+                       ) &&
+                       (
+                         request.resource.data.participantAName == resource.data.participantAName
+                       ) &&
+                       (
+                         request.resource.data.get('participantBName', null) == resource.data.get('participantBName', null) ||
+                         (
+                           (resource.data.get('participantB', null) == null || resource.data.get('participantB', null) == '') &&
+                           request.resource.data.participantB == request.auth.uid &&
+                           request.resource.data.participantBName == legacyDisplayNameForEmail()
+                         )
+                       ) &&
+                       (!('lastRead' in request.resource.data) || request.resource.data.lastRead == null || request.resource.data.lastRead is map) &&
+                       (!('lastReadA' in request.resource.data) || request.resource.data.lastReadA == null || request.resource.data.lastReadA is string) &&
+                       (!('lastReadB' in request.resource.data) || request.resource.data.lastReadB == null || request.resource.data.lastReadB is string);
       allow delete: if false;
     }
 
     match /messages/{messageId} {
-      allow get: if isValidId(messageId) && isRoomParticipant(resource.data.room);
-      allow list: if isRoomParticipant(resource.data.room);
-      allow create: if isValidId(messageId) &&
+      allow get: if isAuthenticated() &&
+                    isValidId(messageId) &&
+                    isRoomParticipant(resource.data.room);
+      allow list: if isAuthenticated() &&
+                     isRoomParticipant(resource.data.room);
+      allow create: if isAuthenticated() &&
+                       isValidId(messageId) &&
+                       request.resource.data.room == 'truman-maezinha' &&
                        isRoomParticipant(request.resource.data.room) &&
                        request.resource.data.keys().hasAll(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt']) &&
-                       request.resource.data.keys().hasOnly(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt', 'status']) &&
+                       request.resource.data.keys().hasOnly(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt', 'status', 'createdAtServer']) &&
                        request.resource.data.messageId == messageId &&
                        request.resource.data.senderId == request.auth.uid &&
-                       request.resource.data.sender is string &&
-                       request.resource.data.sender.size() >= 1 &&
-                       request.resource.data.sender.size() <= 30 &&
+                       request.resource.data.sender == legacyDisplayNameForEmail() &&
                        request.resource.data.text is string &&
                        request.resource.data.text.size() >= 1 &&
                        request.resource.data.text.size() <= 2000 &&
                        request.resource.data.clientId is string &&
-                       request.resource.data.createdAt is string;
-      allow update: if isValidId(messageId) &&
+                       request.resource.data.clientId.size() >= 1 &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       (!('status' in request.resource.data) || isValidStatus(request.resource.data.status)) &&
+                       isValidOptionalServerTimestamp(request.resource.data);
+      allow update: if isAuthenticated() &&
+                       isValidId(messageId) &&
                        isRoomParticipant(resource.data.room) &&
                        isValidIndividualDelete(resource.data, request.resource.data);
       allow delete: if false;
@@ -146,20 +234,18 @@ service cloud.firestore {
     // EXPANSION V1: AS 5 ENTIDADES ENXUTAS
     // ====================================================================
 
-    // 1. users/{uid} — Metadados privados da conta
+    // 1. users/{uid} — Metadados privados da conta (imutável após criação)
     match /users/{uid} {
-      allow read: if isUser(uid);
+      allow get: if isUser(uid);
+      allow list: if false;
       allow create: if isUser(uid) &&
                        request.resource.data.keys().hasAll(['uid', 'talk2tmId', 'createdAt']) &&
                        request.resource.data.keys().hasOnly(['uid', 'talk2tmId', 'createdAt']) &&
                        request.resource.data.uid == request.auth.uid &&
                        isValidTalk2tmId(request.resource.data.talk2tmId) &&
-                       request.resource.data.createdAt is string;
-      allow update: if isUser(uid) &&
-                       resource.data.uid == request.auth.uid &&
-                       request.resource.data.uid == request.auth.uid &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['talk2tmId']) &&
-                       isValidTalk2tmId(request.resource.data.talk2tmId);
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1;
+      allow update: if false;
       allow delete: if false;
     }
 
@@ -176,12 +262,16 @@ service cloud.firestore {
                        request.resource.data.displayName.size() >= 1 &&
                        request.resource.data.displayName.size() <= 30 &&
                        request.resource.data.active is bool &&
-                       request.resource.data.createdAt is string;
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId == talk2tmId;
       allow update: if isAuthenticated() &&
                        isValidTalk2tmId(talk2tmId) &&
                        resource.data.uid == request.auth.uid &&
-                       request.resource.data.uid == request.auth.uid &&
-                       request.resource.data.talk2tmId == talk2tmId &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.talk2tmId == resource.data.talk2tmId &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
                        request.resource.data.displayName is string &&
                        request.resource.data.displayName.size() >= 1 &&
@@ -198,8 +288,28 @@ service cloud.firestore {
       );
     }
 
+    function inviteMatchesConversationPair(inviteData, convId, uidA, uidB, idA, idB) {
+      return inviteData.status == 'accepted' &&
+             inviteData.conversationId == convId &&
+             (
+               (
+                 inviteData.fromUid == uidA &&
+                 inviteData.toUid == uidB &&
+                 inviteData.fromTalk2tmId == idA &&
+                 inviteData.toTalk2tmId == idB
+               ) ||
+               (
+                 inviteData.fromUid == uidB &&
+                 inviteData.toUid == uidA &&
+                 inviteData.fromTalk2tmId == idB &&
+                 inviteData.toTalk2tmId == idA
+               )
+             );
+    }
+
     match /conversations/{conversationId} {
-      allow get: if isValidId(conversationId) &&
+      allow get: if isAuthenticated() &&
+                    isValidId(conversationId) &&
                     (resource == null || isConversationParticipant(resource.data));
       allow list: if isConversationParticipant(resource.data);
       allow create: if isAuthenticated() &&
@@ -233,33 +343,70 @@ service cloud.firestore {
                        request.resource.data.displayNameB.size() >= 1 &&
                        request.resource.data.displayNameB.size() <= 30 &&
                        request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
                        request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
+                       (!('lastReadA' in request.resource.data) || request.resource.data.lastReadA == null || request.resource.data.lastReadA is string) &&
+                       (!('lastReadB' in request.resource.data) || request.resource.data.lastReadB == null || request.resource.data.lastReadB is string) &&
                        exists(/databases/$(database)/documents/users/$(request.resource.data.participantA)) &&
                        get(/databases/$(database)/documents/users/$(request.resource.data.participantA)).data.talk2tmId == request.resource.data.talk2tmIdA &&
                        exists(/databases/$(database)/documents/users/$(request.resource.data.participantB)) &&
                        get(/databases/$(database)/documents/users/$(request.resource.data.participantB)).data.talk2tmId == request.resource.data.talk2tmIdB &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.uid == request.resource.data.participantA &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.displayName == request.resource.data.displayNameA &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.uid == request.resource.data.participantB &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.displayName == request.resource.data.displayNameB &&
                        exists(/databases/$(database)/documents/conversationInvites/$(conversationId)) &&
-                       get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data.status == 'accepted';
+                       inviteMatchesConversationPair(
+                         get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data,
+                         conversationId,
+                         request.resource.data.participantA,
+                         request.resource.data.participantB,
+                         request.resource.data.talk2tmIdA,
+                         request.resource.data.talk2tmIdB
+                       );
       allow update: if isValidId(conversationId) &&
                        isConversationParticipant(resource.data) &&
                        request.resource.data.conversationId == resource.data.conversationId &&
                        request.resource.data.participantA == resource.data.participantA &&
                        request.resource.data.participantB == resource.data.participantB &&
+                       request.resource.data.talk2tmIdA == resource.data.talk2tmIdA &&
+                       request.resource.data.talk2tmIdB == resource.data.talk2tmIdB &&
+                       request.resource.data.displayNameA == resource.data.displayNameA &&
+                       request.resource.data.displayNameB == resource.data.displayNameB &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
                        request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
                        (
-                         (request.auth.uid == resource.data.participantA &&
-                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastReadA', 'updatedAt'])) ||
-                         (request.auth.uid == resource.data.participantB &&
-                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastReadB', 'updatedAt']))
+                         (
+                           request.auth.uid == resource.data.participantA &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastReadA', 'updatedAt']) &&
+                           (
+                             request.resource.data.get('lastReadA', null) == resource.data.get('lastReadA', null) ||
+                             (request.resource.data.lastReadA is string && request.resource.data.lastReadA.size() >= 1)
+                           )
+                         ) ||
+                         (
+                           request.auth.uid == resource.data.participantB &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastReadB', 'updatedAt']) &&
+                           (
+                             request.resource.data.get('lastReadB', null) == resource.data.get('lastReadB', null) ||
+                             (request.resource.data.lastReadB is string && request.resource.data.lastReadB.size() >= 1)
+                           )
+                         )
                        );
       allow delete: if false;
 
       // 5. conversations/{conversationId}/messages/{messageId} — Subcoleção de mensagens bilaterais
       match /messages/{messageId} {
-        allow get: if isValidId(conversationId) &&
+        allow get: if isAuthenticated() &&
+                      isValidId(conversationId) &&
                       isValidId(messageId) &&
                       isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
-        allow list: if isValidId(conversationId) &&
+        allow list: if isAuthenticated() &&
+                       isValidId(conversationId) &&
                        isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
         allow create: if isValidId(conversationId) &&
                          isValidId(messageId) &&
@@ -270,17 +417,23 @@ service cloud.firestore {
                          ]) &&
                          request.resource.data.keys().hasOnly([
                            'messageId', 'conversationId', 'senderId', 'senderTalk2tmId',
-                           'text', 'clientId', 'createdAt', 'status'
+                           'text', 'clientId', 'createdAt', 'status', 'createdAtServer'
                          ]) &&
                          request.resource.data.messageId == messageId &&
                          request.resource.data.conversationId == conversationId &&
                          request.resource.data.senderId == request.auth.uid &&
                          isValidTalk2tmId(request.resource.data.senderTalk2tmId) &&
+                         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId == request.resource.data.senderTalk2tmId &&
                          request.resource.data.text is string &&
                          request.resource.data.text.size() >= 1 &&
                          request.resource.data.text.size() <= 2000 &&
                          request.resource.data.clientId is string &&
-                         request.resource.data.createdAt is string;
+                         request.resource.data.clientId.size() >= 1 &&
+                         request.resource.data.createdAt is string &&
+                         request.resource.data.createdAt.size() >= 1 &&
+                         (!('status' in request.resource.data) || isValidStatus(request.resource.data.status)) &&
+                         isValidOptionalServerTimestamp(request.resource.data);
         allow update: if isValidId(conversationId) &&
                          isValidId(messageId) &&
                          isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
@@ -290,6 +443,11 @@ service cloud.firestore {
     }
 
     // 4. conversationInvites/{inviteId} — Convites bilaterais estritos (sem toUid nulo)
+    function isCanonicalConversationIdForPair(convId, uid1, uid2) {
+      return (uid1 < uid2 && convId == 'conv_' + uid1 + '_' + uid2) ||
+             (uid2 < uid1 && convId == 'conv_' + uid2 + '_' + uid1);
+    }
+
     match /conversationInvites/{inviteId} {
       allow get: if isAuthenticated() &&
                     isValidId(inviteId) &&
@@ -321,16 +479,30 @@ service cloud.firestore {
                        request.resource.data.fromDisplayName.size() <= 30 &&
                        isValidId(request.resource.data.conversationId) &&
                        inviteId == request.resource.data.conversationId &&
+                       isCanonicalConversationIdForPair(
+                         request.resource.data.conversationId,
+                         request.resource.data.fromUid,
+                         request.resource.data.toUid
+                       ) &&
                        request.resource.data.status == 'pending' &&
                        request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
                        request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
                        exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.uid == request.auth.uid &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.active == true &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.displayName == request.resource.data.fromDisplayName &&
                        exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid;
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.active == true;
       allow update: if isAuthenticated() &&
                        isValidId(inviteId) &&
+                       request.resource.data.inviteId == resource.data.inviteId &&
+                       request.resource.data.conversationId == resource.data.conversationId &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
                        request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
                        (
                          (
                            resource.data.status == 'pending' &&
@@ -349,7 +521,10 @@ service cloud.firestore {
                            request.resource.data.fromUid == request.auth.uid &&
                            request.resource.data.toUid is string &&
                            request.resource.data.toUid != request.auth.uid &&
-                           (request.resource.data.toUid == resource.data.toUid || request.resource.data.toUid == resource.data.fromUid) &&
+                           (
+                             (request.resource.data.fromUid == resource.data.fromUid && request.resource.data.toUid == resource.data.toUid) ||
+                             (request.resource.data.fromUid == resource.data.toUid && request.resource.data.toUid == resource.data.fromUid)
+                           ) &&
                            isValidTalk2tmId(request.resource.data.fromTalk2tmId) &&
                            isValidTalk2tmId(request.resource.data.toTalk2tmId) &&
                            request.resource.data.fromTalk2tmId != request.resource.data.toTalk2tmId &&
@@ -363,8 +538,11 @@ service cloud.firestore {
                            ]) &&
                            exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
                            get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.uid == request.auth.uid &&
+                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.active == true &&
+                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.displayName == request.resource.data.fromDisplayName &&
                            exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)) &&
-                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid
+                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid &&
+                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.active == true
                          )
                        );
       allow delete: if false;

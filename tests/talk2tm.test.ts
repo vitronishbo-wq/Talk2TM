@@ -1114,9 +1114,10 @@ export function runTalk2TMTests(): { passed: number; total: number } {
 
     assert(
       firestoreRules.includes('match /conversations/{conversationId}') &&
-      firestoreRules.includes("get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data.status == 'accepted'") &&
+      firestoreRules.includes('inviteMatchesConversationPair(') &&
+      firestoreRules.includes("inviteData.status == 'accepted'") &&
       firestoreRules.includes('isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data)'),
-      'firestore.rules deve exigir participante válido e convite accepted na criação/acesso de conversations e messages'
+      'firestore.rules deve exigir participante válido e convite accepted do par na criação/acesso de conversations e messages'
     );
   });
 
@@ -1137,10 +1138,11 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       firestoreRules.indexOf('// 4. conversationInvites/{inviteId}')
     );
     assert(
-      msgBlock.includes('allow get: if isValidId(conversationId)') &&
-      msgBlock.includes('allow list: if isValidId(conversationId)') &&
+      msgBlock.includes('allow get: if isAuthenticated() &&') &&
+      msgBlock.includes('allow list: if isAuthenticated() &&') &&
+      msgBlock.includes('isValidId(conversationId)') &&
       msgBlock.includes('isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data)'),
-      'Subcoleção /conversations/{conversationId}/messages deve restringir get/list aos participantes da conversa'
+      'Subcoleção /conversations/{conversationId}/messages deve restringir get/list aos participantes autenticados da conversa'
     );
   });
 
@@ -1278,10 +1280,12 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       firestoreRules.indexOf('match /userProfiles/{talk2tmId}')
     );
     assert(
-      usersSection.includes('allow read: if isUser(uid);') &&
+      usersSection.includes('allow get: if isUser(uid);') &&
+      usersSection.includes('allow list: if false;') &&
       usersSection.includes('allow create: if isUser(uid)') &&
+      usersSection.includes('allow update: if false;') &&
       usersSection.includes('isValidTalk2tmId(request.resource.data.talk2tmId)'),
-      'users/{uid} deve permitir leitura/criação apenas pelo próprio UID autenticado (isUser(uid))'
+      'users/{uid} deve permitir leitura/criação apenas pelo próprio UID autenticado e bloquear list/update após criação'
     );
   });
 
