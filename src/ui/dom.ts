@@ -1,5 +1,5 @@
-import { ConnectionState, Message, Room, UserSession } from '../types';
-import { AppSettings, getUserByPin, AllowedUser } from '../config';
+import { ConnectionState, Conversation, ConversationInvite, Message, Room, UserSession } from '../types';
+import { AppSettings } from '../config';
 import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
 import { MobileCalculator } from './calculator';
 import { getPartnerLastRead } from '../firebase/firestore';
@@ -13,6 +13,12 @@ export interface UIEvents {
   onUpdateSettings: (settings: AppSettings) => void;
   onDeleteMessagesLocally?: (messageIds: string[]) => void;
   onCreateIdentity?: (displayName: string) => Promise<string | null>;
+  onSendInvite?: (targetTalk2tmId: string) => Promise<void>;
+  onAcceptInvite?: (invite: ConversationInvite) => Promise<void>;
+  onDeclineInvite?: (inviteId: string) => Promise<void>;
+  onCancelInvite?: (inviteId: string) => Promise<void>;
+  onOpenConversation?: (conversationId: string) => Promise<void>;
+  onShowConnectHub?: () => void;
 }
 
 export class ChatUI {
@@ -41,6 +47,17 @@ export class ChatUI {
   private onboardingErrorEl!: HTMLElement;
   private onboardingSubmitBtn!: HTMLButtonElement;
   private generatedCodeBadgeEl!: HTMLElement;
+
+  // Hub de Conexões Bilaterais (Conta A -> Talk2TM ID de Conta B -> Convite -> Aceite -> Conversa)
+  private connectionsBtnEl!: HTMLButtonElement;
+  private connectViewEl!: HTMLElement;
+  private connectSelfCodeEl!: HTMLElement;
+  private connectTargetInput!: HTMLInputElement;
+  private connectInviteBtn!: HTMLButtonElement;
+  private connectFeedbackEl!: HTMLElement;
+  private incomingInvitesListEl!: HTMLElement;
+  private outgoingInvitesListEl!: HTMLElement;
+  private conversationsListEl!: HTMLElement;
 
   // Tela de Chat
   private chatViewEl!: HTMLElement;
@@ -128,6 +145,16 @@ export class ChatUI {
     const headerActions = document.createElement('div');
     headerActions.className = 'ttm-header-actions';
 
+    this.connectionsBtnEl = document.createElement('button');
+    this.connectionsBtnEl.type = 'button';
+    this.connectionsBtnEl.className = 'ttm-btn ttm-btn-def';
+    this.connectionsBtnEl.textContent = '[⇄ conexões]';
+    this.connectionsBtnEl.title = 'Gerir convites e conversas bilaterais';
+    this.connectionsBtnEl.style.display = 'none';
+    this.connectionsBtnEl.addEventListener('click', () => {
+      this.events.onShowConnectHub?.();
+    });
+
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
     settingsBtn.className = 'ttm-btn ttm-btn-def';
@@ -146,6 +173,7 @@ export class ChatUI {
       this.events.onLockToCalculator();
     });
 
+    headerActions.appendChild(this.connectionsBtnEl);
     headerActions.appendChild(settingsBtn);
     headerActions.appendChild(lockBtn);
 
@@ -169,11 +197,13 @@ export class ChatUI {
 
     this.buildPassEntryView();
     this.buildOnboardingView();
+    this.buildConnectView();
     this.buildChatView();
     this.buildSettingsModal();
 
     this.mainEl.appendChild(this.passViewEl);
     this.mainEl.appendChild(this.onboardingViewEl);
+    this.mainEl.appendChild(this.connectViewEl);
     this.mainEl.appendChild(this.chatViewEl);
     this.appWrapper.appendChild(this.mainEl);
     this.appWrapper.appendChild(this.settingsModalEl);
@@ -209,11 +239,9 @@ export class ChatUI {
     this.singlePassInput.type = 'password';
     this.singlePassInput.id = 'ttm-single-pass';
     this.singlePassInput.className = 'ttm-input ttm-input-single';
-    this.singlePassInput.placeholder = 'Senha de 6 dígitos...';
-    this.singlePassInput.maxLength = 12;
+    this.singlePassInput.placeholder = 'Senha ou código TM-...';
+    this.singlePassInput.maxLength = 16;
     this.singlePassInput.autocomplete = 'current-password';
-    this.singlePassInput.inputMode = 'numeric';
-    this.singlePassInput.pattern = '[0-9]*';
 
     this.passErrorEl = document.createElement('div');
     this.passErrorEl.className = 'ttm-error';
@@ -246,7 +274,7 @@ export class ChatUI {
     formEl.appendChild(createCodeBtn);
     formEl.appendChild(backToCalcBtn);
 
-    // Validação da senha única: determina automaticamente a conta
+    // Validação da senha única: determina automaticamente a conta (ou código TM-XXXX-XXXX)
     formEl.addEventListener('submit', (e) => {
       e.preventDefault();
       this.passErrorEl.textContent = '';
@@ -254,14 +282,6 @@ export class ChatUI {
 
       if (!pin) {
         this.passErrorEl.textContent = 'Digite a senha.';
-        return;
-      }
-
-      const user = getUserByPin(pin);
-      if (!user) {
-        this.passErrorEl.textContent = 'Senha inválida.';
-        this.singlePassInput.value = '';
-        this.singlePassInput.focus();
         return;
       }
 
@@ -357,7 +377,19 @@ export class ChatUI {
             tipEl.textContent = 'Seu código Talk2TM foi criado com sucesso! Entrando no chat...';
           }
         } catch (err: any) {
-          this.onboardingErrorEl.textContent = err?.message || 'Falha ao criar identidade.';
+          let displayMessage = err?.message || 'Falha ao criar identidade.';
+          try {
+            const parsed = JSON.parse(displayMessage);
+            if (parsed && typeof parsed.error === 'string') {
+              displayMessage = parsed.error;
+            }
+          } catch {
+            // Não é JSON estruturado; mantém mensagem original
+          }
+          if (displayMessage.includes('Missing or insufficient permissions')) {
+            displayMessage = 'Permissão negada no Firestore ao salvar o perfil. Verifique as regras publicadas.';
+          }
+          this.onboardingErrorEl.textContent = displayMessage;
           this.onboardingSubmitBtn.disabled = false;
           this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
         }
@@ -368,6 +400,161 @@ export class ChatUI {
     cardEl.appendChild(subtitleEl);
     cardEl.appendChild(formEl);
     this.onboardingViewEl.appendChild(cardEl);
+  }
+
+  /**
+   * Hub de Conexões Bilaterais:
+   * Conta A procura Talk2TM ID da Conta B -> Convite -> Aceitação -> Conversa bilateral 1:1
+   */
+  private buildConnectView(): void {
+    this.connectViewEl = document.createElement('div');
+    this.connectViewEl.id = 'ttm-connect-view';
+    this.connectViewEl.className = 'ttm-connect-box';
+    this.connectViewEl.style.display = 'none';
+
+    // Cartão 1: Meu Código Talk2TM
+    const selfCard = document.createElement('div');
+    selfCard.className = 'ttm-connect-card';
+
+    const selfTitle = document.createElement('div');
+    selfTitle.className = 'ttm-connect-section-title';
+    selfTitle.textContent = 'Meu código Talk2TM';
+
+    const selfRow = document.createElement('div');
+    selfRow.className = 'ttm-connect-self-row';
+
+    this.connectSelfCodeEl = document.createElement('span');
+    this.connectSelfCodeEl.className = 'ttm-connect-self-code';
+    this.connectSelfCodeEl.textContent = 'TM-XXXX-XXXX';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    copyBtn.textContent = '[copiar]';
+    copyBtn.addEventListener('click', async () => {
+      const code = this.connectSelfCodeEl.textContent || '';
+      if (!code) return;
+      try {
+        await navigator.clipboard?.writeText(code);
+        this.showConnectFeedback('Código copiado para compartilhar com o seu parceiro.');
+      } catch {
+        this.showConnectFeedback(`Partilhe o código: ${code}`);
+      }
+    });
+
+    selfRow.appendChild(this.connectSelfCodeEl);
+    selfRow.appendChild(copyBtn);
+    selfCard.appendChild(selfTitle);
+    selfCard.appendChild(selfRow);
+
+    // Cartão 2: Convidar Conta B por Talk2TM ID
+    const inviteCard = document.createElement('div');
+    inviteCard.className = 'ttm-connect-card';
+
+    const inviteTitle = document.createElement('div');
+    inviteTitle.className = 'ttm-connect-section-title';
+    inviteTitle.textContent = 'Convidar para conversa bilateral';
+
+    const inviteForm = document.createElement('form');
+    inviteForm.className = 'ttm-connect-form';
+
+    this.connectTargetInput = document.createElement('input');
+    this.connectTargetInput.type = 'text';
+    this.connectTargetInput.className = 'ttm-connect-input';
+    this.connectTargetInput.placeholder = 'TM-XXXX-XXXX';
+    this.connectTargetInput.maxLength = 12;
+    this.connectTargetInput.autocomplete = 'off';
+
+    this.connectInviteBtn = document.createElement('button');
+    this.connectInviteBtn.type = 'submit';
+    this.connectInviteBtn.className = 'ttm-btn ttm-btn-primary';
+    this.connectInviteBtn.textContent = '[convidar]';
+
+    this.connectFeedbackEl = document.createElement('div');
+    this.connectFeedbackEl.className = 'ttm-connect-feedback';
+
+    inviteForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const targetId = this.connectTargetInput.value.trim().toUpperCase();
+      if (!targetId) {
+        this.showConnectFeedback('Informe o código TM-XXXX-XXXX do parceiro.', true);
+        return;
+      }
+      if (!this.events.onSendInvite) return;
+      this.connectInviteBtn.disabled = true;
+      this.connectInviteBtn.textContent = '[enviando...]';
+      this.showConnectFeedback('');
+      try {
+        await this.events.onSendInvite(targetId);
+        this.connectTargetInput.value = '';
+      } catch (err: any) {
+        this.showConnectFeedback(this.extractReadableError(err), true);
+      } finally {
+        this.connectInviteBtn.disabled = false;
+        this.connectInviteBtn.textContent = '[convidar]';
+      }
+    });
+
+    inviteForm.appendChild(this.connectTargetInput);
+    inviteForm.appendChild(this.connectInviteBtn);
+    inviteCard.appendChild(inviteTitle);
+    inviteCard.appendChild(inviteForm);
+    inviteCard.appendChild(this.connectFeedbackEl);
+
+    // Cartão 3: Convites Recebidos
+    const incomingCard = document.createElement('div');
+    incomingCard.className = 'ttm-connect-card';
+    const incomingTitle = document.createElement('div');
+    incomingTitle.className = 'ttm-connect-section-title';
+    incomingTitle.textContent = 'Convites recebidos';
+    this.incomingInvitesListEl = document.createElement('div');
+    this.incomingInvitesListEl.className = 'ttm-connect-list';
+    incomingCard.appendChild(incomingTitle);
+    incomingCard.appendChild(this.incomingInvitesListEl);
+
+    // Cartão 4: Convites Enviados
+    const outgoingCard = document.createElement('div');
+    outgoingCard.className = 'ttm-connect-card';
+    const outgoingTitle = document.createElement('div');
+    outgoingTitle.className = 'ttm-connect-section-title';
+    outgoingTitle.textContent = 'Convites enviados';
+    this.outgoingInvitesListEl = document.createElement('div');
+    this.outgoingInvitesListEl.className = 'ttm-connect-list';
+    outgoingCard.appendChild(outgoingTitle);
+    outgoingCard.appendChild(this.outgoingInvitesListEl);
+
+    // Cartão 5: Conversas Bilaterais Ativas
+    const convCard = document.createElement('div');
+    convCard.className = 'ttm-connect-card';
+    const convTitle = document.createElement('div');
+    convTitle.className = 'ttm-connect-section-title';
+    convTitle.textContent = 'Conversas bilaterais';
+    this.conversationsListEl = document.createElement('div');
+    this.conversationsListEl.className = 'ttm-connect-list';
+    convCard.appendChild(convTitle);
+    convCard.appendChild(this.conversationsListEl);
+
+    this.connectViewEl.appendChild(selfCard);
+    this.connectViewEl.appendChild(inviteCard);
+    this.connectViewEl.appendChild(incomingCard);
+    this.connectViewEl.appendChild(outgoingCard);
+    this.connectViewEl.appendChild(convCard);
+  }
+
+  private extractReadableError(err: unknown): string {
+    let msg = err instanceof Error ? err.message : String(err || 'Erro inesperado.');
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed && typeof parsed.error === 'string') {
+        msg = parsed.error;
+      }
+    } catch {
+      // mantém texto original
+    }
+    if (msg.includes('Missing or insufficient permissions')) {
+      return 'Permissão negada ao processar operação no Firestore.';
+    }
+    return msg;
   }
 
   /**
@@ -707,6 +894,7 @@ export class ChatUI {
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
+    this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.calculator.show();
   }
@@ -716,6 +904,7 @@ export class ChatUI {
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
+    this.connectViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.passViewEl.style.display = 'flex';
     this.singlePassInput.value = '';
@@ -731,6 +920,7 @@ export class ChatUI {
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
+    this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'flex';
     this.onboardingNameInput.value = '';
@@ -741,6 +931,208 @@ export class ChatUI {
     setTimeout(() => {
       this.onboardingNameInput.focus();
     }, 100);
+  }
+
+  public showConnectView(session: UserSession): void {
+    this.currentSession = session;
+    this.exitSelectionMode();
+    this.closeSettingsModal();
+    this.calculator.hide();
+    this.passViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'none';
+    this.chatViewEl.style.display = 'none';
+    this.headerEl.style.display = 'flex';
+    this.connectViewEl.style.display = 'flex';
+    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
+    this.connectSelfCodeEl.textContent = session.talk2tmId || '';
+    this.connectFeedbackEl.textContent = '';
+    this.connectFeedbackEl.classList.remove('is-error');
+    const idLabel = session.talk2tmId ? ` [${session.talk2tmId}]` : '';
+    this.roomInfoEl.textContent = `você: ${session.displayName}${idLabel} | convide ou aceite um parceiro`;
+  }
+
+  public isConnectViewActive(): boolean {
+    return this.connectViewEl ? this.connectViewEl.style.display === 'flex' : false;
+  }
+
+  public showConnectFeedback(text: string, isError: boolean = false): void {
+    if (!this.connectFeedbackEl) return;
+    this.connectFeedbackEl.textContent = text;
+    if (isError) {
+      this.connectFeedbackEl.classList.add('is-error');
+    } else {
+      this.connectFeedbackEl.classList.remove('is-error');
+    }
+  }
+
+  public updateConnectHubData(data: {
+    incoming: ConversationInvite[];
+    outgoing: ConversationInvite[];
+    conversations: Conversation[];
+  }): void {
+    if (!this.incomingInvitesListEl || !this.outgoingInvitesListEl || !this.conversationsListEl) return;
+
+    // 1. Convites recebidos
+    this.incomingInvitesListEl.innerHTML = '';
+    if (data.incoming.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'ttm-connect-empty';
+      empty.textContent = 'Nenhum convite pendente.';
+      this.incomingInvitesListEl.appendChild(empty);
+    } else {
+      data.incoming.forEach((inv) => {
+        const item = document.createElement('div');
+        item.className = 'ttm-connect-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'ttm-connect-item-meta';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'ttm-connect-item-name';
+        nameEl.textContent = inv.fromDisplayName || inv.fromTalk2tmId;
+        const subEl = document.createElement('div');
+        subEl.className = 'ttm-connect-item-sub';
+        subEl.textContent = inv.fromTalk2tmId;
+        meta.appendChild(nameEl);
+        meta.appendChild(subEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'ttm-connect-item-actions';
+
+        const acceptBtn = document.createElement('button');
+        acceptBtn.type = 'button';
+        acceptBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+        acceptBtn.textContent = '[aceitar]';
+        acceptBtn.addEventListener('click', async () => {
+          acceptBtn.disabled = true;
+          try {
+            await this.events.onAcceptInvite?.(inv);
+          } catch (err) {
+            this.showConnectFeedback(this.extractReadableError(err), true);
+            acceptBtn.disabled = false;
+          }
+        });
+
+        const declineBtn = document.createElement('button');
+        declineBtn.type = 'button';
+        declineBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
+        declineBtn.textContent = '[recusar]';
+        declineBtn.addEventListener('click', async () => {
+          declineBtn.disabled = true;
+          try {
+            await this.events.onDeclineInvite?.(inv.inviteId);
+          } catch (err) {
+            this.showConnectFeedback(this.extractReadableError(err), true);
+            declineBtn.disabled = false;
+          }
+        });
+
+        actions.appendChild(acceptBtn);
+        actions.appendChild(declineBtn);
+        item.appendChild(meta);
+        item.appendChild(actions);
+        this.incomingInvitesListEl.appendChild(item);
+      });
+    }
+
+    // 2. Convites enviados
+    this.outgoingInvitesListEl.innerHTML = '';
+    const pendingOutgoing = data.outgoing.filter((i) => i.status === 'pending');
+    if (pendingOutgoing.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'ttm-connect-empty';
+      empty.textContent = 'Nenhum convite aguardando resposta.';
+      this.outgoingInvitesListEl.appendChild(empty);
+    } else {
+      pendingOutgoing.forEach((inv) => {
+        const item = document.createElement('div');
+        item.className = 'ttm-connect-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'ttm-connect-item-meta';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'ttm-connect-item-name';
+        nameEl.textContent = inv.toTalk2tmId;
+        const subEl = document.createElement('div');
+        subEl.className = 'ttm-connect-item-sub';
+        subEl.textContent = 'Aguardando aceitação...';
+        meta.appendChild(nameEl);
+        meta.appendChild(subEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'ttm-connect-item-actions';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
+        cancelBtn.textContent = '[cancelar]';
+        cancelBtn.addEventListener('click', async () => {
+          cancelBtn.disabled = true;
+          try {
+            await this.events.onCancelInvite?.(inv.inviteId);
+          } catch (err) {
+            this.showConnectFeedback(this.extractReadableError(err), true);
+            cancelBtn.disabled = false;
+          }
+        });
+
+        actions.appendChild(cancelBtn);
+        item.appendChild(meta);
+        item.appendChild(actions);
+        this.outgoingInvitesListEl.appendChild(item);
+      });
+    }
+
+    // 3. Conversas Bilaterais Ativas
+    this.conversationsListEl.innerHTML = '';
+    if (data.conversations.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'ttm-connect-empty';
+      empty.textContent = 'Nenhuma conversa bilateral ativa ainda.';
+      this.conversationsListEl.appendChild(empty);
+    } else {
+      const myUid = this.currentSession?.userId;
+      data.conversations.forEach((conv) => {
+        const isA = conv.participantA === myUid;
+        const partnerName = isA ? conv.displayNameB : conv.displayNameA;
+        const partnerCode = isA ? conv.talk2tmIdB : conv.talk2tmIdA;
+
+        const item = document.createElement('div');
+        item.className = 'ttm-connect-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'ttm-connect-item-meta';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'ttm-connect-item-name';
+        nameEl.textContent = partnerName || partnerCode;
+        const subEl = document.createElement('div');
+        subEl.className = 'ttm-connect-item-sub';
+        subEl.textContent = partnerCode;
+        meta.appendChild(nameEl);
+        meta.appendChild(subEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'ttm-connect-item-actions';
+
+        const openBtn = document.createElement('button');
+        openBtn.type = 'button';
+        openBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+        openBtn.textContent = '[abrir]';
+        openBtn.addEventListener('click', async () => {
+          openBtn.disabled = true;
+          try {
+            await this.events.onOpenConversation?.(conv.conversationId);
+          } catch (err) {
+            this.showConnectFeedback(this.extractReadableError(err), true);
+            openBtn.disabled = false;
+          }
+        });
+
+        actions.appendChild(openBtn);
+        item.appendChild(meta);
+        item.appendChild(actions);
+        this.conversationsListEl.appendChild(item);
+      });
+    }
   }
 
   public isChatActive(): boolean {
@@ -770,13 +1162,17 @@ export class ChatUI {
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
+    this.connectViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
+    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
     this.chatViewEl.style.display = 'flex';
     this.clearMessages();
     if (room) {
       this.currentRoom = room;
       this.updateRoomInfo(room, session);
       this.updateReadReceipts(room, session);
+    } else if (session.talk2tmId) {
+      this.roomInfoEl.textContent = `você: ${session.displayName} [${session.talk2tmId}] | conversa bilateral`;
     }
     setTimeout(() => {
       this.msgInputEl.focus();
@@ -805,12 +1201,27 @@ export class ChatUI {
   public updateRoomInfo(room: Room, session: UserSession): void {
     this.currentRoom = room;
     this.currentSession = session;
-    const isTruman = session.displayName === 'Truman';
-    const partnerName = isTruman ? 'Mãezinha' : 'Truman';
+    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
+
+    let partnerName = '';
+    if (session.conversationId) {
+      if (room.participantA === session.userId) {
+        partnerName = room.participantBName || '';
+      } else if (room.participantB === session.userId) {
+        partnerName = room.participantAName || '';
+      } else {
+        partnerName = room.participantAName === session.displayName
+          ? (room.participantBName || '')
+          : (room.participantAName || '');
+      }
+    } else {
+      const isTruman = session.displayName === 'Truman';
+      partnerName = isTruman ? 'Mãezinha' : 'Truman';
+    }
 
     let partnerStatus = 'aguardando parceiro...';
     if (room.participantB && room.participantB !== '') {
-      partnerStatus = `conectado com: ${partnerName}`;
+      partnerStatus = `conectado com: ${partnerName || 'parceiro'}`;
     }
 
     const idLabel = session.talk2tmId ? ` [${session.talk2tmId}]` : '';
@@ -849,7 +1260,11 @@ export class ChatUI {
     if (!partnerReadTime) return;
 
     for (const [messageId, item] of this.renderedMessages.entries()) {
-      const isOwn = item.isSelf || item.msg.sender === session.displayName || item.msg.senderId === session.userId;
+      const isOwn =
+        item.isSelf ||
+        item.msg.sender === session.displayName ||
+        item.msg.senderId === session.userId ||
+        (Boolean(session.talk2tmId) && item.msg.senderTalk2tmId === session.talk2tmId);
       if (isOwn && item.msg.status !== 'pending') {
         item.isSelf = true;
         const isRead = partnerReadTime >= item.msg.createdAt;

@@ -11,29 +11,134 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == uid;
     }
 
+    function isValidId(id) {
+      return id is string && id.matches('^[a-zA-Z0-9_-]{1,160}$');
+    }
+
+    function isValidRoomId(roomId) {
+      return roomId is string && roomId.matches('^[a-zA-Z0-9_-]{1,32}$');
+    }
+
+    function isValidTalk2tmId(id) {
+      return id is string && id.matches('^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$');
+    }
+
+    function isLegacyPairEmail() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'truman@talk2tm.internal' ||
+        request.auth.token.email == 'maezinha@talk2tm.internal'
+      );
+    }
+
+    // Validação estrita da política de eliminação individual (deletedFor)
+    function isValidIndividualDelete(existingData, newData) {
+      return newData.diff(existingData).affectedKeys().hasOnly(['deletedFor']) &&
+             newData.deletedFor is list &&
+             newData.deletedFor.size() >= 1 &&
+             newData.deletedFor.size() <= 2 &&
+             request.auth.uid in newData.deletedFor &&
+             (
+               (
+                 (!('deletedFor' in existingData) || existingData.deletedFor == null || existingData.deletedFor.size() == 0) &&
+                 newData.deletedFor.hasOnly([request.auth.uid])
+               ) ||
+               (
+                 'deletedFor' in existingData &&
+                 existingData.deletedFor is list &&
+                 existingData.deletedFor.size() >= 1 &&
+                 newData.deletedFor.hasAll(existingData.deletedFor) &&
+                 (
+                   (request.auth.uid in existingData.deletedFor && newData.deletedFor.size() == existingData.deletedFor.size()) ||
+                   (!(request.auth.uid in existingData.deletedFor) && newData.deletedFor.size() == existingData.deletedFor.size() + 1)
+                 )
+               )
+             );
+    }
+
     // ====================================================================
-    // LEGADO: Compatibilidade retroativa total com /rooms e /messages
+    // LEGADO: Compatibilidade restrita com /rooms/truman-maezinha e /messages
     // ====================================================================
     function isRoomParticipant(roomId) {
       return isAuthenticated() &&
-        exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+        isValidRoomId(roomId) &&
         (
-          request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantA ||
-          request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantB
+          (isLegacyPairEmail() && roomId == 'truman-maezinha') ||
+          (
+            exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+            (
+              request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantA ||
+              request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.participantB
+            )
+          )
         );
     }
 
     match /rooms/{roomId} {
-      allow read, create, update: if isAuthenticated();
+      allow get: if isAuthenticated() &&
+                    isValidRoomId(roomId) &&
+                    (
+                      (isLegacyPairEmail() && roomId == 'truman-maezinha') ||
+                      (resource != null && (
+                        request.auth.uid == resource.data.participantA ||
+                        request.auth.uid == resource.data.participantB
+                      ))
+                    );
+      allow list: if isAuthenticated() && (
+                     request.auth.uid == resource.data.participantA ||
+                     request.auth.uid == resource.data.participantB
+                   );
+      allow create: if isAuthenticated() &&
+                       isValidRoomId(roomId) &&
+                       isLegacyPairEmail() &&
+                       roomId == 'truman-maezinha' &&
+                       request.resource.data.keys().hasAll(['roomId', 'participantA', 'participantAName', 'createdAt', 'lastActivity']) &&
+                       request.resource.data.keys().hasOnly(['roomId', 'participantA', 'participantAName', 'participantB', 'participantBName', 'lastReadA', 'lastReadB', 'lastRead', 'createdAt', 'lastActivity']) &&
+                       request.resource.data.roomId == roomId &&
+                       request.resource.data.participantA == request.auth.uid &&
+                       request.resource.data.participantAName is string &&
+                       request.resource.data.participantAName.size() >= 1 &&
+                       request.resource.data.participantAName.size() <= 30 &&
+                       (!('participantB' in request.resource.data) || request.resource.data.participantB == null || request.resource.data.participantB == '') &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.lastActivity is string;
+      allow update: if isAuthenticated() &&
+                       isValidRoomId(roomId) &&
+                       (
+                         request.auth.uid == resource.data.participantA ||
+                         request.auth.uid == resource.data.participantB ||
+                         (isLegacyPairEmail() && roomId == 'truman-maezinha')
+                       ) &&
+                       request.resource.data.roomId == resource.data.roomId &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                         'participantA', 'participantB', 'participantAName', 'participantBName',
+                         'lastRead', 'lastReadA', 'lastReadB', 'lastActivity'
+                       ]) &&
+                       (request.resource.data.participantA == resource.data.participantA || (isLegacyPairEmail() && request.resource.data.participantA == request.auth.uid)) &&
+                       (request.resource.data.participantB == resource.data.participantB || (isLegacyPairEmail() && request.resource.data.participantB == request.auth.uid));
       allow delete: if false;
     }
 
     match /messages/{messageId} {
-      allow read: if isRoomParticipant(resource.data.room);
-      allow create: if isRoomParticipant(request.resource.data.room) &&
-                       request.resource.data.senderId == request.auth.uid;
-      allow update: if isRoomParticipant(resource.data.room) &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedFor']);
+      allow get: if isValidId(messageId) && isRoomParticipant(resource.data.room);
+      allow list: if isRoomParticipant(resource.data.room);
+      allow create: if isValidId(messageId) &&
+                       isRoomParticipant(request.resource.data.room) &&
+                       request.resource.data.keys().hasAll(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['messageId', 'room', 'sender', 'senderId', 'text', 'clientId', 'createdAt', 'status']) &&
+                       request.resource.data.messageId == messageId &&
+                       request.resource.data.senderId == request.auth.uid &&
+                       request.resource.data.sender is string &&
+                       request.resource.data.sender.size() >= 1 &&
+                       request.resource.data.sender.size() <= 30 &&
+                       request.resource.data.text is string &&
+                       request.resource.data.text.size() >= 1 &&
+                       request.resource.data.text.size() <= 2000 &&
+                       request.resource.data.clientId is string &&
+                       request.resource.data.createdAt is string;
+      allow update: if isValidId(messageId) &&
+                       isRoomParticipant(resource.data.room) &&
+                       isValidIndividualDelete(resource.data, request.resource.data);
       allow delete: if false;
     }
 
@@ -45,25 +150,47 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isUser(uid);
       allow create: if isUser(uid) &&
+                       request.resource.data.keys().hasAll(['uid', 'talk2tmId', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['uid', 'talk2tmId', 'createdAt']) &&
                        request.resource.data.uid == request.auth.uid &&
-                       request.resource.data.talk2tmId is string;
+                       isValidTalk2tmId(request.resource.data.talk2tmId) &&
+                       request.resource.data.createdAt is string;
       allow update: if isUser(uid) &&
-                       request.resource.data.uid == request.auth.uid;
+                       resource.data.uid == request.auth.uid &&
+                       request.resource.data.uid == request.auth.uid &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['talk2tmId']) &&
+                       isValidTalk2tmId(request.resource.data.talk2tmId);
       allow delete: if false;
     }
 
     // 2. userProfiles/{talk2tmId} — Índice público para busca e convite por ID
     match /userProfiles/{talk2tmId} {
-      // Qualquer usuário autenticado pode consultar um perfil por Talk2TM ID para convidá-lo
       allow read: if isAuthenticated();
-      // Criação ou atualização permitida somente pelo dono do UID correspondente
-      allow create, update: if isAuthenticated() &&
-                               request.resource.data.uid == request.auth.uid &&
-                               request.resource.data.talk2tmId == talk2tmId;
+      allow create: if isAuthenticated() &&
+                       isValidTalk2tmId(talk2tmId) &&
+                       request.resource.data.keys().hasAll(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt']) &&
+                       request.resource.data.uid == request.auth.uid &&
+                       request.resource.data.talk2tmId == talk2tmId &&
+                       request.resource.data.displayName is string &&
+                       request.resource.data.displayName.size() >= 1 &&
+                       request.resource.data.displayName.size() <= 30 &&
+                       request.resource.data.active is bool &&
+                       request.resource.data.createdAt is string;
+      allow update: if isAuthenticated() &&
+                       isValidTalk2tmId(talk2tmId) &&
+                       resource.data.uid == request.auth.uid &&
+                       request.resource.data.uid == request.auth.uid &&
+                       request.resource.data.talk2tmId == talk2tmId &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
+                       request.resource.data.displayName is string &&
+                       request.resource.data.displayName.size() >= 1 &&
+                       request.resource.data.displayName.size() <= 30 &&
+                       request.resource.data.active is bool;
       allow delete: if false;
     }
 
-    // 3. conversations/{conversationId} — Vínculo estrito bilateral
+    // 3. conversations/{conversationId} — Vínculo estrito bilateral (exatamente 2 identidades distintas)
     function isConversationParticipant(convData) {
       return isAuthenticated() && (
         request.auth.uid == convData.participantA ||
@@ -72,45 +199,174 @@ service cloud.firestore {
     }
 
     match /conversations/{conversationId} {
-      allow read: if isConversationParticipant(resource.data);
-      // Criar conversa requer que quem cria seja participantA ou participantB
-      allow create: if isAuthenticated() && (
-        request.resource.data.participantA == request.auth.uid ||
-        request.resource.data.participantB == request.auth.uid
-      );
-      // Atualizações de timestamp e leitura permitidas apenas aos dois participantes
-      allow update: if isConversationParticipant(resource.data) &&
-                       isConversationParticipant(request.resource.data);
+      allow get: if isValidId(conversationId) &&
+                    (resource == null || isConversationParticipant(resource.data));
+      allow list: if isConversationParticipant(resource.data);
+      allow create: if isAuthenticated() &&
+                       isValidId(conversationId) &&
+                       request.resource.data.keys().hasAll([
+                         'conversationId', 'participantA', 'participantB',
+                         'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'conversationId', 'participantA', 'participantB',
+                         'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
+                         'createdAt', 'updatedAt', 'lastReadA', 'lastReadB'
+                       ]) &&
+                       request.resource.data.conversationId == conversationId &&
+                       request.resource.data.participantA is string &&
+                       request.resource.data.participantA.size() >= 1 &&
+                       request.resource.data.participantB is string &&
+                       request.resource.data.participantB.size() >= 1 &&
+                       request.resource.data.participantA != request.resource.data.participantB &&
+                       request.resource.data.participantA < request.resource.data.participantB &&
+                       conversationId == 'conv_' + request.resource.data.participantA + '_' + request.resource.data.participantB &&
+                       (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB) &&
+                       isValidTalk2tmId(request.resource.data.talk2tmIdA) &&
+                       isValidTalk2tmId(request.resource.data.talk2tmIdB) &&
+                       request.resource.data.talk2tmIdA != request.resource.data.talk2tmIdB &&
+                       request.resource.data.displayNameA is string &&
+                       request.resource.data.displayNameA.size() >= 1 &&
+                       request.resource.data.displayNameA.size() <= 30 &&
+                       request.resource.data.displayNameB is string &&
+                       request.resource.data.displayNameB.size() >= 1 &&
+                       request.resource.data.displayNameB.size() <= 30 &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.updatedAt is string &&
+                       exists(/databases/$(database)/documents/users/$(request.resource.data.participantA)) &&
+                       get(/databases/$(database)/documents/users/$(request.resource.data.participantA)).data.talk2tmId == request.resource.data.talk2tmIdA &&
+                       exists(/databases/$(database)/documents/users/$(request.resource.data.participantB)) &&
+                       get(/databases/$(database)/documents/users/$(request.resource.data.participantB)).data.talk2tmId == request.resource.data.talk2tmIdB &&
+                       exists(/databases/$(database)/documents/conversationInvites/$(conversationId)) &&
+                       get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data.status == 'accepted';
+      allow update: if isValidId(conversationId) &&
+                       isConversationParticipant(resource.data) &&
+                       request.resource.data.conversationId == resource.data.conversationId &&
+                       request.resource.data.participantA == resource.data.participantA &&
+                       request.resource.data.participantB == resource.data.participantB &&
+                       request.resource.data.updatedAt is string &&
+                       (
+                         (request.auth.uid == resource.data.participantA &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastReadA', 'updatedAt'])) ||
+                         (request.auth.uid == resource.data.participantB &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastReadB', 'updatedAt']))
+                       );
       allow delete: if false;
 
-      // 5. conversations/{conversationId}/messages/{messageId} — Subcoleção de mensagens
+      // 5. conversations/{conversationId}/messages/{messageId} — Subcoleção de mensagens bilaterais
       match /messages/{messageId} {
-        allow read: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
-        allow create: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
-                         request.resource.data.senderId == request.auth.uid;
-        allow update: if isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
-                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedFor']);
+        allow get: if isValidId(conversationId) &&
+                      isValidId(messageId) &&
+                      isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
+        allow list: if isValidId(conversationId) &&
+                       isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
+        allow create: if isValidId(conversationId) &&
+                         isValidId(messageId) &&
+                         isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         request.resource.data.keys().hasAll([
+                           'messageId', 'conversationId', 'senderId', 'senderTalk2tmId',
+                           'text', 'clientId', 'createdAt'
+                         ]) &&
+                         request.resource.data.keys().hasOnly([
+                           'messageId', 'conversationId', 'senderId', 'senderTalk2tmId',
+                           'text', 'clientId', 'createdAt', 'status'
+                         ]) &&
+                         request.resource.data.messageId == messageId &&
+                         request.resource.data.conversationId == conversationId &&
+                         request.resource.data.senderId == request.auth.uid &&
+                         isValidTalk2tmId(request.resource.data.senderTalk2tmId) &&
+                         request.resource.data.text is string &&
+                         request.resource.data.text.size() >= 1 &&
+                         request.resource.data.text.size() <= 2000 &&
+                         request.resource.data.clientId is string &&
+                         request.resource.data.createdAt is string;
+        allow update: if isValidId(conversationId) &&
+                         isValidId(messageId) &&
+                         isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         isValidIndividualDelete(resource.data, request.resource.data);
         allow delete: if false;
       }
     }
 
-    // 4. conversationInvites/{inviteId} — Convites bilaterais
+    // 4. conversationInvites/{inviteId} — Convites bilaterais estritos (sem toUid nulo)
     match /conversationInvites/{inviteId} {
-      // Leitura permitida para quem enviou o convite (fromUid) ou para quem é o destinatário
-      allow read: if isAuthenticated() && (
-        resource.data.fromUid == request.auth.uid ||
-        resource.data.toUid == request.auth.uid ||
-        (resource.data.toUid == null && isAuthenticated())
-      );
-      // Criar convite: fromUid deve ser o usuário autenticado
+      allow get: if isAuthenticated() &&
+                    isValidId(inviteId) &&
+                    (resource == null || resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow list: if isAuthenticated() &&
+                     (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
       allow create: if isAuthenticated() &&
-                       request.resource.data.fromUid == request.auth.uid;
-      // Aceitar ou recusar convite: apenas os envolvidos podem atualizar status
-      allow update: if isAuthenticated() && (
-        resource.data.fromUid == request.auth.uid ||
-        resource.data.toUid == request.auth.uid ||
-        request.resource.data.toUid == request.auth.uid
-      );
+                       isValidId(inviteId) &&
+                       request.resource.data.keys().hasAll([
+                         'inviteId', 'fromUid', 'fromDisplayName', 'fromTalk2tmId',
+                         'toTalk2tmId', 'toUid', 'conversationId', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'inviteId', 'fromUid', 'fromDisplayName', 'fromTalk2tmId',
+                         'toTalk2tmId', 'toUid', 'conversationId', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       request.resource.data.inviteId == inviteId &&
+                       request.resource.data.fromUid == request.auth.uid &&
+                       request.resource.data.toUid is string &&
+                       request.resource.data.toUid.size() >= 1 &&
+                       request.resource.data.toUid != request.auth.uid &&
+                       isValidTalk2tmId(request.resource.data.fromTalk2tmId) &&
+                       isValidTalk2tmId(request.resource.data.toTalk2tmId) &&
+                       request.resource.data.fromTalk2tmId != request.resource.data.toTalk2tmId &&
+                       request.resource.data.fromDisplayName is string &&
+                       request.resource.data.fromDisplayName.size() >= 1 &&
+                       request.resource.data.fromDisplayName.size() <= 30 &&
+                       isValidId(request.resource.data.conversationId) &&
+                       inviteId == request.resource.data.conversationId &&
+                       request.resource.data.status == 'pending' &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.updatedAt is string &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.uid == request.auth.uid &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid;
+      allow update: if isAuthenticated() &&
+                       isValidId(inviteId) &&
+                       request.resource.data.updatedAt is string &&
+                       (
+                         (
+                           resource.data.status == 'pending' &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+                           (
+                             (resource.data.fromUid == request.auth.uid && request.resource.data.status == 'cancelled') ||
+                             (resource.data.toUid == request.auth.uid && (
+                               request.resource.data.status == 'accepted' ||
+                               request.resource.data.status == 'declined'
+                             ))
+                           )
+                         ) ||
+                         (
+                           (resource.data.status == 'declined' || resource.data.status == 'cancelled') &&
+                           (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid) &&
+                           request.resource.data.fromUid == request.auth.uid &&
+                           request.resource.data.toUid is string &&
+                           request.resource.data.toUid != request.auth.uid &&
+                           (request.resource.data.toUid == resource.data.toUid || request.resource.data.toUid == resource.data.fromUid) &&
+                           isValidTalk2tmId(request.resource.data.fromTalk2tmId) &&
+                           isValidTalk2tmId(request.resource.data.toTalk2tmId) &&
+                           request.resource.data.fromTalk2tmId != request.resource.data.toTalk2tmId &&
+                           request.resource.data.fromDisplayName is string &&
+                           request.resource.data.fromDisplayName.size() >= 1 &&
+                           request.resource.data.fromDisplayName.size() <= 30 &&
+                           request.resource.data.status == 'pending' &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                             'fromUid', 'fromDisplayName', 'fromTalk2tmId',
+                             'toUid', 'toTalk2tmId', 'status', 'updatedAt'
+                           ]) &&
+                           exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
+                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.uid == request.auth.uid &&
+                           exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)) &&
+                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid
+                         )
+                       );
       allow delete: if false;
     }
   }

@@ -15,11 +15,12 @@ import {
   loadSettings,
   saveSettings,
 } from './config';
-import { Conversation, ConnectionState, Message, Room, UserSession } from './types';
+import { Conversation, ConversationInvite, ConnectionState, Message, Room, UserSession } from './types';
 import { generateId, sanitizeMessageText } from './utils/sanitize';
 import {
   addToOutbox,
   clearSession,
+  clearMonitorContext,
   getLocalMessages,
   getOlderLocalMessages,
   getOutboxMessages,
@@ -27,6 +28,8 @@ import {
   saveLocalMessage,
   saveLocalRoom,
   getLocalRoom,
+  saveLocalConversation,
+  getLocalConversation,
   updateLocalLastRead,
   saveSession,
   getSession,
@@ -59,6 +62,15 @@ import {
   markFirestoreMessagesDeletedForUser,
   fetchLatestMessagesFromServer,
   fetchChannelMetadataFromServer,
+  getConversationById,
+  getOrCreateConversation,
+  sendConversationInvite,
+  acceptConversationInvite,
+  declineConversationInvite,
+  cancelConversationInvite,
+  subscribeToIncomingInvites,
+  subscribeToOutgoingInvites,
+  subscribeToUserConversations,
 } from './firebase/firestore';
 import {
   hasUnreadIncomingMessage,
@@ -157,6 +169,16 @@ export class Talk2TMApp {
   private isSyncingOutbox: boolean = false;
   private activeChatHeartbeatId: ReturnType<typeof setInterval> | null = null;
 
+  // Hub de Conexões Bilaterais (convites e conversas 1:1)
+  private unsubscribeIncomingInvites: Unsubscribe | null = null;
+  private unsubscribeOutgoingInvites: Unsubscribe | null = null;
+  private unsubscribeUserConversations: Unsubscribe | null = null;
+  private unsubscribeHubAuthWait: Unsubscribe | null = null;
+  private hubIncomingInvites: ConversationInvite[] = [];
+  private hubOutgoingInvites: ConversationInvite[] = [];
+  private hubConversations: Conversation[] = [];
+  private knownAcceptedInviteIds: Set<string> = new Set();
+
   constructor(container: HTMLElement) {
     this.appSettings = loadSettings();
 
@@ -169,6 +191,7 @@ export class Talk2TMApp {
       onDeleteMessagesLocally: async (messageIds: string[]) => {
         if (!this.currentSession) return;
         const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+        if (!channelId) return;
         const isConv = Boolean(this.currentSession.conversationId);
         const effectiveUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
 
@@ -191,6 +214,26 @@ export class Talk2TMApp {
       onCreateIdentity: async (displayName: string) => {
         return await this.handleCreateIdentity(displayName);
       },
+      onSendInvite: async (targetTalk2tmId: string) => {
+        await this.handleSendInvite(targetTalk2tmId);
+      },
+      onAcceptInvite: async (invite: ConversationInvite) => {
+        await this.handleAcceptInvite(invite);
+      },
+      onDeclineInvite: async (inviteId: string) => {
+        await this.handleDeclineInvite(inviteId);
+      },
+      onCancelInvite: async (inviteId: string) => {
+        await this.handleCancelInvite(inviteId);
+      },
+      onOpenConversation: async (conversationId: string) => {
+        await this.connectToConversation(conversationId);
+      },
+      onShowConnectHub: () => {
+        if (this.currentSession?.talk2tmId) {
+          void this.openBilateralHub(this.currentSession);
+        }
+      },
     });
 
     this.setupNetworkMonitoring();
@@ -204,9 +247,15 @@ export class Talk2TMApp {
    * a interface do chat de forma otimista, sem travar na rede.
    */
   public async unlockChatWithPassword(password: string): Promise<boolean> {
-    const verification = verifyPassword(password);
+    const cleanInput = (password || '').trim();
+    const verification = verifyPassword(cleanInput);
 
     if (!verification.valid || !verification.user || !verification.userId) {
+      const localIdentity = getLocalIdentity();
+      if (localIdentity && cleanInput.toUpperCase() === localIdentity.talk2tmId.toUpperCase()) {
+        return await this.unlockWithLocalIdentity(localIdentity);
+      }
+
       this.ui.showPassError(verification.error || 'Senha inválida.');
       this.ui.showTemporaryNotice(verification.error || 'Senha inválida.');
       return false;
@@ -423,6 +472,7 @@ export class Talk2TMApp {
   public leaveSession(): void {
     this.stopAllTimers();
     this.stopActiveChatSyncLoop();
+    this.stopConnectHubListeners();
     if (this.unsubscribeMessages) {
       this.unsubscribeMessages();
       this.unsubscribeMessages = null;
@@ -453,8 +503,35 @@ export class Talk2TMApp {
     return (
       msg.senderId === session.userId ||
       (Boolean(authUid) && msg.senderId === authUid) ||
-      (Boolean(session.displayName) && msg.sender === session.displayName)
+      (Boolean(session.displayName) && msg.sender === session.displayName) ||
+      (Boolean(session.talk2tmId) && msg.senderTalk2tmId === session.talk2tmId)
     );
+  }
+
+  /**
+   * Resolve o displayName legível de mensagens de conversa bilateral a partir dos metadados da conversa,
+   * evitando exibir o código bruto TM-XXXX-XXXX quando o nome de exibição é conhecido.
+   */
+  private resolveConversationSenderName(msg: Message, roomOverride?: Room | null): Message {
+    const room = roomOverride || this.currentRoom;
+    const session = this.currentSession;
+    if (!session?.conversationId && !msg.conversationId) {
+      return msg;
+    }
+    let resolvedName = msg.sender;
+    if (room) {
+      if (msg.senderId === room.participantA && room.participantAName) {
+        resolvedName = room.participantAName;
+      } else if (msg.senderId === room.participantB && room.participantBName) {
+        resolvedName = room.participantBName;
+      }
+    }
+    if ((!resolvedName || /^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(resolvedName)) && session) {
+      if (msg.senderId === session.userId || (session.talk2tmId && msg.senderTalk2tmId === session.talk2tmId)) {
+        resolvedName = session.displayName;
+      }
+    }
+    return resolvedName === msg.sender ? msg : { ...msg, sender: resolvedName };
   }
 
   /**
@@ -619,8 +696,9 @@ export class Talk2TMApp {
     );
 
     if (olderMessages.length > 0) {
+      const resolvedOlder = olderMessages.map((m) => this.resolveConversationSenderName(m));
       this.ui.prependMessages(
-        olderMessages,
+        resolvedOlder,
         this.currentSession.userId,
         this.currentSession.displayName
       );
@@ -808,9 +886,10 @@ export class Talk2TMApp {
               continue;
             }
             await saveLocalMessage(msg);
-            visibleIncoming.push(msg);
+            const resolvedMsg = this.resolveConversationSenderName(msg);
+            visibleIncoming.push(resolvedMsg);
             if (this.ui.isChatActive()) {
-              this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
+              this.ui.appendOrUpdateMessage(resolvedMsg, this.isOwnMessage(resolvedMsg, this.currentSession));
             }
           }
           if (this.ui.isChatActive()) {
@@ -881,6 +960,7 @@ export class Talk2TMApp {
    */
   private persistMonitorContext(session: UserSession): void {
     const channelId = session.conversationId || session.roomId;
+    if (!channelId) return;
     saveMonitorContext({
       channelId,
       isConversation: Boolean(session.conversationId),
@@ -1102,9 +1182,10 @@ export class Talk2TMApp {
         continue;
       }
       await saveLocalMessage(msg).catch(() => {});
-      visible.push(msg);
+      const resolvedMsg = isConversation ? this.resolveConversationSenderName(msg) : msg;
+      visible.push(resolvedMsg);
       if (this.currentSession && this.ui.isChatActive()) {
-        this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
+        this.ui.appendOrUpdateMessage(resolvedMsg, this.isOwnMessage(resolvedMsg, this.currentSession));
       }
     }
 
@@ -1138,6 +1219,12 @@ export class Talk2TMApp {
 
       if (this.currentSession) {
         const channelId = this.currentSession.conversationId || this.currentSession.roomId;
+        if (!channelId) {
+          if (this.ui.isConnectViewActive() && !this.unsubscribeIncomingInvites) {
+            this.attachConnectHubListeners(this.currentSession);
+          }
+          return;
+        }
         const isConv = Boolean(this.currentSession.conversationId);
         const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
 
@@ -1301,18 +1388,16 @@ export class Talk2TMApp {
       }
     }
 
+    // Limpa contexto legado de sala pessoal individual (modelo anterior substituído por conversa bilateral)
+    const existingCtx = getMonitorContext();
+    if (existingCtx && !existingCtx.isConversation && existingCtx.channelId.startsWith('room_tm_')) {
+      clearMonitorContext();
+    }
+
     // Se houver identidade local prévia salva da Fase 2, restaura apenas metadados internos (sem abrir chat)
     const localIdentity = await restoreLocalIdentity().catch(() => null);
     if (localIdentity && isAuthValidAndNonAnonymous()) {
       console.info(`Talk2TM [Identity]: Identidade ${localIdentity.talk2tmId} restaurada para ${localIdentity.displayName}`);
-      if (!getMonitorContext()) {
-        saveMonitorContext({
-          channelId: ACCESS_CONFIG.DEFAULT_ROOM,
-          isConversation: false,
-          userId: localIdentity.uid,
-          displayName: localIdentity.displayName,
-        });
-      }
     }
 
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
@@ -1327,75 +1412,358 @@ export class Talk2TMApp {
     }
   }
 
+  private getLastConversationStorageKey(uid: string): string {
+    return `talk2tm_last_conv_${uid}`;
+  }
+
+  private getSavedLastConversationId(uid: string): string | null {
+    try {
+      const fromStorage = typeof localStorage !== 'undefined'
+        ? localStorage.getItem(this.getLastConversationStorageKey(uid))
+        : null;
+      if (fromStorage) return fromStorage;
+    } catch {
+      // ignora erro de localStorage
+    }
+    const ctx = getMonitorContext();
+    if (ctx && ctx.isConversation && ctx.userId === uid && ctx.channelId) {
+      return ctx.channelId;
+    }
+    return null;
+  }
+
+  private saveLastConversationId(uid: string, conversationId: string): void {
+    try {
+      if (typeof localStorage !== 'undefined' && uid && conversationId) {
+        localStorage.setItem(this.getLastConversationStorageKey(uid), conversationId);
+      }
+    } catch {
+      // ignora erro de localStorage
+    }
+  }
+
+  /**
+   * Desbloqueia sessão para conta criada via Onboarding (TM-XXXX-XXXX).
+   * Abre a última conversa bilateral ativa ou o Hub de Convites Bilaterais (nunca uma sala de 1 participante).
+   */
+  private async unlockWithLocalIdentity(identity: LocalIdentity): Promise<boolean> {
+    const session: UserSession = {
+      userId: identity.uid,
+      displayName: identity.displayName,
+      roomId: '',
+      talk2tmId: identity.talk2tmId,
+    };
+
+    this.currentSession = session;
+    saveSession(session);
+    this.stopBackgroundMonitor();
+    this.startSessionTimeout();
+    this.resetInactivityTimer();
+
+    await restoreLocalIdentity().catch(() => null);
+    const activeUid = getCurrentAuthUser()?.uid || identity.uid;
+    if (activeUid !== session.userId) {
+      session.userId = activeUid;
+      this.currentSession = session;
+      saveSession(session);
+    }
+
+    const lastConvId = this.getSavedLastConversationId(session.userId) || this.getSavedLastConversationId(identity.uid);
+    if (lastConvId) {
+      await this.connectToConversation(lastConvId);
+    } else {
+      await this.openBilateralHub(session);
+    }
+
+    return true;
+  }
+
   /**
    * Onboarding Ultraleve (Fase 2):
-   * Cria nova conta e perfil associados ao Talk2TM ID (TM-XXXX-XXXX) sem exigir email ou senha do usuário.
+   * Cria nova conta e perfil associados ao Talk2TM ID (TM-XXXX-XXXX) sem criar sala falsa de 1 participante.
+   * Em seguida abre o Hub Bilateral para procurar a Conta B pelo Talk2TM ID e enviar/aceitar convite.
    */
   public async handleCreateIdentity(displayName: string): Promise<string> {
     const identity = await createTalk2TMIdentity(displayName);
-    const roomId = ACCESS_CONFIG.DEFAULT_ROOM;
 
     const session: UserSession = {
       userId: identity.uid,
       displayName: identity.displayName,
-      roomId,
+      roomId: '',
       talk2tmId: identity.talk2tmId,
     };
 
-    const nowIso = new Date().toISOString();
-    const roomToUse: Room = {
-      roomId,
-      participantA: identity.uid,
-      participantAName: identity.displayName,
-      participantB: null,
-      participantBName: null,
-      createdAt: nowIso,
-      lastActivity: nowIso,
-    };
-
     this.currentSession = session;
-    this.currentRoom = roomToUse;
+    this.currentRoom = null;
     saveSession(session);
-    this.persistMonitorContext(session);
-    saveLocalRoom(roomToUse).catch(console.warn);
 
-    // Desbloqueio imediato da interface do chat com o novo código
+    // Exibe o badge do código gerado e em seguida abre o Hub Bilateral
     setTimeout(() => {
       this.stopBackgroundMonitor();
-      this.ui.showChatView(session, roomToUse);
-      this.setConnectionState(navigator.onLine ? 'online' : 'offline');
-      this.startSessionTimeout();
-      this.resetInactivityTimer();
-      this.startActiveChatSyncLoop();
+      void this.openBilateralHub(session);
     }, 800);
 
     return identity.talk2tmId;
   }
 
+  private stopConnectHubListeners(): void {
+    if (this.unsubscribeIncomingInvites) {
+      this.unsubscribeIncomingInvites();
+      this.unsubscribeIncomingInvites = null;
+    }
+    if (this.unsubscribeOutgoingInvites) {
+      this.unsubscribeOutgoingInvites();
+      this.unsubscribeOutgoingInvites = null;
+    }
+    if (this.unsubscribeUserConversations) {
+      this.unsubscribeUserConversations();
+      this.unsubscribeUserConversations = null;
+    }
+    if (this.unsubscribeHubAuthWait) {
+      this.unsubscribeHubAuthWait();
+      this.unsubscribeHubAuthWait = null;
+    }
+  }
+
+  private renderConnectHubData(): void {
+    this.ui.updateConnectHubData({
+      incoming: this.hubIncomingInvites,
+      outgoing: this.hubOutgoingInvites,
+      conversations: this.hubConversations,
+    });
+  }
+
+  /**
+   * Abre o Hub de Conexões Bilaterais:
+   * Conta A procura Talk2TM ID de Conta B -> Convite -> Aceitação -> Conversa bilateral 1:1.
+   */
+  public async openBilateralHub(session: UserSession): Promise<void> {
+    this.stopActiveChatSyncLoop();
+    if (this.unsubscribeMessages) {
+      this.unsubscribeMessages();
+      this.unsubscribeMessages = null;
+    }
+    if (this.unsubscribeRoom) {
+      this.unsubscribeRoom();
+      this.unsubscribeRoom = null;
+    }
+
+    const hubSession: UserSession = {
+      ...session,
+      roomId: '',
+      conversationId: undefined,
+    };
+    this.currentSession = hubSession;
+    this.currentRoom = null;
+    saveSession(hubSession);
+
+    this.hubIncomingInvites = [];
+    this.hubOutgoingInvites = [];
+    this.hubConversations = [];
+    this.knownAcceptedInviteIds.clear();
+
+    this.ui.showConnectView(hubSession);
+    this.setConnectionState(navigator.onLine ? 'online' : 'offline');
+    this.startSessionTimeout();
+    this.resetInactivityTimer();
+    this.renderConnectHubData();
+
+    if (!isAuthValidAndNonAnonymous()) {
+      await waitForAuthCompletion(3000);
+    }
+
+    this.attachConnectHubListeners(hubSession);
+  }
+
+  private attachConnectHubListeners(session: UserSession): void {
+    this.stopConnectHubListeners();
+
+    if (!isAuthValidAndNonAnonymous()) {
+      const auth = getFirebaseAuth();
+      if (auth) {
+        this.unsubscribeHubAuthWait = onAuthStateChanged(auth, (resolved) => {
+          if (resolved && !resolved.isAnonymous && this.ui.isConnectViewActive()) {
+            this.attachConnectHubListeners({ ...session, userId: resolved.uid });
+          }
+        });
+      }
+      return;
+    }
+
+    const myUid = getCurrentAuthUser()?.uid || session.userId;
+    let initialOutgoingSnapshot = true;
+
+    this.unsubscribeIncomingInvites = subscribeToIncomingInvites(myUid, (invites) => {
+      this.hubIncomingInvites = invites;
+      this.renderConnectHubData();
+    });
+
+    this.unsubscribeOutgoingInvites = subscribeToOutgoingInvites(myUid, (invites) => {
+      this.hubOutgoingInvites = invites;
+      if (initialOutgoingSnapshot) {
+        initialOutgoingSnapshot = false;
+        invites.forEach((inv) => {
+          if (inv.status === 'accepted') {
+            this.knownAcceptedInviteIds.add(inv.inviteId);
+          }
+        });
+      } else {
+        // Quando Conta B acaba de aceitar um convite pendente nosso, abre a conversa bilateral automaticamente
+        const newlyAccepted = invites.find(
+          (inv) => inv.status === 'accepted' && !this.knownAcceptedInviteIds.has(inv.inviteId)
+        );
+        if (newlyAccepted && this.ui.isConnectViewActive()) {
+          this.knownAcceptedInviteIds.add(newlyAccepted.inviteId);
+          void this.openAcceptedConversationFromInvite(newlyAccepted, session);
+        }
+      }
+      this.renderConnectHubData();
+    });
+
+    this.unsubscribeUserConversations = subscribeToUserConversations(myUid, (conversations) => {
+      this.hubConversations = conversations;
+      conversations.forEach((c) => saveLocalConversation(c).catch(() => {}));
+      this.renderConnectHubData();
+    });
+  }
+
+  private async openAcceptedConversationFromInvite(
+    invite: ConversationInvite,
+    session: UserSession
+  ): Promise<void> {
+    if (!session.talk2tmId) return;
+    let conv = await getConversationById(invite.conversationId);
+    if (!conv && invite.toUid) {
+      conv = await getOrCreateConversation(
+        { uid: session.userId, talk2tmId: session.talk2tmId, displayName: session.displayName },
+        { uid: invite.toUid, talk2tmId: invite.toTalk2tmId, displayName: invite.toTalk2tmId }
+      ).catch(() => null);
+    }
+    if (conv && this.ui.isConnectViewActive()) {
+      await this.connectToConversation(conv.conversationId);
+    }
+  }
+
+  private async handleSendInvite(targetTalk2tmId: string): Promise<void> {
+    if (!this.currentSession || !this.currentSession.talk2tmId) {
+      throw new Error('Identidade Talk2TM necessária para enviar convite.');
+    }
+    if (!isAuthValidAndNonAnonymous()) {
+      await restoreLocalIdentity();
+      await waitForAuthCompletion(3000);
+    }
+    const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    const res = await sendConversationInvite(
+      {
+        uid: myUid,
+        talk2tmId: this.currentSession.talk2tmId,
+        displayName: this.currentSession.displayName,
+      },
+      targetTalk2tmId
+    );
+    if (res.status === 'already_connected' && res.conversation) {
+      this.ui.showConnectFeedback('Conexão bilateral pronta! Abrindo conversa...');
+      await this.connectToConversation(res.conversation.conversationId);
+    } else {
+      this.ui.showConnectFeedback(`Convite enviado para ${targetTalk2tmId}. Aguardando aceitação.`);
+    }
+  }
+
+  private async handleAcceptInvite(invite: ConversationInvite): Promise<void> {
+    if (!this.currentSession || !this.currentSession.talk2tmId) {
+      throw new Error('Identidade Talk2TM necessária para aceitar convite.');
+    }
+    if (!isAuthValidAndNonAnonymous()) {
+      await restoreLocalIdentity();
+      await waitForAuthCompletion(3000);
+    }
+    const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    const conv = await acceptConversationInvite(invite, {
+      uid: myUid,
+      talk2tmId: this.currentSession.talk2tmId,
+      displayName: this.currentSession.displayName,
+    });
+    await saveLocalConversation(conv).catch(() => {});
+    await saveLocalRoom(conversationToRoom(conv)).catch(() => {});
+    await this.connectToConversation(conv.conversationId);
+  }
+
+  private async handleDeclineInvite(inviteId: string): Promise<void> {
+    await declineConversationInvite(inviteId);
+    this.ui.showConnectFeedback('Convite recusado.');
+  }
+
+  private async handleCancelInvite(inviteId: string): Promise<void> {
+    await cancelConversationInvite(inviteId);
+    this.ui.showConnectFeedback('Convite cancelado.');
+  }
+
   /**
    * Conecta a sessão ativa a um canal de conversa bilateral (Fase 4).
-   * Carrega histórico local com tombstones, vincula listeners em tempo real e sincroniza outbox.
+   * Carrega metadados da conversa (participantA + participantB), histórico local com tombstones,
+   * vincula listeners em tempo real e sincroniza outbox.
    */
   public async connectToConversation(conversationId: string): Promise<void> {
     if (!this.currentSession) return;
+    this.stopConnectHubListeners();
+
+    const effectiveUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    this.currentSession.userId = effectiveUid;
     this.currentSession.conversationId = conversationId;
+    this.currentSession.roomId = conversationId;
     saveSession(this.currentSession);
     this.persistMonitorContext(this.currentSession);
+    this.saveLastConversationId(effectiveUid, conversationId);
     this.stopBackgroundMonitor();
+
+    // Garante consolidação do Firebase Auth antes de consultar metadados/listeners na conversa
+    if (!isAuthValidAndNonAnonymous()) {
+      await waitForAuthCompletion(3000);
+    }
+
+    // Carrega metadados da conversa bilateral para resolver nomes de participantA/participantB e lastRead
+    let convRoom: Room | null = await getLocalRoom(conversationId).catch(() => null);
+    if (!convRoom) {
+      const localConv = await getLocalConversation(conversationId).catch(() => null);
+      if (localConv) {
+        convRoom = conversationToRoom(localConv);
+      }
+    }
+    if (!convRoom) {
+      const remoteConv =
+        this.hubConversations.find((c) => c.conversationId === conversationId) ||
+        (await getConversationById(conversationId));
+      if (remoteConv) {
+        await saveLocalConversation(remoteConv).catch(() => {});
+        convRoom = conversationToRoom(remoteConv);
+        await saveLocalRoom(convRoom).catch(() => {});
+      }
+    }
+
+    if (convRoom) {
+      this.currentRoom = convRoom;
+    }
+
+    this.ui.showChatView(this.currentSession, convRoom || undefined);
+    this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
+    this.startSessionTimeout();
+    this.resetInactivityTimer();
+    this.startActiveChatSyncLoop();
 
     // Carrega mensagens locais do IndexedDB para a conversa respeitando tombstones
     let latestLocalIso: string | null = null;
     try {
       await loadHiddenMessagesFromDB(conversationId);
       const localHistory = await getLocalMessages(conversationId, CONFIG.HISTORY_LIMIT);
-      const normalized = normalizeAndDeduplicateMessages(localHistory, this.currentSession.userId, (id) =>
+      const normalized = normalizeAndDeduplicateMessages(localHistory, effectiveUid, (id) =>
         isMessageHiddenLocally(conversationId, id)
       );
       this.ui.clearMessages();
       for (const msg of normalized) {
-        this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
-        if (!latestLocalIso || msg.createdAt > latestLocalIso) {
-          latestLocalIso = msg.createdAt;
+        const resolved = this.resolveConversationSenderName(msg, convRoom);
+        this.ui.appendOrUpdateMessage(resolved, this.isOwnMessage(resolved, this.currentSession));
+        if (!latestLocalIso || resolved.createdAt > latestLocalIso) {
+          latestLocalIso = resolved.createdAt;
         }
       }
       if (normalized.length >= CONFIG.HISTORY_LIMIT) {
@@ -1409,19 +1777,14 @@ export class Talk2TMApp {
       await this.markChatAsRead(false, latestLocalIso || undefined);
     }
 
-    // Garante consolidação do Firebase Auth antes de amarrar listeners na conversa
-    if (!isAuthValidAndNonAnonymous()) {
-      await waitForAuthCompletion(3000);
-    }
-
     // Configura listeners em tempo real para conversations/{conversationId} e sincroniza do servidor
     this.setupRealtimeListeners(conversationId);
-    const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
-    await this.refreshLatestChannelFromServer(conversationId, true, myUid);
+    await this.refreshLatestChannelFromServer(conversationId, true, effectiveUid);
     if (this.ui.isChatActive()) {
       await this.markChatAsRead(true);
     }
     await this.syncPendingOutbox();
+    this.setConnectionState(navigator.onLine ? 'online' : 'offline');
   }
 }
 

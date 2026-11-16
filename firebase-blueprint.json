@@ -206,7 +206,11 @@
           "format": "date-time"
         }
       },
-      "required": ["conversationId", "participantA", "participantB", "talk2tmIdA", "talk2tmIdB", "createdAt", "updatedAt"]
+      "required": [
+        "conversationId", "participantA", "participantB",
+        "talk2tmIdA", "talk2tmIdB", "displayNameA", "displayNameB",
+        "createdAt", "updatedAt"
+      ]
     },
     "ConversationInvite": {
       "title": "ConversationInvite",
@@ -247,7 +251,11 @@
           "format": "date-time"
         }
       },
-      "required": ["inviteId", "fromUid", "fromTalk2tmId", "toTalk2tmId", "conversationId", "status", "createdAt", "updatedAt"]
+      "required": [
+        "inviteId", "fromUid", "fromDisplayName", "fromTalk2tmId",
+        "toTalk2tmId", "toUid", "conversationId", "status",
+        "createdAt", "updatedAt"
+      ]
     },
     "ConversationMessage": {
       "title": "ConversationMessage",

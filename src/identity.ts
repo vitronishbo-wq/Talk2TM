@@ -9,7 +9,14 @@
  */
 
 import { UserProfile, UserAccount } from './types';
-import { getFirebaseDB, getFirebaseAuth } from './firebase/firestore';
+import {
+  getFirebaseDB,
+  getFirebaseAuth,
+  initFirebase,
+  syncAuthState,
+  handleFirestoreError,
+  OperationType,
+} from './firebase/firestore';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -147,6 +154,7 @@ export async function createTalk2TMIdentity(displayName: string): Promise<LocalI
     throw new Error('Nome de exibição é obrigatório.');
   }
 
+  await initFirebase();
   const talk2tmId = generateTalk2TMId();
   const internalEmail = talk2tmIdToInternalEmail(talk2tmId);
   const internalSecret = generateInternalSecret();
@@ -157,15 +165,23 @@ export async function createTalk2TMIdentity(displayName: string): Promise<LocalI
     throw new Error('Serviço Firebase não inicializado.');
   }
 
-  // 1. Cria conta interna no Firebase Auth
+  // 1. Cria conta interna no Firebase Auth e sincroniza estado/token antes das escritas no Firestore
   const userCredential = await createUserWithEmailAndPassword(auth, internalEmail, internalSecret);
   const user = userCredential.user;
+  syncAuthState(user);
 
   // 2. Atualiza displayName no Auth
   try {
     await updateProfile(user, { displayName: cleanName });
   } catch {
     // Não bloqueia caso falhe
+  }
+
+  // Garante que o ID token recém-emitido esteja propagado para o SDK do Firestore
+  try {
+    await user.getIdToken(true);
+  } catch {
+    // Segue mesmo se refresh falhar em ambiente emulado
   }
 
   const now = new Date().toISOString();
@@ -176,7 +192,11 @@ export async function createTalk2TMIdentity(displayName: string): Promise<LocalI
     talk2tmId,
     createdAt: now,
   };
-  await setDoc(doc(db, 'users', user.uid), userAccount);
+  try {
+    await setDoc(doc(db, 'users', user.uid), userAccount);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `users/${user.uid}`);
+  }
 
   // 4. Salva índice público de descoberta: userProfiles/{talk2tmId}
   const userProfile: UserProfile = {
@@ -186,7 +206,11 @@ export async function createTalk2TMIdentity(displayName: string): Promise<LocalI
     active: true,
     createdAt: now,
   };
-  await setDoc(doc(db, 'userProfiles', talk2tmId), userProfile);
+  try {
+    await setDoc(doc(db, 'userProfiles', talk2tmId), userProfile);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `userProfiles/${talk2tmId}`);
+  }
 
   // 5. Persiste a identidade no dispositivo
   const identity: LocalIdentity = {
@@ -209,16 +233,19 @@ export async function restoreLocalIdentity(): Promise<LocalIdentity | null> {
   const identity = getLocalIdentity();
   if (!identity) return null;
 
+  await initFirebase();
   const auth = getFirebaseAuth();
   if (!auth) return identity;
 
-  // Se já está autenticado com este UID, retorna direto
+  // Se já está autenticado com este UID, sincroniza estado e retorna direto
   if (auth.currentUser && auth.currentUser.uid === identity.uid) {
+    syncAuthState(auth.currentUser);
     return identity;
   }
 
   try {
-    await signInWithEmailAndPassword(auth, identity.internalEmail, identity.internalSecret);
+    const cred = await signInWithEmailAndPassword(auth, identity.internalEmail, identity.internalSecret);
+    syncAuthState(cred.user);
   } catch {
     // Se a autenticação falhar temporariamente por falta de rede, mantemos a identidade local
   }

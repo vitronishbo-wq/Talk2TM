@@ -29,6 +29,13 @@ export function buildDeterministicConversationId(id1: string, id2: string): stri
 }
 
 /**
+ * Gera o ID canônico da conversa bilateral a partir dos UIDs do Firebase Auth.
+ */
+export function buildUidConversationId(uidA: string, uidB: string): string {
+  return buildDeterministicConversationId(uidA, uidB);
+}
+
+/**
  * Converte um objeto Conversation para compatibilidade com o modelo de visualização Room.
  */
 export function conversationToRoom(conv: Conversation): Room {

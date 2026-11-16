@@ -32,7 +32,7 @@ import {
   arrayUnion,
   writeBatch,
 } from 'firebase/firestore';
-import { Conversation, ConversationMessage, Message, Room } from '../types';
+import { Conversation, ConversationInvite, ConversationMessage, Message, Room, UserProfile } from '../types';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
 import { maxIsoDate, selectLatestMessages } from '../utils/unread';
 
@@ -112,6 +112,17 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
+export function syncAuthState(user: User | null): void {
+  activeAuthUser = user;
+  if (user && !user.isAnonymous) {
+    currentAuthState = AuthState.AUTHENTICATED_NON_ANONYMOUS;
+  } else if (user && user.isAnonymous) {
+    currentAuthState = AuthState.ANONYMOUS;
+  } else {
+    currentAuthState = AuthState.UNINITIALIZED;
+  }
+}
+
 export function getCurrentAuthUser(): User | null {
   return firebaseAuth?.currentUser || activeAuthUser || null;
 }
@@ -124,7 +135,8 @@ export function isAuthValidAndNonAnonymous(): boolean {
   const user = getCurrentAuthUser();
   return !!user && user.isAnonymous === false && (
     currentAuthState === AuthState.AUTHENTICATED_NON_ANONYMOUS ||
-    (currentAuthState === AuthState.UNINITIALIZED && !user.isAnonymous)
+    currentAuthState === AuthState.UNINITIALIZED ||
+    currentAuthState === AuthState.FAILED
   );
 }
 
@@ -427,6 +439,11 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
       } catch (pErr) {
         console.debug('Talk2TM: Persistência local configurada ou padrão:', pErr);
       }
+      onAuthStateChanged(firebaseAuth, (user) => {
+        if (currentAuthState !== AuthState.AUTHENTICATING || (user && !user.isAnonymous)) {
+          syncAuthState(user);
+        }
+      });
     } catch (authInitErr) {
       console.debug('Talk2TM: Inicialização do Firebase Auth ignorada:', authInitErr);
     }
@@ -1010,6 +1027,10 @@ export async function getOrCreateConversation(
   userA: { uid: string; talk2tmId: string; displayName: string },
   userB: { uid: string; talk2tmId: string; displayName: string }
 ): Promise<Conversation> {
+  if (!userA.uid || !userB.uid || userA.uid === userB.uid) {
+    throw new Error('Conversa bilateral exige dois participantes distintos.');
+  }
+
   const { db } = await initFirebase();
   const sortedUids = [userA.uid, userB.uid].sort();
   const conversationId = `conv_${sortedUids[0]}_${sortedUids[1]}`;
@@ -1041,7 +1062,7 @@ export async function getOrCreateConversation(
       await setDoc(convRef, newConv);
       return newConv;
     } catch (e) {
-      console.warn('Erro ao consultar/criar conversa no Firestore, operando com fallback local:', e);
+      handleFirestoreError(e, OperationType.WRITE, `conversations/${conversationId}`);
     }
   }
 
@@ -1056,6 +1077,324 @@ export async function getOrCreateConversation(
     displayNameB: pB.displayName,
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+/**
+ * Obtém uma conversa bilateral pelo ID caso o utilizador seja participante.
+ */
+export async function getConversationById(conversationId: string): Promise<Conversation | null> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) return null;
+  try {
+    const snap = await getDoc(doc(db, 'conversations', conversationId));
+    return snap.exists() ? (snap.data() as Conversation) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fluxo Bilateral: Conta A procura Talk2TM ID da Conta B e envia convite direcionado (toUid obrigatório).
+ */
+export async function sendConversationInvite(
+  fromUser: { uid: string; talk2tmId: string; displayName: string },
+  targetTalk2tmId: string
+): Promise<{ status: 'invited' | 'already_connected'; invite?: ConversationInvite; conversation?: Conversation }> {
+  const cleanTargetId = targetTalk2tmId.trim().toUpperCase();
+  if (!/^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(cleanTargetId)) {
+    throw new Error('Código inválido. Use o formato TM-XXXX-XXXX.');
+  }
+  if (cleanTargetId === fromUser.talk2tmId) {
+    throw new Error('Não é possível enviar convite para o próprio código.');
+  }
+
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
+    throw new Error('Sessão autenticada necessária para enviar convite.');
+  }
+
+  let targetProfile: UserProfile | null = null;
+  try {
+    const profileSnap = await getDoc(doc(db, 'userProfiles', cleanTargetId));
+    if (profileSnap.exists()) {
+      targetProfile = profileSnap.data() as UserProfile;
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `userProfiles/${cleanTargetId}`);
+  }
+
+  if (!targetProfile || targetProfile.active === false) {
+    throw new Error('Código Talk2TM não encontrado.');
+  }
+  if (targetProfile.uid === fromUser.uid) {
+    throw new Error('Não é possível convidar a própria conta.');
+  }
+
+  const sortedUids = [fromUser.uid, targetProfile.uid].sort();
+  const conversationId = `conv_${sortedUids[0]}_${sortedUids[1]}`;
+
+  // Se já existe conversa bilateral entre A e B, reutiliza diretamente
+  try {
+    const existingConv = await getDoc(doc(db, 'conversations', conversationId));
+    if (existingConv.exists()) {
+      return {
+        status: 'already_connected',
+        conversation: existingConv.data() as Conversation,
+      };
+    }
+  } catch {
+    // Segue para envio do convite se ainda não existir
+  }
+
+  const now = new Date().toISOString();
+  const inviteId = conversationId;
+  const inviteRef = doc(db, 'conversationInvites', inviteId);
+
+  try {
+    const existingInviteSnap = await getDoc(inviteRef);
+    if (existingInviteSnap.exists()) {
+      const existingInvite = existingInviteSnap.data() as ConversationInvite;
+      if (existingInvite.status === 'pending') {
+        if (existingInvite.fromUid === fromUser.uid) {
+          return { status: 'invited', invite: existingInvite };
+        }
+        // A outra conta já enviou convite pendente para nós: aceita e abre a conversa bilateral!
+        const acceptedConv = await acceptConversationInvite(existingInvite, fromUser);
+        return { status: 'already_connected', conversation: acceptedConv };
+      }
+      if (existingInvite.status === 'accepted') {
+        const conv = await getOrCreateConversation(
+          {
+            uid: targetProfile.uid,
+            talk2tmId: targetProfile.talk2tmId,
+            displayName: targetProfile.displayName,
+          },
+          fromUser
+        );
+        return { status: 'already_connected', conversation: conv };
+      }
+      // Se estava recusado ou cancelado, reabre como novo convite pendente
+      await updateDoc(inviteRef, {
+        fromUid: fromUser.uid,
+        fromDisplayName: fromUser.displayName.slice(0, 30),
+        fromTalk2tmId: fromUser.talk2tmId,
+        toTalk2tmId: targetProfile.talk2tmId,
+        toUid: targetProfile.uid,
+        status: 'pending',
+        updatedAt: now,
+      });
+      return {
+        status: 'invited',
+        invite: {
+          ...existingInvite,
+          fromUid: fromUser.uid,
+          fromDisplayName: fromUser.displayName.slice(0, 30),
+          fromTalk2tmId: fromUser.talk2tmId,
+          toTalk2tmId: targetProfile.talk2tmId,
+          toUid: targetProfile.uid,
+          status: 'pending',
+          updatedAt: now,
+        },
+      };
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `conversationInvites/${inviteId}`);
+  }
+
+  const invite: ConversationInvite = {
+    inviteId,
+    fromUid: fromUser.uid,
+    fromDisplayName: fromUser.displayName.slice(0, 30),
+    fromTalk2tmId: fromUser.talk2tmId,
+    toTalk2tmId: targetProfile.talk2tmId,
+    toUid: targetProfile.uid,
+    conversationId,
+    status: 'pending',
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  try {
+    await setDoc(inviteRef, invite);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `conversationInvites/${inviteId}`);
+  }
+
+  return { status: 'invited', invite };
+}
+
+/**
+ * Conta B aceita convite pendente e cria a conversa bilateral (participantA + participantB).
+ */
+export async function acceptConversationInvite(
+  invite: ConversationInvite,
+  currentUser: { uid: string; talk2tmId: string; displayName: string }
+): Promise<Conversation> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
+    throw new Error('Autenticação ativa necessária para aceitar o convite.');
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await updateDoc(doc(db, 'conversationInvites', invite.inviteId), {
+      status: 'accepted',
+      updatedAt: now,
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `conversationInvites/${invite.inviteId}`);
+  }
+
+  return await getOrCreateConversation(
+    {
+      uid: invite.fromUid,
+      talk2tmId: invite.fromTalk2tmId,
+      displayName: invite.fromDisplayName,
+    },
+    currentUser
+  );
+}
+
+/**
+ * Conta B recusa um convite pendente.
+ */
+export async function declineConversationInvite(inviteId: string): Promise<void> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) return;
+  try {
+    await updateDoc(doc(db, 'conversationInvites', inviteId), {
+      status: 'declined',
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `conversationInvites/${inviteId}`);
+  }
+}
+
+/**
+ * Conta A cancela um convite pendente enviado.
+ */
+export async function cancelConversationInvite(inviteId: string): Promise<void> {
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) return;
+  try {
+    await updateDoc(doc(db, 'conversationInvites', inviteId), {
+      status: 'cancelled',
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `conversationInvites/${inviteId}`);
+  }
+}
+
+/**
+ * Escuta convites pendentes recebidos por Conta B.
+ */
+export function subscribeToIncomingInvites(
+  myUid: string,
+  onUpdate: (invites: ConversationInvite[]) => void
+): Unsubscribe | null {
+  if (!firestoreDb || !isAuthValidAndNonAnonymous() || !myUid) return null;
+  const q = query(collection(firestoreDb, 'conversationInvites'), where('toUid', '==', myUid));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: ConversationInvite[] = [];
+      snapshot.forEach((d) => {
+        const inv = d.data() as ConversationInvite;
+        if (inv.status === 'pending') {
+          list.push(inv);
+        }
+      });
+      list.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+      onUpdate(list);
+    },
+    (err) => {
+      console.warn('Erro ao ouvir convites recebidos:', err);
+    }
+  );
+}
+
+/**
+ * Escuta convites enviados por Conta A (pendentes ou recém-aceitos).
+ */
+export function subscribeToOutgoingInvites(
+  myUid: string,
+  onUpdate: (invites: ConversationInvite[]) => void
+): Unsubscribe | null {
+  if (!firestoreDb || !isAuthValidAndNonAnonymous() || !myUid) return null;
+  const q = query(collection(firestoreDb, 'conversationInvites'), where('fromUid', '==', myUid));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: ConversationInvite[] = [];
+      snapshot.forEach((d) => {
+        const inv = d.data() as ConversationInvite;
+        if (inv.status === 'pending' || inv.status === 'accepted') {
+          list.push(inv);
+        }
+      });
+      list.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+      onUpdate(list);
+    },
+    (err) => {
+      console.warn('Erro ao ouvir convites enviados:', err);
+    }
+  );
+}
+
+/**
+ * Escuta todas as conversas bilaterais em que o utilizador é participantA ou participantB.
+ */
+export function subscribeToUserConversations(
+  myUid: string,
+  onUpdate: (conversations: Conversation[]) => void
+): Unsubscribe | null {
+  if (!firestoreDb || !isAuthValidAndNonAnonymous() || !myUid) return null;
+
+  const convMapA = new Map<string, Conversation>();
+  const convMapB = new Map<string, Conversation>();
+
+  const emitMerged = () => {
+    const merged = new Map<string, Conversation>();
+    convMapA.forEach((v, k) => merged.set(k, v));
+    convMapB.forEach((v, k) => merged.set(k, v));
+    const list = Array.from(merged.values()).sort((a, b) =>
+      (b.updatedAt || '').localeCompare(a.updatedAt || '')
+    );
+    onUpdate(list);
+  };
+
+  const unsubA = onSnapshot(
+    query(collection(firestoreDb, 'conversations'), where('participantA', '==', myUid)),
+    (snap) => {
+      convMapA.clear();
+      snap.forEach((d) => {
+        const c = d.data() as Conversation;
+        convMapA.set(c.conversationId || d.id, c);
+      });
+      emitMerged();
+    },
+    (err) => console.warn('Erro ao ouvir conversas (A):', err)
+  );
+
+  const unsubB = onSnapshot(
+    query(collection(firestoreDb, 'conversations'), where('participantB', '==', myUid)),
+    (snap) => {
+      convMapB.clear();
+      snap.forEach((d) => {
+        const c = d.data() as Conversation;
+        convMapB.set(c.conversationId || d.id, c);
+      });
+      emitMerged();
+    },
+    (err) => console.warn('Erro ao ouvir conversas (B):', err)
+  );
+
+  return () => {
+    unsubA();
+    unsubB();
   };
 }
 

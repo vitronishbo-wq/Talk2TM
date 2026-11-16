@@ -2,6 +2,8 @@
  * Talk2TM — Suite de Testes Autônoma (Camada 25)
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser, loadSettings, saveSettings } from '../src/config';
 import {
   sanitizeMessageText,
@@ -58,6 +60,7 @@ import {
 } from '../src/utils/unread';
 import {
   buildDeterministicConversationId,
+  buildUidConversationId,
   conversationToRoom,
 } from '../src/conversation';
 import { Conversation, Message } from '../src/types';
@@ -70,10 +73,14 @@ import {
 } from '../src/observability';
 import {
   generateTalk2TMId,
+  generateInternalSecret,
   talk2tmIdToInternalEmail,
   saveLocalIdentity,
   getLocalIdentity,
   clearLocalIdentity,
+  createTalk2TMIdentity,
+  restoreLocalIdentity,
+  findProfileByTalk2TMId,
   LocalIdentity,
 } from '../src/identity';
 import { testIdentityAcceptanceFlow } from '../src/firebase/diagnostic';
@@ -1056,6 +1063,225 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(
       getPartnerLastRead(customRoom, 'Alice', 'uid_1') === '2026-11-15T11:15:00.000Z',
       'Deve resolver parceiro pelo UID mesmo com nomes personalizados'
+    );
+  });
+
+  // 46. Fluxo Bilateral: ID canônico por UID, convite determinístico inv_conv_ e isolamento de truman-maezinha
+  check('Fluxo Bilateral: buildUidConversationId e inv_ determinísticos garantem vínculo estrito entre 2 contas distintas', () => {
+    const uidA = 'uid_contaA_alpha123';
+    const uidB = 'uid_contaB_beta456';
+    const convAB = buildUidConversationId(uidA, uidB);
+    const convBA = buildUidConversationId(uidB, uidA);
+
+    assert(convAB === convBA, 'Conversa bilateral deve gerar mesmo ID canônico independente da ordem (A,B vs B,A)');
+    assert(convAB === `conv_${uidA}_${uidB}`, 'ID canônico deve ordenar lexicograficamente participantA < participantB');
+    assert(convAB !== ACCESS_CONFIG.DEFAULT_ROOM, 'Conversa bilateral nunca colide com truman-maezinha');
+
+    const inviteId = convAB;
+    assert(/^conv_[a-zA-Z0-9_-]+_[a-zA-Z0-9_-]+$/.test(inviteId), 'Convite deve seguir formato determinístico canônico por par de UIDs');
+  });
+
+  // =========================================================================
+  // SUÍTE DE AUTORIZAÇÃO E INVARIANTES DAS REGRAS DO FIRESTORE (47 a 53)
+  // =========================================================================
+  const firestoreRulesPath = path.resolve(process.cwd(), 'firestore.rules');
+  const firestoreRules = fs.readFileSync(firestoreRulesPath, 'utf8');
+
+  // Helper determinístico que espelha exatamente a política de autorização do Talk2TM
+  const canAccessConversation = (
+    authUid: string | null,
+    conv: Pick<Conversation, 'conversationId' | 'participantA' | 'participantB'>,
+    inviteStatus?: 'pending' | 'accepted' | 'declined' | 'cancelled'
+  ) => {
+    if (!authUid) return false;
+    if (conv.participantA === conv.participantB) return false;
+    if (conv.participantA >= conv.participantB) return false;
+    if (conv.conversationId !== `conv_${conv.participantA}_${conv.participantB}`) return false;
+    if (inviteStatus && inviteStatus !== 'accepted') return false;
+    return authUid === conv.participantA || authUid === conv.participantB;
+  };
+
+  // 47. Requisito 1: Utilizador A consegue aceder à sua conversa com B
+  check('AuthZ 1: Utilizador A acede à sua conversa bilateral com B somente após convite aceito', () => {
+    const uidA = 'uid_A_alpha';
+    const uidB = 'uid_B_beta';
+    const convId = buildUidConversationId(uidA, uidB);
+    const convStub = { conversationId: convId, participantA: uidA, participantB: uidB };
+
+    assert(canAccessConversation(uidA, convStub, 'accepted') === true, 'A deve aceder conversa aceita com B');
+    assert(canAccessConversation(uidB, convStub, 'accepted') === true, 'B deve aceder conversa aceita com A');
+    assert(canAccessConversation(uidA, convStub, 'pending') === false, 'Conversa não pode iniciar antes do aceite');
+
+    assert(
+      firestoreRules.includes('match /conversations/{conversationId}') &&
+      firestoreRules.includes("get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data.status == 'accepted'") &&
+      firestoreRules.includes('isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data)'),
+      'firestore.rules deve exigir participante válido e convite accepted na criação/acesso de conversations e messages'
+    );
+  });
+
+  // 48. Requisito 2: Utilizador C não consegue ler mensagens de A e B
+  check('AuthZ 2: Utilizador C (terceiro) é impedido de ler conversa ou mensagens de A e B', () => {
+    const uidA = 'uid_A_alpha';
+    const uidB = 'uid_B_beta';
+    const uidC = 'uid_C_intruder';
+    const convId = buildUidConversationId(uidA, uidB);
+    const convStub = { conversationId: convId, participantA: uidA, participantB: uidB };
+
+    assert(canAccessConversation(uidC, convStub, 'accepted') === false, 'Terceiro C não pode aceder conversa de A e B');
+    assert(canAccessConversation(null, convStub, 'accepted') === false, 'Não autenticado não pode aceder conversa');
+
+    const convStart = firestoreRules.indexOf('match /conversations/{conversationId}');
+    const msgBlock = firestoreRules.slice(
+      firestoreRules.indexOf('match /messages/{messageId}', convStart),
+      firestoreRules.indexOf('// 4. conversationInvites/{inviteId}')
+    );
+    assert(
+      msgBlock.includes('allow get: if isValidId(conversationId)') &&
+      msgBlock.includes('allow list: if isValidId(conversationId)') &&
+      msgBlock.includes('isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data)'),
+      'Subcoleção /conversations/{conversationId}/messages deve restringir get/list aos participantes da conversa'
+    );
+  });
+
+  // 49. Requisito 3: Utilizador não consegue alterar participantes de uma conversa
+  check('AuthZ 3: Participantes da conversa são imutáveis e cada utilizador só atualiza o próprio lastRead', () => {
+    const convSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /conversations/{conversationId}'),
+      firestoreRules.indexOf('// 5. conversations/{conversationId}/messages/{messageId}')
+    );
+
+    assert(
+      convSection.includes('request.resource.data.participantA == resource.data.participantA') &&
+      convSection.includes('request.resource.data.participantB == resource.data.participantB') &&
+      convSection.includes('request.resource.data.conversationId == resource.data.conversationId'),
+      'Regra de update em /conversations deve travar participantA, participantB e conversationId'
+    );
+    assert(
+      convSection.includes("affectedKeys().hasOnly(['lastReadA', 'updatedAt'])") &&
+      convSection.includes("affectedKeys().hasOnly(['lastReadB', 'updatedAt'])"),
+      'Participante A só pode atualizar lastReadA e Participante B só pode atualizar lastReadB'
+    );
+    assert(
+      convSection.includes('request.resource.data.participantA != request.resource.data.participantB') &&
+      convSection.includes('request.resource.data.participantA < request.resource.data.participantB'),
+      'Regra de create em /conversations deve impedir auto-conversa (A == B) e impor ordem canônica A < B'
+    );
+  });
+
+  // 50. Requisito 4: Utilizador não consegue ler convites destinados a terceiros
+  check('AuthZ 4: Convites em /conversationInvites bloqueiam terceiros e proíbem toUid nulo', () => {
+    const inviteSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /conversationInvites/{inviteId}')
+    );
+
+    assert(
+      inviteSection.includes('resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid'),
+      'Leitura get/list de convites deve exigir fromUid ou toUid igual ao request.auth.uid'
+    );
+    assert(!inviteSection.includes('toUid == null'), 'Regra de convites nunca deve permitir leitura quando toUid == null');
+    assert(
+      inviteSection.includes('request.resource.data.toUid is string') &&
+      inviteSection.includes('request.resource.data.toUid.size() >= 1') &&
+      inviteSection.includes('request.resource.data.toUid != request.auth.uid'),
+      'Criação de convite deve exigir toUid string não vazia e diferente do remetente'
+    );
+  });
+
+  // 51. Requisito 5: Utilizador não consegue falsificar o remetente de mensagens
+  check('AuthZ 5: senderId deve corresponder ao request.auth.uid e deletedFor respeita eliminação individual', () => {
+    const legacyMsgSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /messages/{messageId}'),
+      firestoreRules.indexOf('// EXPANSION V1:')
+    );
+    const bilateralMsgSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /messages/{messageId}', firestoreRules.indexOf('match /conversations/{conversationId}')),
+      firestoreRules.indexOf('// 4. conversationInvites/{inviteId}')
+    );
+
+    assert(
+      legacyMsgSection.includes('request.resource.data.senderId == request.auth.uid'),
+      'Mensagens legadas em /messages devem exigir senderId == request.auth.uid'
+    );
+    assert(
+      bilateralMsgSection.includes('request.resource.data.senderId == request.auth.uid'),
+      'Mensagens bilaterais devem exigir senderId == request.auth.uid'
+    );
+    assert(
+      firestoreRules.includes('function isValidIndividualDelete(existingData, newData)') &&
+      firestoreRules.includes("affectedKeys().hasOnly(['deletedFor'])") &&
+      firestoreRules.includes('request.auth.uid in newData.deletedFor') &&
+      firestoreRules.includes('newData.deletedFor.size() == existingData.deletedFor.size() + 1'),
+      'Atualização de mensagens deve aceitar exclusivamente deletedFor individual (máx. +1 próprio UID)'
+    );
+  });
+
+  // 52. Requisito 6: Truman e Mãezinha continuam a comunicar normalmente
+  check('AuthZ 6: Truman (852456) e Mãezinha (135790) mantêm acesso normal isolado a truman-maezinha', () => {
+    const resT = verifyPassword(PASSWORDS.TRUMAN);
+    const resM = verifyPassword(PASSWORDS.MAEZINHA);
+    assert(resT.valid === true && resT.user === 'Truman' && getUserByPin(PASSWORDS.TRUMAN) === 'Truman', 'PIN de Truman intacto');
+    assert(resM.valid === true && resM.user === 'Mãezinha' && getUserByPin(PASSWORDS.MAEZINHA) === 'Mãezinha', 'PIN de Mãezinha intacto');
+    assert(USER_AUTH_CREDENTIALS.Truman.email === 'truman@talk2tm.internal', 'E-mail interno de Truman preservado');
+    assert(USER_AUTH_CREDENTIALS['Mãezinha'].email === 'maezinha@talk2tm.internal', 'E-mail interno de Mãezinha preservado');
+    assert(ACCESS_CONFIG.DEFAULT_ROOM === 'truman-maezinha', 'Sala padrão do par preservada');
+
+    const roomsSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /rooms/{roomId}'),
+      firestoreRules.indexOf('match /messages/{messageId}')
+    );
+    assert(
+      roomsSection.includes("roomId == 'truman-maezinha'") &&
+      roomsSection.includes('isLegacyPairEmail()') &&
+      !roomsSection.includes('allow read, create, update: if isAuthenticated()'),
+      '/rooms deve manter acesso para truman@talk2tm.internal e maezinha@talk2tm.internal sem ficar aberta a qualquer conta'
+    );
+  });
+
+  // 53. Requisito 7: Novo utilizador consegue criar e restaurar a sua identidade
+  check('AuthZ 7: Novo utilizador cria identidade TM-XXXX-XXXX e restaura sua conta isolada em users/{uid}', () => {
+    const newId = generateTalk2TMId();
+    const secret = generateInternalSecret();
+    assert(/^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(newId), 'generateTalk2TMId deve seguir regra isValidTalk2tmId do Firestore');
+    assert(secret.length === 16, 'Segredo opaco deve ter 16 caracteres');
+    assert(typeof createTalk2TMIdentity === 'function' && typeof restoreLocalIdentity === 'function' && typeof findProfileByTalk2TMId === 'function', 'API de criação e restauração deve existir');
+
+    const fakeStorage: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => fakeStorage[k] ?? null,
+      setItem: (k: string, v: string) => { fakeStorage[k] = v; },
+      removeItem: (k: string) => { delete fakeStorage[k]; },
+    };
+
+    const identity: LocalIdentity = {
+      uid: 'uid_novo_dev_999',
+      talk2tmId: newId,
+      displayName: 'Truman1',
+      internalEmail: talk2tmIdToInternalEmail(newId),
+      internalSecret: secret,
+      createdAt: '2026-11-16T12:00:00.000Z',
+    };
+    saveLocalIdentity(identity, mockStorage);
+    const restored = getLocalIdentity(mockStorage);
+    assert(
+      restored !== null &&
+      restored.uid === identity.uid &&
+      restored.talk2tmId === newId &&
+      restored.displayName === 'Truman1',
+      'Identidade criada deve ser restaurada localmente com os mesmos campos'
+    );
+    clearLocalIdentity(mockStorage);
+    assert(getLocalIdentity(mockStorage) === null, 'clearLocalIdentity deve limpar corretamente');
+
+    const usersSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /users/{uid}'),
+      firestoreRules.indexOf('match /userProfiles/{talk2tmId}')
+    );
+    assert(
+      usersSection.includes('allow read: if isUser(uid);') &&
+      usersSection.includes('allow create: if isUser(uid)') &&
+      usersSection.includes('isValidTalk2tmId(request.resource.data.talk2tmId)'),
+      'users/{uid} deve permitir leitura/criação apenas pelo próprio UID autenticado (isUser(uid))'
     );
   });
 
