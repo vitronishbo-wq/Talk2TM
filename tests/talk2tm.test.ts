@@ -81,8 +81,22 @@ import {
   createTalk2TMIdentity,
   restoreLocalIdentity,
   findProfileByTalk2TMId,
+  generateRecoveryCode,
+  normalizeRecoveryCode,
+  deriveAuthPassword,
+  sealAuthSecretWithPin,
+  unsealAuthSecretWithPin,
+  validateLocalPin,
+  findLocalIdentityByPin,
+  upsertLocalIdentity,
   LocalIdentity,
 } from '../src/identity';
+import {
+  normalizePhoneNumber,
+  maskPhoneNumber,
+  hashPhoneNumber,
+  phoneHashToInternalEmail,
+} from '../src/utils/phone';
 import { testIdentityAcceptanceFlow } from '../src/firebase/diagnostic';
 
 function assert(condition: boolean, description: string): void {
@@ -1289,10 +1303,222 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     );
   });
 
-  console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes executados com 100% de aprovação.\x1b[0m`);
+  // 54. Zero Custos: Normalização internacional E.164 (+244 padrão) e mascaramento de telefone
+  check('Zero Custos: Normalização E.164 (+244 e internacional), mascaramento e e-mail interno por hash', () => {
+    const ao9 = normalizePhoneNumber('923 456 789');
+    assert(ao9.valid === true && ao9.e164 === '+244923456789', '9 dígitos locais em Angola devem normalizar para +244...');
+
+    const ao12 = normalizePhoneNumber('244-923-456-789');
+    assert(ao12.valid === true && ao12.e164 === '+244923456789', 'Prefixo 244 sem + deve normalizar para +244...');
+
+    const zeroZero = normalizePhoneNumber('00351 912 345 678');
+    assert(zeroZero.valid === true && zeroZero.e164 === '+351912345678', 'Prefixo 00 deve converter para +');
+
+    const br = normalizePhoneNumber('+55 (11) 98765-4321');
+    assert(br.valid === true && br.e164 === '+5511987654321', 'Telefone internacional deve preservar indicativo +55');
+
+    const invalidShort = normalizePhoneNumber('12345');
+    assert(invalidShort.valid === false, 'Número curto/ambíguo deve ser rejeitado');
+
+    const masked = maskPhoneNumber('+244923456789');
+    assert(masked.includes('+244') && masked.endsWith('789') && !masked.includes('923456'), 'Mascaramento deve ocultar dígitos centrais');
+
+    const sampleHash = 'a'.repeat(64);
+    const derivedEmail = phoneHashToInternalEmail(sampleHash);
+    assert(derivedEmail === `u_${'a'.repeat(32)}@talk2tm.internal`, 'E-mail interno deve ser derivado deterministicamente do phoneHash');
+  });
+
+  // 55. Zero Custos: Código de recuperação sem caracteres ambíguos e normalização tolerante a hífens/minúsculas
+  check('Zero Custos: generateRecoveryCode e normalizeRecoveryCode garantem formato de alta entropia', () => {
+    const rec = generateRecoveryCode();
+    assert(/^[2-9A-HJ-NP-Z]{4}(-[2-9A-HJ-NP-Z]{4}){5}$/.test(rec), 'Código de recuperação deve seguir 6 grupos de 4 caracteres sem 0/O/1/I');
+    const stripped = rec.toLowerCase().replace(/-/g, ' ');
+    assert(normalizeRecoveryCode(stripped) === normalizeRecoveryCode(rec), 'Normalização deve aceitar minúsculas, espaços e ausência de hífens');
+  });
+
+  // 56. Zero Custos: Regras Firestore de phoneLookup impedem listagem e mantêm integridade
+  check('Zero Custos: firestore.rules protege phoneLookup/{phoneHash} contra listagem e falsificação', () => {
+    assert(firestoreRules.includes('function isValidPhoneHash(hash)'), 'firestore.rules deve validar formato SHA-256 em isValidPhoneHash');
+    const phoneSection = firestoreRules.slice(
+      firestoreRules.indexOf('match /phoneLookup/{phoneHash}'),
+      firestoreRules.indexOf('match /conversations/{conversationId}')
+    );
+    assert(
+      phoneSection.includes('allow get: if isAuthenticated() && isValidPhoneHash(phoneHash);') &&
+      phoneSection.includes('allow list: if false;') &&
+      phoneSection.includes('allow delete: if false;') &&
+      phoneSection.includes('get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)).data.uid == request.auth.uid'),
+      'phoneLookup/{phoneHash} deve permitir apenas get autenticado, proibir list/delete e exigir vínculo real com userProfiles/users'
+    );
+  });
+
+  console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);
+  return { passed, total };
+}
+
+export async function runAsyncZeroCostTests(): Promise<{ passed: number; total: number }> {
+  let passed = 0;
+  let total = 0;
+
+  async function checkAsync(name: string, fn: () => Promise<void>): Promise<void> {
+    total++;
+    try {
+      await fn();
+      passed++;
+    } catch (err) {
+      console.error(`Erro no teste assíncrono: ${name}`, err);
+      throw err;
+    }
+  }
+
+  // 57. Hash SHA-256 determinístico por telefone
+  await checkAsync('Zero Custos: hashPhoneNumber produz SHA-256 determinístico de 64 hex chars', async () => {
+    const h1 = await hashPhoneNumber('+244923456789');
+    const h2 = await hashPhoneNumber('+244923456789');
+    const h3 = await hashPhoneNumber('+244923456780');
+    assert(/^[a-f0-9]{64}$/.test(h1), 'Hash deve ter exatamente 64 caracteres hexadecimais minúsculos');
+    assert(h1 === h2, 'Mesmo número E.164 deve gerar exatamente o mesmo phoneHash');
+    assert(h1 !== h3, 'Números distintos devem gerar hashes distintos');
+  });
+
+  // 58. Derivação determinística PBKDF2 da senha Auth via recoveryCode + phoneHash
+  await checkAsync('Zero Custos: deriveAuthPassword é determinística para o par (recoveryCode, phoneHash)', async () => {
+    const phA = await hashPhoneNumber('+244911222333');
+    const phB = await hashPhoneNumber('+244944555666');
+    const rec = generateRecoveryCode();
+    const pwd1 = await deriveAuthPassword(rec, phA);
+    const pwd2 = await deriveAuthPassword(rec.toLowerCase().replace(/-/g, ''), phA);
+    const pwdOtherPhone = await deriveAuthPassword(rec, phB);
+
+    assert(pwd1 === pwd2, 'Recuperação com código sem hífens/minúsculas deve derivar exatamente a mesma senha Auth');
+    assert(pwd1 !== pwdOtherPhone, 'Mesmo código não deve servir para outro phoneHash');
+    assert(pwd1.startsWith('T2M$') && pwd1.length === 68, 'Senha derivada deve conter 256 bits hexadecimais');
+  });
+
+  // 59. Cofre local AES-256-GCM + PBKDF2 (sem Base64/texto simples no disco)
+  await checkAsync('Zero Custos: sealAuthSecretWithPin e unsealAuthSecretWithPin protegem credencial com AES-256-GCM', async () => {
+    const secret = 'T2M$' + 'ab'.repeat(32);
+    const sealed = await sealAuthSecretWithPin(secret, '4920');
+
+    assert(/^[a-f0-9]+$/.test(sealed.vaultCiphertext), 'Ciphertext deve ser hex opaco, nunca plaintext/Base64 legível');
+    assert(!sealed.vaultCiphertext.includes('T2M$'), 'Ciphertext nunca pode conter a senha em texto simples');
+    assert(sealed.pinLength === 4, 'Comprimento do PIN deve ser registrado para detecção na calculadora');
+
+    const unsealed = await unsealAuthSecretWithPin(sealed, '4920');
+    assert(unsealed === secret, 'PIN correto deve decifrar exatamente a credencial original');
+
+    let failedWrongPin = false;
+    try {
+      await unsealAuthSecretWithPin(sealed, '4921');
+    } catch {
+      failedWrongPin = true;
+    }
+    assert(failedWrongPin === true, 'PIN incorreto deve falhar na verificação de autenticidade AES-GCM');
+  });
+
+  // 60. Bloqueio de PINs reservados (852456 / 135790) e colisão entre contas no cofre local
+  await checkAsync('Zero Custos: validateLocalPin bloqueia códigos legados e colisões locais multi-conta', async () => {
+    const fakeStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => fakeStore[k] ?? null,
+      setItem: (k: string, v: string) => { fakeStore[k] = v; },
+      removeItem: (k: string) => { delete fakeStore[k]; },
+    };
+
+    const resTruman = await validateLocalPin('852456', true, undefined, mockStorage);
+    const resMaezinha = await validateLocalPin('135790', true, undefined, mockStorage);
+    const resShort = await validateLocalPin('123', true, undefined, mockStorage);
+    const resAlpha = await validateLocalPin('12ab', true, undefined, mockStorage);
+    assert(resTruman.valid === false, 'PIN 852456 reservado a Truman deve ser bloqueado');
+    assert(resMaezinha.valid === false, 'PIN 135790 reservado à Mãezinha deve ser bloqueado');
+    assert(resShort.valid === false && resAlpha.valid === false, 'PIN deve aceitar apenas 4 a 8 dígitos numéricos');
+
+    const sealedA = await sealAuthSecretWithPin('sec_conta_A', '2468');
+    upsertLocalIdentity(
+      {
+        uid: 'uid_vault_a',
+        talk2tmId: 'TM-AAAA-2222',
+        displayName: 'Ana',
+        internalEmail: 'u_a@talk2tm.internal',
+        internalSecret: 'DeveriaSerRemovidoAoGravar',
+        phoneHash: 'a'.repeat(64),
+        phoneMasked: '+244 ••• 111',
+        ...sealedA,
+        createdAt: '2026-11-17T00:00:00.000Z',
+      },
+      true,
+      mockStorage
+    );
+
+    // Garante que internalSecret não foi persistido no localStorage quando vaultCiphertext existe
+    const rawSaved = fakeStore['talk2tm_identities_v2'] || '';
+    assert(!rawSaved.includes('DeveriaSerRemovidoAoGravar'), 'Segredo em texto simples nunca pode ser persistido junto do cofre encriptado');
+
+    const collisionCheck = await validateLocalPin('2468', true, undefined, mockStorage);
+    assert(collisionCheck.valid === false, 'Outra conta no mesmo aparelho não pode reutilizar o mesmo PIN');
+
+    const selfUpdateCheck = await validateLocalPin('2468', true, 'uid_vault_a', mockStorage);
+    assert(selfUpdateCheck.valid === true, 'Mesma conta deve poder atualizar mantendo exclusão de seu próprio UID');
+  });
+
+  // 61. Resolução multi-conta pelo PIN na calculadora
+  await checkAsync('Zero Custos: findLocalIdentityByPin distingue múltiplas contas no mesmo navegador', async () => {
+    const fakeStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => fakeStore[k] ?? null,
+      setItem: (k: string, v: string) => { fakeStore[k] = v; },
+      removeItem: (k: string) => { delete fakeStore[k]; },
+    };
+
+    const s1 = await sealAuthSecretWithPin('sec_1', '1122');
+    const s2 = await sealAuthSecretWithPin('sec_2', '334455');
+
+    upsertLocalIdentity(
+      {
+        uid: 'uid_multi_1',
+        talk2tmId: 'TM-M111-1111',
+        displayName: 'Joao',
+        internalEmail: 'u_1@talk2tm.internal',
+        phoneHash: '1'.repeat(64),
+        phoneMasked: '+244 ••• 101',
+        ...s1,
+        createdAt: '2026-11-17T00:00:00.000Z',
+      },
+      true,
+      mockStorage
+    );
+    upsertLocalIdentity(
+      {
+        uid: 'uid_multi_2',
+        talk2tmId: 'TM-M222-2222',
+        displayName: 'Maria',
+        internalEmail: 'u_2@talk2tm.internal',
+        phoneHash: '2'.repeat(64),
+        phoneMasked: '+244 ••• 202',
+        ...s2,
+        createdAt: '2026-11-17T00:00:00.000Z',
+      },
+      false,
+      mockStorage
+    );
+
+    const found1 = await findLocalIdentityByPin('1122', mockStorage);
+    const found2 = await findLocalIdentityByPin('334455', mockStorage);
+    const notFound = await findLocalIdentityByPin('9999', mockStorage);
+
+    assert(found1?.uid === 'uid_multi_1' && found1.displayName === 'Joao', 'PIN de 4 dígitos deve resolver Conta 1');
+    assert(found2?.uid === 'uid_multi_2' && found2.displayName === 'Maria', 'PIN de 6 dígitos deve resolver Conta 2');
+    assert(notFound === null, 'PIN desconhecido deve retornar null');
+  });
+
+  console.log(`\x1b[32m✔ Talk2TM Zero-Cost Async: ${passed}/${total} testes assíncronos executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
 
 if (typeof process !== 'undefined' && process.env.NODE_ENV === 'test') {
   runTalk2TMTests();
+  runAsyncZeroCostTests().catch((err) => {
+    console.error('\x1b[31m✖ Falha nos testes assíncronos:\x1b[0m', err);
+    process.exit(1);
+  });
 }

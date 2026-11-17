@@ -32,9 +32,10 @@ import {
   arrayUnion,
   writeBatch,
 } from 'firebase/firestore';
-import { Conversation, ConversationInvite, ConversationMessage, Message, Room, UserProfile } from '../types';
+import { Conversation, ConversationInvite, ConversationMessage, Message, PhoneDirectoryEntry, Room, UserProfile } from '../types';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
 import { maxIsoDate, selectLatestMessages } from '../utils/unread';
+import { hashPhoneNumber, normalizePhoneNumber } from '../utils/phone';
 
 export enum OperationType {
   CREATE = 'create',
@@ -1095,38 +1096,24 @@ export async function getConversationById(conversationId: string): Promise<Conve
 }
 
 /**
- * Fluxo Bilateral: Conta A procura Talk2TM ID da Conta B e envia convite direcionado (toUid obrigatório).
+ * Consulta um perfil público interno pelo Talk2TM ID.
  */
-export async function sendConversationInvite(
-  fromUser: { uid: string; talk2tmId: string; displayName: string },
-  targetTalk2tmId: string
-): Promise<{ status: 'invited' | 'already_connected'; invite?: ConversationInvite; conversation?: Conversation }> {
-  const cleanTargetId = targetTalk2tmId.trim().toUpperCase();
-  if (!/^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(cleanTargetId)) {
-    throw new Error('Código inválido. Use o formato TM-XXXX-XXXX.');
-  }
-  if (cleanTargetId === fromUser.talk2tmId) {
-    throw new Error('Não é possível enviar convite para o próprio código.');
-  }
-
+export async function fetchUserProfileByTalk2tmId(talk2tmId: string): Promise<UserProfile | null> {
   const { db, configured } = await initFirebase();
-  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
-    throw new Error('Sessão autenticada necessária para enviar convite.');
-  }
-
-  let targetProfile: UserProfile | null = null;
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) return null;
   try {
-    const profileSnap = await getDoc(doc(db, 'userProfiles', cleanTargetId));
-    if (profileSnap.exists()) {
-      targetProfile = profileSnap.data() as UserProfile;
-    }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.GET, `userProfiles/${cleanTargetId}`);
+    const snap = await getDoc(doc(db, 'userProfiles', talk2tmId.trim().toUpperCase()));
+    return snap.exists() ? (snap.data() as UserProfile) : null;
+  } catch {
+    return null;
   }
+}
 
-  if (!targetProfile || targetProfile.active === false) {
-    throw new Error('Código Talk2TM não encontrado.');
-  }
+async function sendInviteToTargetProfile(
+  db: Firestore,
+  fromUser: { uid: string; talk2tmId: string; displayName: string },
+  targetProfile: UserProfile
+): Promise<{ status: 'invited' | 'already_connected'; invite?: ConversationInvite; conversation?: Conversation }> {
   if (targetProfile.uid === fromUser.uid) {
     throw new Error('Não é possível convidar a própria conta.');
   }
@@ -1222,6 +1209,106 @@ export async function sendConversationInvite(
   }
 
   return { status: 'invited', invite };
+}
+
+/**
+ * Descoberta e Convite por Número de Telefone exato (via hash SHA-256 em phoneLookup).
+ * Não expõe números brutos nem permite enumeração de utilizadores.
+ */
+export async function sendConversationInviteByPhone(
+  fromUser: { uid: string; talk2tmId: string; displayName: string },
+  rawTargetPhone: string
+): Promise<{
+  status: 'invited' | 'already_connected';
+  invite?: ConversationInvite;
+  conversation?: Conversation;
+  targetDisplayName: string;
+}> {
+  const phoneCheck = normalizePhoneNumber(rawTargetPhone);
+  if (!phoneCheck.valid || !phoneCheck.e164) {
+    throw new Error(phoneCheck.error || 'Número de telefone inválido.');
+  }
+
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
+    throw new Error('Sessão autenticada necessária para procurar contactos e enviar convite.');
+  }
+
+  const phoneHash = await hashPhoneNumber(phoneCheck.e164);
+  let directoryEntry: PhoneDirectoryEntry | null = null;
+  try {
+    const lookupSnap = await getDoc(doc(db, 'phoneLookup', phoneHash));
+    if (lookupSnap.exists()) {
+      directoryEntry = lookupSnap.data() as PhoneDirectoryEntry;
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `phoneLookup/${phoneHash}`);
+  }
+
+  if (!directoryEntry || directoryEntry.active === false) {
+    throw new Error('Nenhum utilizador encontrado com este número.');
+  }
+  if (directoryEntry.uid === fromUser.uid) {
+    throw new Error('Não é possível enviar convite para o seu próprio número.');
+  }
+
+  // Confirma perfil ativo em userProfiles (mantém consistência de regras)
+  let targetProfile: UserProfile | null = null;
+  try {
+    const profileSnap = await getDoc(doc(db, 'userProfiles', directoryEntry.talk2tmId));
+    if (profileSnap.exists()) {
+      targetProfile = profileSnap.data() as UserProfile;
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `userProfiles/${directoryEntry.talk2tmId}`);
+  }
+
+  if (!targetProfile || targetProfile.active === false) {
+    throw new Error('Contacto indisponível no momento.');
+  }
+
+  const res = await sendInviteToTargetProfile(db, fromUser, targetProfile);
+  return {
+    ...res,
+    targetDisplayName: targetProfile.displayName,
+  };
+}
+
+/**
+ * Fluxo Bilateral: Conta A procura Talk2TM ID da Conta B e envia convite direcionado (toUid obrigatório).
+ */
+export async function sendConversationInvite(
+  fromUser: { uid: string; talk2tmId: string; displayName: string },
+  targetTalk2tmId: string
+): Promise<{ status: 'invited' | 'already_connected'; invite?: ConversationInvite; conversation?: Conversation }> {
+  const cleanTargetId = targetTalk2tmId.trim().toUpperCase();
+  if (!/^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(cleanTargetId)) {
+    throw new Error('Código inválido. Use o formato TM-XXXX-XXXX.');
+  }
+  if (cleanTargetId === fromUser.talk2tmId) {
+    throw new Error('Não é possível enviar convite para o próprio código.');
+  }
+
+  const { db, configured } = await initFirebase();
+  if (!configured || !db || !isAuthValidAndNonAnonymous()) {
+    throw new Error('Sessão autenticada necessária para enviar convite.');
+  }
+
+  let targetProfile: UserProfile | null = null;
+  try {
+    const profileSnap = await getDoc(doc(db, 'userProfiles', cleanTargetId));
+    if (profileSnap.exists()) {
+      targetProfile = profileSnap.data() as UserProfile;
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `userProfiles/${cleanTargetId}`);
+  }
+
+  if (!targetProfile || targetProfile.active === false) {
+    throw new Error('Código Talk2TM não encontrado.');
+  }
+
+  return await sendInviteToTargetProfile(db, fromUser, targetProfile);
 }
 
 /**

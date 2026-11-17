@@ -234,22 +234,28 @@ service cloud.firestore {
     // EXPANSION V1: AS 5 ENTIDADES ENXUTAS
     // ====================================================================
 
+    function isValidPhoneHash(hash) {
+      return hash is string && hash.matches('^[a-f0-9]{64}$');
+    }
+
     // 1. users/{uid} — Metadados privados da conta (imutável após criação)
     match /users/{uid} {
       allow get: if isUser(uid);
       allow list: if false;
       allow create: if isUser(uid) &&
                        request.resource.data.keys().hasAll(['uid', 'talk2tmId', 'createdAt']) &&
-                       request.resource.data.keys().hasOnly(['uid', 'talk2tmId', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['uid', 'talk2tmId', 'createdAt', 'phoneHash', 'phoneMasked']) &&
                        request.resource.data.uid == request.auth.uid &&
                        isValidTalk2tmId(request.resource.data.talk2tmId) &&
                        request.resource.data.createdAt is string &&
-                       request.resource.data.createdAt.size() >= 1;
+                       request.resource.data.createdAt.size() >= 1 &&
+                       (!('phoneHash' in request.resource.data) || isValidPhoneHash(request.resource.data.phoneHash)) &&
+                       (!('phoneMasked' in request.resource.data) || (request.resource.data.phoneMasked is string && request.resource.data.phoneMasked.size() >= 3 && request.resource.data.phoneMasked.size() <= 30));
       allow update: if false;
       allow delete: if false;
     }
 
-    // 2. userProfiles/{talk2tmId} — Índice público para busca e convite por ID
+    // 2. userProfiles/{talk2tmId} — Índice público para busca e vínculo bilateral interno
     match /userProfiles/{talk2tmId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() &&
@@ -277,6 +283,45 @@ service cloud.firestore {
                        request.resource.data.displayName.size() >= 1 &&
                        request.resource.data.displayName.size() <= 30 &&
                        request.resource.data.active is bool;
+      allow delete: if false;
+    }
+
+    // 2b. phoneLookup/{phoneHash} — Descoberta exata por hash SHA-256 do telefone (anti-enumeração: list bloqueado)
+    match /phoneLookup/{phoneHash} {
+      allow get: if isAuthenticated() && isValidPhoneHash(phoneHash);
+      allow list: if false;
+      allow create: if isAuthenticated() &&
+                       isValidPhoneHash(phoneHash) &&
+                       request.resource.data.keys().hasAll(['phoneHash', 'uid', 'talk2tmId', 'displayName', 'active', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['phoneHash', 'uid', 'talk2tmId', 'displayName', 'active', 'createdAt']) &&
+                       request.resource.data.phoneHash == phoneHash &&
+                       request.resource.data.uid == request.auth.uid &&
+                       isValidTalk2tmId(request.resource.data.talk2tmId) &&
+                       request.resource.data.displayName is string &&
+                       request.resource.data.displayName.size() >= 1 &&
+                       request.resource.data.displayName.size() <= 30 &&
+                       request.resource.data.active is bool &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId == request.resource.data.talk2tmId &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)).data.uid == request.auth.uid &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)).data.displayName == request.resource.data.displayName;
+      allow update: if isAuthenticated() &&
+                       isValidPhoneHash(phoneHash) &&
+                       resource.data.uid == request.auth.uid &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.phoneHash == resource.data.phoneHash &&
+                       request.resource.data.talk2tmId == resource.data.talk2tmId &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
+                       request.resource.data.displayName is string &&
+                       request.resource.data.displayName.size() >= 1 &&
+                       request.resource.data.displayName.size() <= 30 &&
+                       request.resource.data.active is bool &&
+                       exists(/databases/$(database)/documents/userProfiles/$(resource.data.talk2tmId)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(resource.data.talk2tmId)).data.displayName == request.resource.data.displayName;
       allow delete: if false;
     }
 

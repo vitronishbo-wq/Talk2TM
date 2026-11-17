@@ -64,7 +64,8 @@ import {
   fetchChannelMetadataFromServer,
   getConversationById,
   getOrCreateConversation,
-  sendConversationInvite,
+  sendConversationInviteByPhone,
+  fetchUserProfileByTalk2tmId,
   acceptConversationInvite,
   declineConversationInvite,
   cancelConversationInvite,
@@ -84,9 +85,15 @@ import { Unsubscribe } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
 import {
-  createTalk2TMIdentity,
+  authenticateVaultIdentity,
+  findLocalIdentityByPin,
+  getActiveVaultPinLengths,
   getLocalIdentity,
+  recoverPhoneIdentity,
+  regenerateRecoveryCodeWithPin,
+  registerPhoneIdentity,
   restoreLocalIdentity,
+  updateLocalPinForAccount,
   LocalIdentity,
 } from './identity';
 
@@ -178,12 +185,17 @@ export class Talk2TMApp {
   private hubOutgoingInvites: ConversationInvite[] = [];
   private hubConversations: Conversation[] = [];
   private knownAcceptedInviteIds: Set<string> = new Set();
+  private pendingOnboardingSession: UserSession | null = null;
+  private isCheckingCustomPin: boolean = false;
 
   constructor(container: HTMLElement) {
     this.appSettings = loadSettings();
 
     this.ui = new ChatUI(container, this.appSettings, {
       onUnlockByPin: (password: string) => this.unlockChatWithPassword(password),
+      onCheckCustomPin: async (displayValue: string, inputSequence: string) => {
+        return await this.tryUnlockCustomPinFromCalculator(displayValue, inputSequence);
+      },
       onLockToCalculator: () => this.lockToCalculator(),
       onSendMessage: (text: string) => this.sendMessage(text),
       onLoadOlder: () => this.loadOlderMessages(),
@@ -211,11 +223,23 @@ export class Talk2TMApp {
           });
         }
       },
-      onCreateIdentity: async (displayName: string) => {
-        return await this.handleCreateIdentity(displayName);
+      onCreateIdentity: async (params) => {
+        return await this.handleCreateIdentity(params);
       },
-      onSendInvite: async (targetTalk2tmId: string) => {
-        await this.handleSendInvite(targetTalk2tmId);
+      onFinishOnboarding: async () => {
+        await this.handleFinishOnboarding();
+      },
+      onRecoverIdentity: async (params) => {
+        await this.handleRecoverIdentity(params);
+      },
+      onRegenerateRecoveryCode: async (currentPin: string) => {
+        return await this.handleRegenerateRecoveryCode(currentPin);
+      },
+      onChangeLocalPin: async (currentPin: string, newPin: string) => {
+        await this.handleChangeLocalPin(currentPin, newPin);
+      },
+      onSendInvite: async (targetPhone: string) => {
+        await this.handleSendInvite(targetPhone);
       },
       onAcceptInvite: async (invite: ConversationInvite) => {
         await this.handleAcceptInvite(invite);
@@ -241,9 +265,54 @@ export class Talk2TMApp {
     this.registerServiceWorker();
   }
 
+  private async tryUnlockCustomPinFromCalculator(
+    displayValue: string,
+    inputSequence: string
+  ): Promise<boolean> {
+    if (this.currentSession || this.isCheckingCustomPin) return false;
+    const lengths = getActiveVaultPinLengths();
+    if (lengths.length === 0) return false;
+
+    this.isCheckingCustomPin = true;
+    try {
+      const candidates: string[] = [];
+      const cleanDisplay = (displayValue || '').trim();
+      const cleanSeq = (inputSequence || '').trim();
+
+      if (/^\d{4,8}$/.test(cleanDisplay) && lengths.includes(cleanDisplay.length)) {
+        candidates.push(cleanDisplay);
+      }
+      for (const len of lengths) {
+        if (cleanDisplay.length > len) {
+          const suffix = cleanDisplay.slice(-len);
+          if (/^\d+$/.test(suffix) && !candidates.includes(suffix)) {
+            candidates.push(suffix);
+          }
+        }
+        if (cleanSeq.length >= len) {
+          const suffix = cleanSeq.slice(-len);
+          if (/^\d+$/.test(suffix) && !candidates.includes(suffix)) {
+            candidates.push(suffix);
+          }
+        }
+      }
+
+      for (const pin of candidates) {
+        const matched = await findLocalIdentityByPin(pin);
+        if (matched) {
+          await this.unlockWithLocalIdentity(matched, pin);
+          return true;
+        }
+      }
+      return false;
+    } finally {
+      this.isCheckingCustomPin = false;
+    }
+  }
+
   /**
    * Ponto central de desbloqueio:
-   * Processa a entrada do campo único de senha e, se válida, desbloqueia IMEDIATAMENTE
+   * Processa a entrada do campo único de PIN/senha e, se válida, desbloqueia IMEDIATAMENTE
    * a interface do chat de forma otimista, sem travar na rede.
    */
   public async unlockChatWithPassword(password: string): Promise<boolean> {
@@ -251,13 +320,26 @@ export class Talk2TMApp {
     const verification = verifyPassword(cleanInput);
 
     if (!verification.valid || !verification.user || !verification.userId) {
-      const localIdentity = getLocalIdentity();
-      if (localIdentity && cleanInput.toUpperCase() === localIdentity.talk2tmId.toUpperCase()) {
-        return await this.unlockWithLocalIdentity(localIdentity);
+      const vaultMatch = await findLocalIdentityByPin(cleanInput);
+      if (vaultMatch) {
+        return await this.unlockWithLocalIdentity(vaultMatch, cleanInput);
       }
 
-      this.ui.showPassError(verification.error || 'Senha inválida.');
-      this.ui.showTemporaryNotice(verification.error || 'Senha inválida.');
+      const legacyIdentity = getLocalIdentity();
+      if (
+        legacyIdentity &&
+        !legacyIdentity.pinFastHash &&
+        cleanInput.toUpperCase() === legacyIdentity.talk2tmId.toUpperCase()
+      ) {
+        return await this.unlockWithLocalIdentity(legacyIdentity);
+      }
+
+      const isTmInput = /^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(cleanInput);
+      const errMsg = isTmInput
+        ? 'O acesso agora usa o seu PIN numérico (4 a 8 dígitos). Se mudou de aparelho, toque em [recuperar conta].'
+        : 'PIN inválido. Verifique ou use [criar conta] / [recuperar conta].';
+      this.ui.showPassError(errMsg);
+      this.ui.showTemporaryNotice(errMsg);
       return false;
     }
 
@@ -1394,10 +1476,10 @@ export class Talk2TMApp {
       clearMonitorContext();
     }
 
-    // Se houver identidade local prévia salva da Fase 2, restaura apenas metadados internos (sem abrir chat)
+    // Se houver identidade local prévia, restaura metadados internos silenciosamente (sem abrir chat)
     const localIdentity = await restoreLocalIdentity().catch(() => null);
     if (localIdentity && isAuthValidAndNonAnonymous()) {
-      console.info(`Talk2TM [Identity]: Identidade ${localIdentity.talk2tmId} restaurada para ${localIdentity.displayName}`);
+      console.info(`Talk2TM [Identity]: Conta local restaurada para ${localIdentity.displayName}`);
     }
 
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
@@ -1443,15 +1525,16 @@ export class Talk2TMApp {
   }
 
   /**
-   * Desbloqueia sessão para conta criada via Onboarding (TM-XXXX-XXXX).
-   * Abre a última conversa bilateral ativa ou o Hub de Convites Bilaterais (nunca uma sala de 1 participante).
+   * Desbloqueio otimista (zero latência) para contas locais por PIN numérico.
+   * Abre a UI imediatamente do cache local e autentica/sincroniza o cofre em segundo plano.
    */
-  private async unlockWithLocalIdentity(identity: LocalIdentity): Promise<boolean> {
+  private async unlockWithLocalIdentity(identity: LocalIdentity, pin?: string): Promise<boolean> {
     const session: UserSession = {
       userId: identity.uid,
       displayName: identity.displayName,
       roomId: '',
       talk2tmId: identity.talk2tmId,
+      phoneMasked: identity.phoneMasked,
     };
 
     this.currentSession = session;
@@ -1460,50 +1543,118 @@ export class Talk2TMApp {
     this.startSessionTimeout();
     this.resetInactivityTimer();
 
-    await restoreLocalIdentity().catch(() => null);
-    const activeUid = getCurrentAuthUser()?.uid || identity.uid;
-    if (activeUid !== session.userId) {
-      session.userId = activeUid;
-      this.currentSession = session;
-      saveSession(session);
-    }
+    const authPromise = authenticateVaultIdentity(identity, pin).catch(() => null);
+    const lastConvId = this.getSavedLastConversationId(identity.uid);
 
-    const lastConvId = this.getSavedLastConversationId(session.userId) || this.getSavedLastConversationId(identity.uid);
     if (lastConvId) {
-      await this.connectToConversation(lastConvId);
+      // Renderiza o chat imediatamente a partir do IndexedDB antes mesmo de aguardar Auth remoto
+      session.conversationId = lastConvId;
+      session.roomId = lastConvId;
+      saveSession(session);
+      const localConv = await getLocalConversation(lastConvId).catch(() => null);
+      const localRoom = localConv ? conversationToRoom(localConv) : await getLocalRoom(lastConvId).catch(() => null);
+      if (localRoom) this.currentRoom = localRoom;
+      this.ui.showChatView(session, localRoom || undefined);
+      this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
+
+      // Aguarda eventual troca de conta no Firebase Auth para multi-conta no mesmo aparelho
+      const authRes = await authPromise;
+      if (authRes?.displayName && authRes.displayName !== session.displayName) {
+        session.displayName = authRes.displayName;
+        saveSession(session);
+      }
+      if (this.currentSession && this.currentSession.userId === identity.uid) {
+        await this.connectToConversation(lastConvId);
+      }
     } else {
-      await this.openBilateralHub(session);
+      // Abre Hub de Conexões imediatamente e acopla listeners após consolidar Auth da conta correta
+      this.ui.showConnectView(session);
+      this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
+      const authRes = await authPromise;
+      if (authRes?.displayName && authRes.displayName !== session.displayName) {
+        session.displayName = authRes.displayName;
+        saveSession(session);
+      }
+      if (this.currentSession && this.currentSession.userId === identity.uid) {
+        await this.openBilateralHub(session);
+      }
     }
 
     return true;
   }
 
   /**
-   * Onboarding Ultraleve (Fase 2):
-   * Cria nova conta e perfil associados ao Talk2TM ID (TM-XXXX-XXXX) sem criar sala falsa de 1 participante.
-   * Em seguida abre o Hub Bilateral para procurar a Conta B pelo Talk2TM ID e enviar/aceitar convite.
+   * Cadastro Zero Custos (4 campos: Nome, Telefone, PIN, Confirmar PIN):
+   * Cria identidade, gera código de recuperação único e aguarda confirmação explícita do utilizador.
    */
-  public async handleCreateIdentity(displayName: string): Promise<string> {
-    const identity = await createTalk2TMIdentity(displayName);
+  public async handleCreateIdentity(params: {
+    displayName: string;
+    phone: string;
+    pin: string;
+  }): Promise<{ talk2tmId: string; recoveryCode: string; e164Phone: string }> {
+    const result = await registerPhoneIdentity(params);
 
-    const session: UserSession = {
-      userId: identity.uid,
-      displayName: identity.displayName,
+    this.pendingOnboardingSession = {
+      userId: result.identity.uid,
+      displayName: result.identity.displayName,
       roomId: '',
-      talk2tmId: identity.talk2tmId,
+      talk2tmId: result.identity.talk2tmId,
+      phoneMasked: result.identity.phoneMasked,
     };
+
+    return {
+      talk2tmId: result.identity.talk2tmId,
+      recoveryCode: result.recoveryCode,
+      e164Phone: result.e164Phone,
+    };
+  }
+
+  public async handleFinishOnboarding(): Promise<void> {
+    const session = this.pendingOnboardingSession;
+    this.pendingOnboardingSession = null;
+    if (!session) {
+      const local = getLocalIdentity();
+      if (local) {
+        await this.unlockWithLocalIdentity(local);
+      } else {
+        this.ui.showPassEntryView();
+      }
+      return;
+    }
 
     this.currentSession = session;
     this.currentRoom = null;
     saveSession(session);
+    this.stopBackgroundMonitor();
+    this.startSessionTimeout();
+    this.resetInactivityTimer();
+    await this.openBilateralHub(session);
+  }
 
-    // Exibe o badge do código gerado e em seguida abre o Hub Bilateral
-    setTimeout(() => {
-      this.stopBackgroundMonitor();
-      void this.openBilateralHub(session);
-    }, 800);
+  public async handleRecoverIdentity(params: {
+    phone: string;
+    recoveryCode: string;
+    newPin: string;
+  }): Promise<void> {
+    const identity = await recoverPhoneIdentity(params);
+    await this.unlockWithLocalIdentity(identity, params.newPin.trim());
+  }
 
-    return identity.talk2tmId;
+  public async handleRegenerateRecoveryCode(currentPin: string): Promise<string> {
+    if (!this.currentSession) {
+      throw new Error('Sessão ativa necessária.');
+    }
+    const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    const res = await regenerateRecoveryCodeWithPin(uid, currentPin);
+    return res.recoveryCode;
+  }
+
+  public async handleChangeLocalPin(currentPin: string, newPin: string): Promise<void> {
+    if (!this.currentSession) {
+      throw new Error('Sessão ativa necessária.');
+    }
+    const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    await updateLocalPinForAccount(uid, currentPin, newPin);
   }
 
   private stopConnectHubListeners(): void {
@@ -1534,8 +1685,7 @@ export class Talk2TMApp {
   }
 
   /**
-   * Abre o Hub de Conexões Bilaterais:
-   * Conta A procura Talk2TM ID de Conta B -> Convite -> Aceitação -> Conversa bilateral 1:1.
+   * Abre o Hub de Conexões Bilaterais (descoberta por número exato de telefone).
    */
   public async openBilateralHub(session: UserSession): Promise<void> {
     this.stopActiveChatSyncLoop();
@@ -1634,9 +1784,11 @@ export class Talk2TMApp {
     if (!session.talk2tmId) return;
     let conv = await getConversationById(invite.conversationId);
     if (!conv && invite.toUid) {
+      const partnerProfile = await fetchUserProfileByTalk2tmId(invite.toTalk2tmId).catch(() => null);
+      const partnerDisplayName = partnerProfile?.displayName || invite.toTalk2tmId;
       conv = await getOrCreateConversation(
         { uid: session.userId, talk2tmId: session.talk2tmId, displayName: session.displayName },
-        { uid: invite.toUid, talk2tmId: invite.toTalk2tmId, displayName: invite.toTalk2tmId }
+        { uid: invite.toUid, talk2tmId: invite.toTalk2tmId, displayName: partnerDisplayName }
       ).catch(() => null);
     }
     if (conv && this.ui.isConnectViewActive()) {
@@ -1644,28 +1796,31 @@ export class Talk2TMApp {
     }
   }
 
-  private async handleSendInvite(targetTalk2tmId: string): Promise<void> {
+  private async handleSendInvite(targetPhone: string): Promise<void> {
     if (!this.currentSession || !this.currentSession.talk2tmId) {
-      throw new Error('Identidade Talk2TM necessária para enviar convite.');
+      throw new Error('Identidade necessária para enviar convite.');
     }
     if (!isAuthValidAndNonAnonymous()) {
       await restoreLocalIdentity();
       await waitForAuthCompletion(3000);
     }
     const myUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
-    const res = await sendConversationInvite(
+    const res = await sendConversationInviteByPhone(
       {
         uid: myUid,
         talk2tmId: this.currentSession.talk2tmId,
         displayName: this.currentSession.displayName,
       },
-      targetTalk2tmId
+      targetPhone
     );
     if (res.status === 'already_connected' && res.conversation) {
-      this.ui.showConnectFeedback('Conexão bilateral pronta! Abrindo conversa...');
+      this.ui.showConnectFeedback('Conexão pronta! Abrindo conversa...');
       await this.connectToConversation(res.conversation.conversationId);
     } else {
-      this.ui.showConnectFeedback(`Convite enviado para ${targetTalk2tmId}. Aguardando aceitação.`);
+      if (res.invite?.inviteId && res.targetDisplayName) {
+        this.ui.cacheOutgoingInviteTargetName(res.invite.inviteId, res.targetDisplayName);
+      }
+      this.ui.showConnectFeedback(`Convite enviado para ${res.targetDisplayName}. Aguardando aceitação.`);
     }
   }
 

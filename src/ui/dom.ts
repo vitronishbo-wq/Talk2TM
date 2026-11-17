@@ -4,16 +4,26 @@ import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateK
 import { MobileCalculator } from './calculator';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
+import { normalizePhoneNumber } from '../utils/phone';
 
 export interface UIEvents {
   onUnlockByPin: (pin: string) => void;
+  onCheckCustomPin?: (displayValue: string, inputSequence: string) => Promise<boolean>;
   onLockToCalculator: () => void;
   onSendMessage: (text: string) => void;
   onLoadOlder: () => void;
   onUpdateSettings: (settings: AppSettings) => void;
   onDeleteMessagesLocally?: (messageIds: string[]) => void;
-  onCreateIdentity?: (displayName: string) => Promise<string | null>;
-  onSendInvite?: (targetTalk2tmId: string) => Promise<void>;
+  onCreateIdentity?: (params: { displayName: string; phone: string; pin: string }) => Promise<{
+    talk2tmId: string;
+    recoveryCode: string;
+    e164Phone: string;
+  }>;
+  onFinishOnboarding?: () => Promise<void>;
+  onRecoverIdentity?: (params: { phone: string; recoveryCode: string; newPin: string }) => Promise<void>;
+  onRegenerateRecoveryCode?: (currentPin: string) => Promise<string>;
+  onChangeLocalPin?: (currentPin: string, newPin: string) => Promise<void>;
+  onSendInvite?: (targetPhone: string) => Promise<string | void>;
   onAcceptInvite?: (invite: ConversationInvite) => Promise<void>;
   onDeclineInvite?: (inviteId: string) => Promise<void>;
   onCancelInvite?: (inviteId: string) => Promise<void>;
@@ -36,28 +46,50 @@ export class ChatUI {
   private roomInfoEl!: HTMLElement;
   private mainEl!: HTMLElement;
 
-  // Tela Única de Senha (Sem seleção de usuário, a senha determina a conta)
+  // Tela Única de PIN (Acesso manual pelo DEG)
   private passViewEl!: HTMLElement;
   private singlePassInput!: HTMLInputElement;
   private passErrorEl!: HTMLElement;
 
-  // Tela de Onboarding Ultraleve (Criar meu código)
+  // Tela de Cadastro Ultraminimalista (4 campos + código de recuperação único)
   private onboardingViewEl!: HTMLElement;
+  private onboardingFormEl!: HTMLFormElement;
   private onboardingNameInput!: HTMLInputElement;
+  private onboardingPhoneInput!: HTMLInputElement;
+  private onboardingPhonePreviewEl!: HTMLElement;
+  private onboardingPinInput!: HTMLInputElement;
+  private onboardingPinConfirmInput!: HTMLInputElement;
   private onboardingErrorEl!: HTMLElement;
   private onboardingSubmitBtn!: HTMLButtonElement;
-  private generatedCodeBadgeEl!: HTMLElement;
+  private recoveryStepBoxEl!: HTMLElement;
+  private recoveryStepCodeEl!: HTMLElement;
+  private recoveryStepStatusEl!: HTMLElement;
 
-  // Hub de Conexões Bilaterais (Conta A -> Talk2TM ID de Conta B -> Convite -> Aceite -> Conversa)
+  // Tela de Recuperação de Conta (Zero Custos)
+  private recoveryViewEl!: HTMLElement;
+  private recoveryPhoneInput!: HTMLInputElement;
+  private recoveryPhonePreviewEl!: HTMLElement;
+  private recoveryCodeInput!: HTMLInputElement;
+  private recoveryPinInput!: HTMLInputElement;
+  private recoveryPinConfirmInput!: HTMLInputElement;
+  private recoveryErrorEl!: HTMLElement;
+  private recoverySubmitBtn!: HTMLButtonElement;
+
+  // Hub de Conexões Bilaterais (Descoberta por telefone exato, sem expor TM-XXXX-XXXX)
   private connectionsBtnEl!: HTMLButtonElement;
   private connectViewEl!: HTMLElement;
-  private connectSelfCodeEl!: HTMLElement;
+  private connectSelfNameEl!: HTMLElement;
+  private connectSelfPhoneEl!: HTMLElement;
+  private connectRecoveryPanelEl!: HTMLElement;
+  private connectPinPanelEl!: HTMLElement;
   private connectTargetInput!: HTMLInputElement;
+  private connectTargetPreviewEl!: HTMLElement;
   private connectInviteBtn!: HTMLButtonElement;
   private connectFeedbackEl!: HTMLElement;
   private incomingInvitesListEl!: HTMLElement;
   private outgoingInvitesListEl!: HTMLElement;
   private conversationsListEl!: HTMLElement;
+  private outgoingTargetNameCache: Map<string, string> = new Map();
 
   // Tela de Chat
   private chatViewEl!: HTMLElement;
@@ -114,6 +146,7 @@ export class ChatUI {
       onUnlock: (_user, pin) => {
         this.events.onUnlockByPin(pin);
       },
+      onCheckCustomPin: this.events.onCheckCustomPin,
       onOpenManualEntry: () => {
         this.showPassEntryView();
       },
@@ -197,12 +230,14 @@ export class ChatUI {
 
     this.buildPassEntryView();
     this.buildOnboardingView();
+    this.buildRecoveryView();
     this.buildConnectView();
     this.buildChatView();
     this.buildSettingsModal();
 
     this.mainEl.appendChild(this.passViewEl);
     this.mainEl.appendChild(this.onboardingViewEl);
+    this.mainEl.appendChild(this.recoveryViewEl);
     this.mainEl.appendChild(this.connectViewEl);
     this.mainEl.appendChild(this.chatViewEl);
     this.appWrapper.appendChild(this.mainEl);
@@ -214,9 +249,62 @@ export class ChatUI {
     this.showCalculatorView();
   }
 
+  private createPinInputWithToggle(
+    id: string,
+    placeholder: string,
+    maxLength: number = 8,
+    autocomplete: AutoFill = 'off'
+  ): { wrapper: HTMLElement; input: HTMLInputElement; toggleBtn: HTMLButtonElement } {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'ttm-input-group';
+
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.id = id;
+    input.className = 'ttm-input ttm-input-with-toggle';
+    input.placeholder = placeholder;
+    input.maxLength = maxLength;
+    input.inputMode = 'numeric';
+    input.setAttribute('pattern', '[0-9]*');
+    input.autocomplete = autocomplete;
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'ttm-toggle-vis-btn';
+    toggleBtn.textContent = 'ver';
+    toggleBtn.setAttribute('aria-label', 'Mostrar ou ocultar PIN');
+    toggleBtn.addEventListener('click', () => {
+      const showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      toggleBtn.textContent = showing ? 'ver' : 'ocultar';
+    });
+
+    wrapper.appendChild(input);
+    wrapper.appendChild(toggleBtn);
+    return { wrapper, input, toggleBtn };
+  }
+
+  private updatePhonePreview(raw: string, previewEl: HTMLElement): void {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      previewEl.textContent = 'Número declarado (não verificado por SMS). Angola: 9 dígitos ou +indicativo.';
+      previewEl.classList.remove('is-valid', 'is-invalid');
+      return;
+    }
+    const res = normalizePhoneNumber(trimmed);
+    if (res.valid && res.e164) {
+      previewEl.textContent = `Formato internacional: ${res.e164} (declarado)`;
+      previewEl.classList.add('is-valid');
+      previewEl.classList.remove('is-invalid');
+    } else {
+      previewEl.textContent = res.error || 'Formato inválido.';
+      previewEl.classList.add('is-invalid');
+      previewEl.classList.remove('is-valid');
+    }
+  }
+
   /**
-   * Caixa Única de Digitação de Senha (Sem seleção de usuário)
-   * Suporta teclado de mobile, laptop, numérico etc.
+   * Caixa Única de Digitação de PIN (Acesso pelo botão discreto DEG)
    */
   private buildPassEntryView(): void {
     this.passViewEl = document.createElement('div');
@@ -230,18 +318,18 @@ export class ChatUI {
 
     const subtitleEl = document.createElement('p');
     subtitleEl.className = 'ttm-subtitle';
-    subtitleEl.textContent = 'Digite a senha para acessar a conta:';
+    subtitleEl.textContent = 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:';
 
     const formEl = document.createElement('form');
     formEl.className = 'ttm-form';
 
-    this.singlePassInput = document.createElement('input');
-    this.singlePassInput.type = 'password';
-    this.singlePassInput.id = 'ttm-single-pass';
-    this.singlePassInput.className = 'ttm-input ttm-input-single';
-    this.singlePassInput.placeholder = 'Senha ou código TM-...';
-    this.singlePassInput.maxLength = 16;
-    this.singlePassInput.autocomplete = 'current-password';
+    const pinField = this.createPinInputWithToggle(
+      'ttm-single-pass',
+      'PIN numérico (4 a 8 dígitos)',
+      16,
+      'current-password'
+    );
+    this.singlePassInput = pinField.input;
 
     this.passErrorEl = document.createElement('div');
     this.passErrorEl.className = 'ttm-error';
@@ -252,12 +340,20 @@ export class ChatUI {
     enterBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
     enterBtn.textContent = '[entrar]';
 
-    const createCodeBtn = document.createElement('button');
-    createCodeBtn.type = 'button';
-    createCodeBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    createCodeBtn.textContent = '[criar meu código Talk2TM]';
-    createCodeBtn.addEventListener('click', () => {
+    const createAccountBtn = document.createElement('button');
+    createAccountBtn.type = 'button';
+    createAccountBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    createAccountBtn.textContent = '[criar conta]';
+    createAccountBtn.addEventListener('click', () => {
       this.showOnboardingView();
+    });
+
+    const recoverAccountBtn = document.createElement('button');
+    recoverAccountBtn.type = 'button';
+    recoverAccountBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    recoverAccountBtn.textContent = '[recuperar conta]';
+    recoverAccountBtn.addEventListener('click', () => {
+      this.showRecoveryView();
     });
 
     const backToCalcBtn = document.createElement('button');
@@ -268,20 +364,20 @@ export class ChatUI {
       this.events.onLockToCalculator();
     });
 
-    formEl.appendChild(this.singlePassInput);
+    formEl.appendChild(pinField.wrapper);
     formEl.appendChild(this.passErrorEl);
     formEl.appendChild(enterBtn);
-    formEl.appendChild(createCodeBtn);
+    formEl.appendChild(createAccountBtn);
+    formEl.appendChild(recoverAccountBtn);
     formEl.appendChild(backToCalcBtn);
 
-    // Validação da senha única: determina automaticamente a conta (ou código TM-XXXX-XXXX)
     formEl.addEventListener('submit', (e) => {
       e.preventDefault();
       this.passErrorEl.textContent = '';
       const pin = this.singlePassInput.value.trim();
 
       if (!pin) {
-        this.passErrorEl.textContent = 'Digite a senha.';
+        this.passErrorEl.textContent = 'Digite o PIN de acesso.';
         return;
       }
 
@@ -294,8 +390,12 @@ export class ChatUI {
   }
 
   /**
-   * Onboarding Ultraleve (Fase 2)
-   * Fluxo: "Como quer aparecer?" -> Nome -> Criação de Talk2TM ID (TM-XXXX-XXXX)
+   * Cadastro Ultraminimalista (4 campos):
+   * 1. Nome / Utilizador
+   * 2. Número de telefone (declarado, com normalização +244 / internacional)
+   * 3. PIN numérico de 4 a 8 dígitos
+   * 4. Confirmar PIN
+   * + Tela obrigatória de confirmação do Código de Recuperação único (zero custos).
    */
   private buildOnboardingView(): void {
     this.onboardingViewEl = document.createElement('div');
@@ -308,39 +408,65 @@ export class ChatUI {
 
     const titleEl = document.createElement('h1');
     titleEl.className = 'ttm-title';
-    titleEl.textContent = 'Novo Código Talk2TM';
+    titleEl.textContent = 'Criar Conta';
 
     const subtitleEl = document.createElement('p');
     subtitleEl.className = 'ttm-subtitle';
-    subtitleEl.textContent = 'Como quer aparecer para o seu parceiro?';
+    subtitleEl.textContent = 'Cadastro simples, gratuito e sem e-mail ou SMS.';
 
-    const formEl = document.createElement('form');
-    formEl.className = 'ttm-form';
+    this.onboardingFormEl = document.createElement('form');
+    this.onboardingFormEl.className = 'ttm-form';
 
     this.onboardingNameInput = document.createElement('input');
     this.onboardingNameInput.type = 'text';
     this.onboardingNameInput.id = 'ttm-onboarding-name';
-    this.onboardingNameInput.className = 'ttm-input';
-    this.onboardingNameInput.placeholder = 'Seu nome ou apelido...';
+    this.onboardingNameInput.className = 'ttm-input ttm-input-left';
+    this.onboardingNameInput.placeholder = '1. Nome / Utilizador';
     this.onboardingNameInput.maxLength = 30;
-    this.onboardingNameInput.autocomplete = 'off';
+    this.onboardingNameInput.autocomplete = 'name';
+
+    this.onboardingPhoneInput = document.createElement('input');
+    this.onboardingPhoneInput.type = 'tel';
+    this.onboardingPhoneInput.id = 'ttm-onboarding-phone';
+    this.onboardingPhoneInput.className = 'ttm-input ttm-input-left';
+    this.onboardingPhoneInput.placeholder = '2. Telefone (+244 9XX... ou 9XXXXXXXX)';
+    this.onboardingPhoneInput.inputMode = 'tel';
+    this.onboardingPhoneInput.maxLength = 24;
+    this.onboardingPhoneInput.autocomplete = 'tel';
+
+    this.onboardingPhonePreviewEl = document.createElement('div');
+    this.onboardingPhonePreviewEl.className = 'ttm-field-hint';
+    this.onboardingPhonePreviewEl.textContent =
+      'Número declarado (não verificado por SMS). Angola: 9 dígitos ou +indicativo.';
+
+    this.onboardingPhoneInput.addEventListener('input', () => {
+      this.updatePhonePreview(this.onboardingPhoneInput.value, this.onboardingPhonePreviewEl);
+    });
+
+    const pin1 = this.createPinInputWithToggle(
+      'ttm-onboarding-pin',
+      '3. PIN numérico (4 a 8 dígitos)',
+      8,
+      'new-password'
+    );
+    this.onboardingPinInput = pin1.input;
+
+    const pin2 = this.createPinInputWithToggle(
+      'ttm-onboarding-pin-confirm',
+      '4. Confirmar PIN',
+      8,
+      'new-password'
+    );
+    this.onboardingPinConfirmInput = pin2.input;
 
     this.onboardingErrorEl = document.createElement('div');
     this.onboardingErrorEl.className = 'ttm-error';
     this.onboardingErrorEl.textContent = '';
 
-    this.generatedCodeBadgeEl = document.createElement('div');
-    this.generatedCodeBadgeEl.className = 'ttm-code-badge';
-    this.generatedCodeBadgeEl.style.display = 'none';
-
-    const tipEl = document.createElement('div');
-    tipEl.className = 'ttm-onboarding-tip';
-    tipEl.textContent = 'Um código pessoal seguro TM-XXXX-XXXX será gerado automaticamente.';
-
     this.onboardingSubmitBtn = document.createElement('button');
     this.onboardingSubmitBtn.type = 'submit';
     this.onboardingSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
+    this.onboardingSubmitBtn.textContent = '[criar conta]';
 
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
@@ -350,48 +476,252 @@ export class ChatUI {
       this.showPassEntryView();
     });
 
-    formEl.appendChild(this.onboardingNameInput);
-    formEl.appendChild(this.generatedCodeBadgeEl);
-    formEl.appendChild(tipEl);
-    formEl.appendChild(this.onboardingErrorEl);
-    formEl.appendChild(this.onboardingSubmitBtn);
-    formEl.appendChild(backBtn);
+    this.onboardingFormEl.appendChild(this.onboardingNameInput);
+    this.onboardingFormEl.appendChild(this.onboardingPhoneInput);
+    this.onboardingFormEl.appendChild(this.onboardingPhonePreviewEl);
+    this.onboardingFormEl.appendChild(pin1.wrapper);
+    this.onboardingFormEl.appendChild(pin2.wrapper);
+    this.onboardingFormEl.appendChild(this.onboardingErrorEl);
+    this.onboardingFormEl.appendChild(this.onboardingSubmitBtn);
+    this.onboardingFormEl.appendChild(backBtn);
 
-    formEl.addEventListener('submit', async (e) => {
+    // Passo 2 pós-cadastro: exibição única do código de recuperação (sem auto-desaparecer)
+    this.recoveryStepBoxEl = document.createElement('div');
+    this.recoveryStepBoxEl.className = 'ttm-recovery-confirm-box';
+    this.recoveryStepBoxEl.style.display = 'none';
+
+    const recTitle = document.createElement('div');
+    recTitle.className = 'ttm-recovery-title';
+    recTitle.textContent = 'Guarde o seu Código de Recuperação';
+
+    const recDesc = document.createElement('p');
+    recDesc.className = 'ttm-onboarding-tip';
+    recDesc.textContent =
+      'Mostrado apenas esta vez. Use-o com seu telefone se precisar recuperar a conta noutro aparelho (sem SMS nem e-mail).';
+
+    this.recoveryStepCodeEl = document.createElement('div');
+    this.recoveryStepCodeEl.className = 'ttm-code-badge';
+    this.recoveryStepCodeEl.textContent = '';
+
+    this.recoveryStepStatusEl = document.createElement('div');
+    this.recoveryStepStatusEl.className = 'ttm-field-hint is-valid';
+    this.recoveryStepStatusEl.textContent = '';
+
+    const copyRecBtn = document.createElement('button');
+    copyRecBtn.type = 'button';
+    copyRecBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    copyRecBtn.textContent = '[copiar código de recuperação]';
+    copyRecBtn.addEventListener('click', async () => {
+      const code = this.recoveryStepCodeEl.textContent || '';
+      if (!code) return;
+      try {
+        await navigator.clipboard?.writeText(code);
+        this.recoveryStepStatusEl.textContent = 'Código copiado! Guarde num local seguro fora deste aparelho.';
+      } catch {
+        this.recoveryStepStatusEl.textContent = 'Selecione e anote o código acima antes de continuar.';
+      }
+    });
+
+    const enterAfterRecBtn = document.createElement('button');
+    enterAfterRecBtn.type = 'button';
+    enterAfterRecBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    enterAfterRecBtn.textContent = '[já guardei, entrar]';
+    enterAfterRecBtn.addEventListener('click', async () => {
+      enterAfterRecBtn.disabled = true;
+      try {
+        await this.events.onFinishOnboarding?.();
+      } finally {
+        enterAfterRecBtn.disabled = false;
+      }
+    });
+
+    this.recoveryStepBoxEl.appendChild(recTitle);
+    this.recoveryStepBoxEl.appendChild(recDesc);
+    this.recoveryStepBoxEl.appendChild(this.recoveryStepCodeEl);
+    this.recoveryStepBoxEl.appendChild(this.recoveryStepStatusEl);
+    this.recoveryStepBoxEl.appendChild(copyRecBtn);
+    this.recoveryStepBoxEl.appendChild(enterAfterRecBtn);
+
+    this.onboardingFormEl.addEventListener('submit', async (e) => {
       e.preventDefault();
       this.onboardingErrorEl.textContent = '';
-      const name = this.onboardingNameInput.value.trim();
-      if (!name) {
-        this.onboardingErrorEl.textContent = 'Por favor, digite um nome ou apelido.';
+
+      const displayName = this.onboardingNameInput.value.trim();
+      const phone = this.onboardingPhoneInput.value.trim();
+      const pin = this.onboardingPinInput.value.trim();
+      const pinConfirm = this.onboardingPinConfirmInput.value.trim();
+
+      if (!displayName) {
+        this.onboardingErrorEl.textContent = 'Informe seu nome ou utilizador.';
+        return;
+      }
+      const phoneCheck = normalizePhoneNumber(phone);
+      if (!phoneCheck.valid) {
+        this.onboardingErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
+        return;
+      }
+      if (!/^\d{4,8}$/.test(pin)) {
+        this.onboardingErrorEl.textContent = 'O PIN deve ter entre 4 e 8 dígitos numéricos.';
+        return;
+      }
+      if (pin !== pinConfirm) {
+        this.onboardingErrorEl.textContent = 'Os dois PINs não coincidem.';
         return;
       }
 
       if (this.events.onCreateIdentity) {
         this.onboardingSubmitBtn.disabled = true;
-        this.onboardingSubmitBtn.textContent = '[gerando código...]';
+        this.onboardingSubmitBtn.textContent = '[criando conta...]';
         try {
-          const generatedId = await this.events.onCreateIdentity(name);
-          if (generatedId) {
-            this.generatedCodeBadgeEl.textContent = generatedId;
-            this.generatedCodeBadgeEl.style.display = 'block';
-            tipEl.textContent = 'Seu código Talk2TM foi criado com sucesso! Entrando no chat...';
-          }
+          const result = await this.events.onCreateIdentity({ displayName, phone, pin });
+          this.onboardingFormEl.style.display = 'none';
+          this.recoveryStepCodeEl.textContent = result.recoveryCode;
+          this.recoveryStepStatusEl.textContent = `Conta pronta para ${displayName}. Use seu PIN numérico na calculadora para entrar.`;
+          this.recoveryStepBoxEl.style.display = 'flex';
         } catch (err: any) {
-          let displayMessage = err?.message || 'Falha ao criar identidade.';
-          try {
-            const parsed = JSON.parse(displayMessage);
-            if (parsed && typeof parsed.error === 'string') {
-              displayMessage = parsed.error;
-            }
-          } catch {
-            // Não é JSON estruturado; mantém mensagem original
-          }
-          if (displayMessage.includes('Missing or insufficient permissions')) {
-            displayMessage = 'Permissão negada no Firestore ao salvar o perfil. Verifique as regras publicadas.';
-          }
-          this.onboardingErrorEl.textContent = displayMessage;
+          this.onboardingErrorEl.textContent = this.extractReadableError(err);
+        } finally {
           this.onboardingSubmitBtn.disabled = false;
-          this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
+          this.onboardingSubmitBtn.textContent = '[criar conta]';
+        }
+      }
+    });
+
+    cardEl.appendChild(titleEl);
+    cardEl.appendChild(subtitleEl);
+    cardEl.appendChild(this.onboardingFormEl);
+    cardEl.appendChild(this.recoveryStepBoxEl);
+    this.onboardingViewEl.appendChild(cardEl);
+  }
+
+  /**
+   * Recuperação gratuita de conta (sem SMS, sem e-mail, sem custos):
+   * Telefone + Código de Recuperação + Novo PIN numérico local
+   */
+  private buildRecoveryView(): void {
+    this.recoveryViewEl = document.createElement('div');
+    this.recoveryViewEl.id = 'ttm-recovery-view';
+    this.recoveryViewEl.className = 'ttm-onboarding-box';
+    this.recoveryViewEl.style.display = 'none';
+
+    const cardEl = document.createElement('div');
+    cardEl.className = 'ttm-onboarding-card';
+
+    const titleEl = document.createElement('h1');
+    titleEl.className = 'ttm-title';
+    titleEl.textContent = 'Recuperar Conta';
+
+    const subtitleEl = document.createElement('p');
+    subtitleEl.className = 'ttm-subtitle';
+    subtitleEl.textContent = 'Informe seu telefone, o código de recuperação e defina um novo PIN para este aparelho.';
+
+    const formEl = document.createElement('form');
+    formEl.className = 'ttm-form';
+
+    this.recoveryPhoneInput = document.createElement('input');
+    this.recoveryPhoneInput.type = 'tel';
+    this.recoveryPhoneInput.id = 'ttm-recovery-phone';
+    this.recoveryPhoneInput.className = 'ttm-input ttm-input-left';
+    this.recoveryPhoneInput.placeholder = '1. Telefone (+244 9XX... ou 9XXXXXXXX)';
+    this.recoveryPhoneInput.inputMode = 'tel';
+    this.recoveryPhoneInput.maxLength = 24;
+    this.recoveryPhoneInput.autocomplete = 'tel';
+
+    this.recoveryPhonePreviewEl = document.createElement('div');
+    this.recoveryPhonePreviewEl.className = 'ttm-field-hint';
+    this.recoveryPhonePreviewEl.textContent = 'Use o mesmo número declarado no cadastro.';
+
+    this.recoveryPhoneInput.addEventListener('input', () => {
+      this.updatePhonePreview(this.recoveryPhoneInput.value, this.recoveryPhonePreviewEl);
+    });
+
+    this.recoveryCodeInput = document.createElement('input');
+    this.recoveryCodeInput.type = 'text';
+    this.recoveryCodeInput.id = 'ttm-recovery-code';
+    this.recoveryCodeInput.className = 'ttm-input ttm-input-code';
+    this.recoveryCodeInput.placeholder = '2. Código (XXXX-XXXX-...)';
+    this.recoveryCodeInput.maxLength = 36;
+    this.recoveryCodeInput.autocomplete = 'off';
+
+    const newPin1 = this.createPinInputWithToggle(
+      'ttm-recovery-pin',
+      '3. Novo PIN numérico (4 a 8 dígitos)',
+      8,
+      'new-password'
+    );
+    this.recoveryPinInput = newPin1.input;
+
+    const newPin2 = this.createPinInputWithToggle(
+      'ttm-recovery-pin-confirm',
+      '4. Confirmar novo PIN',
+      8,
+      'new-password'
+    );
+    this.recoveryPinConfirmInput = newPin2.input;
+
+    this.recoveryErrorEl = document.createElement('div');
+    this.recoveryErrorEl.className = 'ttm-error';
+    this.recoveryErrorEl.textContent = '';
+
+    this.recoverySubmitBtn = document.createElement('button');
+    this.recoverySubmitBtn.type = 'submit';
+    this.recoverySubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.recoverySubmitBtn.textContent = '[recuperar e entrar]';
+
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    backBtn.textContent = '[voltar]';
+    backBtn.addEventListener('click', () => {
+      this.showPassEntryView();
+    });
+
+    formEl.appendChild(this.recoveryPhoneInput);
+    formEl.appendChild(this.recoveryPhonePreviewEl);
+    formEl.appendChild(this.recoveryCodeInput);
+    formEl.appendChild(newPin1.wrapper);
+    formEl.appendChild(newPin2.wrapper);
+    formEl.appendChild(this.recoveryErrorEl);
+    formEl.appendChild(this.recoverySubmitBtn);
+    formEl.appendChild(backBtn);
+
+    formEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      this.recoveryErrorEl.textContent = '';
+
+      const phone = this.recoveryPhoneInput.value.trim();
+      const recoveryCode = this.recoveryCodeInput.value.trim();
+      const newPin = this.recoveryPinInput.value.trim();
+      const confirmPin = this.recoveryPinConfirmInput.value.trim();
+
+      const phoneCheck = normalizePhoneNumber(phone);
+      if (!phoneCheck.valid) {
+        this.recoveryErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
+        return;
+      }
+      if (!recoveryCode) {
+        this.recoveryErrorEl.textContent = 'Informe o código de recuperação.';
+        return;
+      }
+      if (!/^\d{4,8}$/.test(newPin)) {
+        this.recoveryErrorEl.textContent = 'O novo PIN deve ter entre 4 e 8 dígitos numéricos.';
+        return;
+      }
+      if (newPin !== confirmPin) {
+        this.recoveryErrorEl.textContent = 'Os dois PINs não coincidem.';
+        return;
+      }
+
+      if (this.events.onRecoverIdentity) {
+        this.recoverySubmitBtn.disabled = true;
+        this.recoverySubmitBtn.textContent = '[recuperando...]';
+        try {
+          await this.events.onRecoverIdentity({ phone, recoveryCode, newPin });
+        } catch (err: any) {
+          this.recoveryErrorEl.textContent = this.extractReadableError(err);
+        } finally {
+          this.recoverySubmitBtn.disabled = false;
+          this.recoverySubmitBtn.textContent = '[recuperar e entrar]';
         }
       }
     });
@@ -399,12 +729,12 @@ export class ChatUI {
     cardEl.appendChild(titleEl);
     cardEl.appendChild(subtitleEl);
     cardEl.appendChild(formEl);
-    this.onboardingViewEl.appendChild(cardEl);
+    this.recoveryViewEl.appendChild(cardEl);
   }
 
   /**
    * Hub de Conexões Bilaterais:
-   * Conta A procura Talk2TM ID da Conta B -> Convite -> Aceitação -> Conversa bilateral 1:1
+   * Descoberta exata pelo número de telefone declarado (sem expor código TM interno).
    */
   private buildConnectView(): void {
     this.connectViewEl = document.createElement('div');
@@ -412,58 +742,242 @@ export class ChatUI {
     this.connectViewEl.className = 'ttm-connect-box';
     this.connectViewEl.style.display = 'none';
 
-    // Cartão 1: Meu Código Talk2TM
+    // Cartão 1: Minha Conta & Segurança Local
     const selfCard = document.createElement('div');
     selfCard.className = 'ttm-connect-card';
 
     const selfTitle = document.createElement('div');
     selfTitle.className = 'ttm-connect-section-title';
-    selfTitle.textContent = 'Meu código Talk2TM';
+    selfTitle.textContent = 'Minha conta';
 
     const selfRow = document.createElement('div');
     selfRow.className = 'ttm-connect-self-row';
 
-    this.connectSelfCodeEl = document.createElement('span');
-    this.connectSelfCodeEl.className = 'ttm-connect-self-code';
-    this.connectSelfCodeEl.textContent = 'TM-XXXX-XXXX';
+    const selfMeta = document.createElement('div');
+    selfMeta.className = 'ttm-connect-item-meta';
 
-    const copyBtn = document.createElement('button');
-    copyBtn.type = 'button';
-    copyBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    copyBtn.textContent = '[copiar]';
-    copyBtn.addEventListener('click', async () => {
-      const code = this.connectSelfCodeEl.textContent || '';
-      if (!code) return;
-      try {
-        await navigator.clipboard?.writeText(code);
-        this.showConnectFeedback('Código copiado para compartilhar com o seu parceiro.');
-      } catch {
-        this.showConnectFeedback(`Partilhe o código: ${code}`);
+    this.connectSelfNameEl = document.createElement('div');
+    this.connectSelfNameEl.className = 'ttm-connect-self-name';
+    this.connectSelfNameEl.textContent = '';
+
+    this.connectSelfPhoneEl = document.createElement('div');
+    this.connectSelfPhoneEl.className = 'ttm-connect-item-sub';
+    this.connectSelfPhoneEl.textContent = '';
+
+    selfMeta.appendChild(this.connectSelfNameEl);
+    selfMeta.appendChild(this.connectSelfPhoneEl);
+
+    const selfActions = document.createElement('div');
+    selfActions.className = 'ttm-connect-item-actions';
+
+    const rotateCodeBtn = document.createElement('button');
+    rotateCodeBtn.type = 'button';
+    rotateCodeBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    rotateCodeBtn.textContent = '[novo código rec.]';
+    rotateCodeBtn.title = 'Gerar novo código de recuperação (invalida o anterior)';
+
+    const changePinBtn = document.createElement('button');
+    changePinBtn.type = 'button';
+    changePinBtn.className = 'ttm-btn-mini';
+    changePinBtn.textContent = '[alterar PIN]';
+
+    selfActions.appendChild(rotateCodeBtn);
+    selfActions.appendChild(changePinBtn);
+    selfRow.appendChild(selfMeta);
+    selfRow.appendChild(selfActions);
+
+    // Painel inline: Gerar novo código de recuperação
+    this.connectRecoveryPanelEl = document.createElement('div');
+    this.connectRecoveryPanelEl.className = 'ttm-inline-security-panel';
+    this.connectRecoveryPanelEl.style.display = 'none';
+
+    const rotForm = document.createElement('form');
+    rotForm.className = 'ttm-inline-form';
+    const rotPinInput = document.createElement('input');
+    rotPinInput.type = 'password';
+    rotPinInput.inputMode = 'numeric';
+    rotPinInput.maxLength = 8;
+    rotPinInput.placeholder = 'Confirme seu PIN atual';
+    rotPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    const rotSubmitBtn = document.createElement('button');
+    rotSubmitBtn.type = 'submit';
+    rotSubmitBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    rotSubmitBtn.textContent = '[gerar]';
+    const rotResultEl = document.createElement('div');
+    rotResultEl.className = 'ttm-code-badge ttm-code-badge-compact';
+    rotResultEl.style.display = 'none';
+    const rotHintEl = document.createElement('div');
+    rotHintEl.className = 'ttm-field-hint';
+    rotHintEl.textContent = 'Gerar um novo código invalida o anterior.';
+    const rotCopyBtn = document.createElement('button');
+    rotCopyBtn.type = 'button';
+    rotCopyBtn.className = 'ttm-btn-mini';
+    rotCopyBtn.textContent = '[copiar novo código]';
+    rotCopyBtn.style.display = 'none';
+    rotCopyBtn.addEventListener('click', async () => {
+      const code = rotResultEl.textContent || '';
+      if (code) {
+        await navigator.clipboard?.writeText(code).catch(() => {});
+        this.showConnectFeedback('Novo código de recuperação copiado.');
       }
     });
 
-    selfRow.appendChild(this.connectSelfCodeEl);
-    selfRow.appendChild(copyBtn);
+    rotForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const pin = rotPinInput.value.trim();
+      if (!/^\d{4,8}$/.test(pin)) {
+        this.showConnectFeedback('Digite seu PIN atual (4 a 8 dígitos).', true);
+        return;
+      }
+      if (!this.events.onRegenerateRecoveryCode) return;
+      rotSubmitBtn.disabled = true;
+      try {
+        const newCode = await this.events.onRegenerateRecoveryCode(pin);
+        rotPinInput.value = '';
+        rotResultEl.textContent = newCode;
+        rotResultEl.style.display = 'block';
+        rotCopyBtn.style.display = 'inline-block';
+        rotHintEl.textContent = 'Novo código gerado! Guarde em local seguro.';
+        this.showConnectFeedback('Código de recuperação atualizado.');
+      } catch (err) {
+        this.showConnectFeedback(this.extractReadableError(err), true);
+      } finally {
+        rotSubmitBtn.disabled = false;
+      }
+    });
+
+    rotForm.appendChild(rotPinInput);
+    rotForm.appendChild(rotSubmitBtn);
+    this.connectRecoveryPanelEl.appendChild(rotHintEl);
+    this.connectRecoveryPanelEl.appendChild(rotForm);
+    this.connectRecoveryPanelEl.appendChild(rotResultEl);
+    this.connectRecoveryPanelEl.appendChild(rotCopyBtn);
+
+    // Painel inline: Alterar PIN local
+    this.connectPinPanelEl = document.createElement('div');
+    this.connectPinPanelEl.className = 'ttm-inline-security-panel';
+    this.connectPinPanelEl.style.display = 'none';
+
+    const pinForm = document.createElement('form');
+    pinForm.className = 'ttm-form';
+    const curPinInp = document.createElement('input');
+    curPinInp.type = 'password';
+    curPinInp.inputMode = 'numeric';
+    curPinInp.maxLength = 8;
+    curPinInp.placeholder = 'PIN atual';
+    curPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
+    const nextPinInp = document.createElement('input');
+    nextPinInp.type = 'password';
+    nextPinInp.inputMode = 'numeric';
+    nextPinInp.maxLength = 8;
+    nextPinInp.placeholder = 'Novo PIN (4 a 8 dígitos)';
+    nextPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
+    const nextPinConfInp = document.createElement('input');
+    nextPinConfInp.type = 'password';
+    nextPinConfInp.inputMode = 'numeric';
+    nextPinConfInp.maxLength = 8;
+    nextPinConfInp.placeholder = 'Confirmar novo PIN';
+    nextPinConfInp.className = 'ttm-connect-input ttm-connect-input-phone';
+    const savePinBtn = document.createElement('button');
+    savePinBtn.type = 'submit';
+    savePinBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    savePinBtn.textContent = '[salvar novo PIN]';
+
+    pinForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const cur = curPinInp.value.trim();
+      const next = nextPinInp.value.trim();
+      const conf = nextPinConfInp.value.trim();
+      if (!/^\d{4,8}$/.test(cur) || !/^\d{4,8}$/.test(next)) {
+        this.showConnectFeedback('Os PINs devem ter entre 4 e 8 dígitos numéricos.', true);
+        return;
+      }
+      if (next !== conf) {
+        this.showConnectFeedback('O novo PIN e a confirmação não coincidem.', true);
+        return;
+      }
+      if (!this.events.onChangeLocalPin) return;
+      savePinBtn.disabled = true;
+      try {
+        await this.events.onChangeLocalPin(cur, next);
+        curPinInp.value = '';
+        nextPinInp.value = '';
+        nextPinConfInp.value = '';
+        this.connectPinPanelEl.style.display = 'none';
+        this.showConnectFeedback('PIN da calculadora alterado com sucesso neste aparelho.');
+      } catch (err) {
+        this.showConnectFeedback(this.extractReadableError(err), true);
+      } finally {
+        savePinBtn.disabled = false;
+      }
+    });
+
+    pinForm.appendChild(curPinInp);
+    pinForm.appendChild(nextPinInp);
+    pinForm.appendChild(nextPinConfInp);
+    pinForm.appendChild(savePinBtn);
+    this.connectPinPanelEl.appendChild(pinForm);
+
+    rotateCodeBtn.addEventListener('click', () => {
+      const visible = this.connectRecoveryPanelEl.style.display === 'flex';
+      this.connectRecoveryPanelEl.style.display = visible ? 'none' : 'flex';
+      this.connectPinPanelEl.style.display = 'none';
+      rotResultEl.style.display = 'none';
+      rotCopyBtn.style.display = 'none';
+    });
+
+    changePinBtn.addEventListener('click', () => {
+      const visible = this.connectPinPanelEl.style.display === 'flex';
+      this.connectPinPanelEl.style.display = visible ? 'none' : 'flex';
+      this.connectRecoveryPanelEl.style.display = 'none';
+    });
+
     selfCard.appendChild(selfTitle);
     selfCard.appendChild(selfRow);
+    selfCard.appendChild(this.connectRecoveryPanelEl);
+    selfCard.appendChild(this.connectPinPanelEl);
 
-    // Cartão 2: Convidar Conta B por Talk2TM ID
+    // Cartão 2: Procurar contacto por telefone exato e convidar
     const inviteCard = document.createElement('div');
     inviteCard.className = 'ttm-connect-card';
 
     const inviteTitle = document.createElement('div');
     inviteTitle.className = 'ttm-connect-section-title';
-    inviteTitle.textContent = 'Convidar para conversa bilateral';
+    inviteTitle.textContent = 'Convidar por número de telefone';
 
     const inviteForm = document.createElement('form');
     inviteForm.className = 'ttm-connect-form';
 
     this.connectTargetInput = document.createElement('input');
-    this.connectTargetInput.type = 'text';
-    this.connectTargetInput.className = 'ttm-connect-input';
-    this.connectTargetInput.placeholder = 'TM-XXXX-XXXX';
-    this.connectTargetInput.maxLength = 12;
-    this.connectTargetInput.autocomplete = 'off';
+    this.connectTargetInput.type = 'tel';
+    this.connectTargetInput.inputMode = 'tel';
+    this.connectTargetInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectTargetInput.placeholder = '+244 9XX XXX XXX ou 9XXXXXXXX';
+    this.connectTargetInput.maxLength = 24;
+    this.connectTargetInput.autocomplete = 'tel';
+
+    this.connectTargetPreviewEl = document.createElement('div');
+    this.connectTargetPreviewEl.className = 'ttm-field-hint';
+    this.connectTargetPreviewEl.textContent = 'Pesquisa exata por número declarado.';
+
+    this.connectTargetInput.addEventListener('input', () => {
+      const raw = this.connectTargetInput.value.trim();
+      if (!raw) {
+        this.connectTargetPreviewEl.textContent = 'Pesquisa exata por número declarado.';
+        this.connectTargetPreviewEl.classList.remove('is-valid', 'is-invalid');
+        return;
+      }
+      const res = normalizePhoneNumber(raw);
+      if (res.valid && res.e164) {
+        this.connectTargetPreviewEl.textContent = `Procurar: ${res.e164}`;
+        this.connectTargetPreviewEl.classList.add('is-valid');
+        this.connectTargetPreviewEl.classList.remove('is-invalid');
+      } else {
+        this.connectTargetPreviewEl.textContent = res.error || 'Número inválido.';
+        this.connectTargetPreviewEl.classList.add('is-invalid');
+        this.connectTargetPreviewEl.classList.remove('is-valid');
+      }
+    });
 
     this.connectInviteBtn = document.createElement('button');
     this.connectInviteBtn.type = 'submit';
@@ -475,9 +989,9 @@ export class ChatUI {
 
     inviteForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const targetId = this.connectTargetInput.value.trim().toUpperCase();
-      if (!targetId) {
-        this.showConnectFeedback('Informe o código TM-XXXX-XXXX do parceiro.', true);
+      const targetPhone = this.connectTargetInput.value.trim();
+      if (!targetPhone) {
+        this.showConnectFeedback('Informe o número de telefone do contacto.', true);
         return;
       }
       if (!this.events.onSendInvite) return;
@@ -485,8 +999,10 @@ export class ChatUI {
       this.connectInviteBtn.textContent = '[enviando...]';
       this.showConnectFeedback('');
       try {
-        await this.events.onSendInvite(targetId);
+        await this.events.onSendInvite(targetPhone);
         this.connectTargetInput.value = '';
+        this.connectTargetPreviewEl.textContent = 'Pesquisa exata por número declarado.';
+        this.connectTargetPreviewEl.classList.remove('is-valid', 'is-invalid');
       } catch (err: any) {
         this.showConnectFeedback(this.extractReadableError(err), true);
       } finally {
@@ -499,6 +1015,7 @@ export class ChatUI {
     inviteForm.appendChild(this.connectInviteBtn);
     inviteCard.appendChild(inviteTitle);
     inviteCard.appendChild(inviteForm);
+    inviteCard.appendChild(this.connectTargetPreviewEl);
     inviteCard.appendChild(this.connectFeedbackEl);
 
     // Cartão 3: Convites Recebidos
@@ -528,7 +1045,7 @@ export class ChatUI {
     convCard.className = 'ttm-connect-card';
     const convTitle = document.createElement('div');
     convTitle.className = 'ttm-connect-section-title';
-    convTitle.textContent = 'Conversas bilaterais';
+    convTitle.textContent = 'Conversas';
     this.conversationsListEl = document.createElement('div');
     this.conversationsListEl.className = 'ttm-connect-list';
     convCard.appendChild(convTitle);
@@ -888,12 +1405,19 @@ export class ChatUI {
     });
   }
 
+  public cacheOutgoingInviteTargetName(inviteId: string, displayName: string): void {
+    if (inviteId && displayName) {
+      this.outgoingTargetNameCache.set(inviteId, displayName);
+    }
+  }
+
   public showCalculatorView(): void {
     this.exitSelectionMode();
     this.closeSettingsModal();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.calculator.show();
@@ -906,10 +1430,11 @@ export class ChatUI {
     this.chatViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'none';
     this.passViewEl.style.display = 'flex';
     this.singlePassInput.value = '';
+    this.singlePassInput.type = 'password';
     this.passErrorEl.textContent = '';
-    // Auto-focus para teclado físico e mobile
     setTimeout(() => {
       this.singlePassInput.focus();
     }, 100);
@@ -920,16 +1445,49 @@ export class ChatUI {
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'flex';
+    this.onboardingFormEl.style.display = 'flex';
+    this.recoveryStepBoxEl.style.display = 'none';
     this.onboardingNameInput.value = '';
+    this.onboardingPhoneInput.value = '';
+    this.onboardingPinInput.value = '';
+    this.onboardingPinConfirmInput.value = '';
+    this.onboardingPinInput.type = 'password';
+    this.onboardingPinConfirmInput.type = 'password';
     this.onboardingErrorEl.textContent = '';
-    this.generatedCodeBadgeEl.style.display = 'none';
+    this.updatePhonePreview('', this.onboardingPhonePreviewEl);
     this.onboardingSubmitBtn.disabled = false;
-    this.onboardingSubmitBtn.textContent = '[gerar meu código e entrar]';
+    this.onboardingSubmitBtn.textContent = '[criar conta]';
     setTimeout(() => {
       this.onboardingNameInput.focus();
+    }, 100);
+  }
+
+  public showRecoveryView(): void {
+    this.closeSettingsModal();
+    this.calculator.hide();
+    this.headerEl.style.display = 'none';
+    this.passViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'none';
+    this.connectViewEl.style.display = 'none';
+    this.chatViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'flex';
+    this.recoveryPhoneInput.value = '';
+    this.recoveryCodeInput.value = '';
+    this.recoveryPinInput.value = '';
+    this.recoveryPinConfirmInput.value = '';
+    this.recoveryPinInput.type = 'password';
+    this.recoveryPinConfirmInput.type = 'password';
+    this.recoveryErrorEl.textContent = '';
+    this.recoveryPhonePreviewEl.textContent = 'Use o mesmo número declarado no cadastro.';
+    this.recoveryPhonePreviewEl.classList.remove('is-valid', 'is-invalid');
+    this.recoverySubmitBtn.disabled = false;
+    this.recoverySubmitBtn.textContent = '[recuperar e entrar]';
+    setTimeout(() => {
+      this.recoveryPhoneInput.focus();
     }, 100);
   }
 
@@ -940,15 +1498,20 @@ export class ChatUI {
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
     this.connectViewEl.style.display = 'flex';
+    this.connectRecoveryPanelEl.style.display = 'none';
+    this.connectPinPanelEl.style.display = 'none';
     this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
-    this.connectSelfCodeEl.textContent = session.talk2tmId || '';
+    this.connectSelfNameEl.textContent = session.displayName || 'Minha conta';
+    this.connectSelfPhoneEl.textContent = session.phoneMasked
+      ? `${session.phoneMasked} · descoberta ativa`
+      : 'Descoberta ativa pelo número declarado';
     this.connectFeedbackEl.textContent = '';
     this.connectFeedbackEl.classList.remove('is-error');
-    const idLabel = session.talk2tmId ? ` [${session.talk2tmId}]` : '';
-    this.roomInfoEl.textContent = `você: ${session.displayName}${idLabel} | convide ou aceite um parceiro`;
+    this.roomInfoEl.textContent = `você: ${session.displayName} | convide por telefone ou aceite um convite`;
   }
 
   public isConnectViewActive(): boolean {
@@ -972,7 +1535,7 @@ export class ChatUI {
   }): void {
     if (!this.incomingInvitesListEl || !this.outgoingInvitesListEl || !this.conversationsListEl) return;
 
-    // 1. Convites recebidos
+    // 1. Convites recebidos — formato minimalista obrigatório: «[Nome] quer conversar contigo»
     this.incomingInvitesListEl.innerHTML = '';
     if (data.incoming.length === 0) {
       const empty = document.createElement('div');
@@ -988,12 +1551,9 @@ export class ChatUI {
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = inv.fromDisplayName || inv.fromTalk2tmId;
-        const subEl = document.createElement('div');
-        subEl.className = 'ttm-connect-item-sub';
-        subEl.textContent = inv.fromTalk2tmId;
+        const senderName = inv.fromDisplayName || 'Contacto';
+        nameEl.textContent = `${senderName} quer conversar contigo`;
         meta.appendChild(nameEl);
-        meta.appendChild(subEl);
 
         const actions = document.createElement('div');
         actions.className = 'ttm-connect-item-actions';
@@ -1034,7 +1594,7 @@ export class ChatUI {
       });
     }
 
-    // 2. Convites enviados
+    // 2. Convites enviados (sem expor TM-XXXX-XXXX)
     this.outgoingInvitesListEl.innerHTML = '';
     const pendingOutgoing = data.outgoing.filter((i) => i.status === 'pending');
     if (pendingOutgoing.length === 0) {
@@ -1051,7 +1611,7 @@ export class ChatUI {
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = inv.toTalk2tmId;
+        nameEl.textContent = this.outgoingTargetNameCache.get(inv.inviteId) || 'Convite enviado';
         const subEl = document.createElement('div');
         subEl.className = 'ttm-connect-item-sub';
         subEl.textContent = 'Aguardando aceitação...';
@@ -1082,19 +1642,18 @@ export class ChatUI {
       });
     }
 
-    // 3. Conversas Bilaterais Ativas
+    // 3. Conversas Bilaterais Ativas (apenas nomes, sem expor TM-XXXX-XXXX)
     this.conversationsListEl.innerHTML = '';
     if (data.conversations.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'ttm-connect-empty';
-      empty.textContent = 'Nenhuma conversa bilateral ativa ainda.';
+      empty.textContent = 'Nenhuma conversa ativa ainda.';
       this.conversationsListEl.appendChild(empty);
     } else {
       const myUid = this.currentSession?.userId;
       data.conversations.forEach((conv) => {
         const isA = conv.participantA === myUid;
         const partnerName = isA ? conv.displayNameB : conv.displayNameA;
-        const partnerCode = isA ? conv.talk2tmIdB : conv.talk2tmIdA;
 
         const item = document.createElement('div');
         item.className = 'ttm-connect-item';
@@ -1103,10 +1662,10 @@ export class ChatUI {
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = partnerName || partnerCode;
+        nameEl.textContent = partnerName || 'Contacto';
         const subEl = document.createElement('div');
         subEl.className = 'ttm-connect-item-sub';
-        subEl.textContent = partnerCode;
+        subEl.textContent = 'Conversa privada 1:1';
         meta.appendChild(nameEl);
         meta.appendChild(subEl);
 
@@ -1162,6 +1721,7 @@ export class ChatUI {
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
     this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
@@ -1172,7 +1732,7 @@ export class ChatUI {
       this.updateRoomInfo(room, session);
       this.updateReadReceipts(room, session);
     } else if (session.talk2tmId) {
-      this.roomInfoEl.textContent = `você: ${session.displayName} [${session.talk2tmId}] | conversa bilateral`;
+      this.roomInfoEl.textContent = `você: ${session.displayName} | conversa bilateral`;
     }
     setTimeout(() => {
       this.msgInputEl.focus();
@@ -1224,8 +1784,7 @@ export class ChatUI {
       partnerStatus = `conectado com: ${partnerName || 'parceiro'}`;
     }
 
-    const idLabel = session.talk2tmId ? ` [${session.talk2tmId}]` : '';
-    this.roomInfoEl.textContent = `você: ${session.displayName}${idLabel} | ${partnerStatus}`;
+    this.roomInfoEl.textContent = `você: ${session.displayName} | ${partnerStatus}`;
   }
 
   public setHasOlderMessages(hasOlder: boolean): void {

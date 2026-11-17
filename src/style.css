@@ -953,8 +953,9 @@ html, body {
   display: flex;
   flex-direction: column;
   flex: 1;
-  padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)) 20px;
-  justify-content: center;
+  overflow-y: auto;
+  padding: max(28px, env(safe-area-inset-top)) 20px max(28px, env(safe-area-inset-bottom)) 20px;
+  justify-content: flex-start;
   align-items: center;
   background-color: var(--bg-dark);
 }
@@ -965,6 +966,7 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  margin: auto 0;
 }
 
 .ttm-code-badge {
@@ -1145,4 +1147,115 @@ html, body {
   font-size: 11.5px;
   color: var(--text-muted);
 }
+
+/* Zero-Cost Identity & Vault Controls */
+.ttm-input-group {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.ttm-input-with-toggle {
+  padding-right: 68px;
+}
+
+.ttm-toggle-vis-btn {
+  position: absolute;
+  right: 8px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ttm-toggle-vis-btn:hover {
+  color: var(--text-main);
+  border-color: var(--accent-blue);
+}
+
+.ttm-input-left {
+  text-align: left;
+  letter-spacing: 0.3px;
+  font-size: 15px;
+}
+
+.ttm-input-code {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.ttm-field-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.35;
+  margin-top: -6px;
+}
+
+.ttm-field-hint.is-valid {
+  color: var(--success-color);
+}
+
+.ttm-field-hint.is-invalid {
+  color: var(--error-color);
+}
+
+.ttm-recovery-confirm-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 16px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.ttm-recovery-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  text-align: center;
+}
+
+.ttm-code-badge-compact {
+  font-size: 13px;
+  letter-spacing: 1px;
+  padding: 10px 12px;
+  margin: 4px 0;
+  word-break: break-all;
+}
+
+.ttm-connect-self-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.ttm-connect-input-phone {
+  text-transform: none;
+  letter-spacing: 0.3px;
+}
+
+.ttm-inline-security-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.ttm-inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 

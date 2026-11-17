@@ -10,6 +10,7 @@ import { getUserByPin, AllowedUser } from '../config';
 
 export interface CalculatorCallbacks {
   onUnlock: (user: AllowedUser, pin: string) => void;
+  onCheckCustomPin?: (displayValue: string, inputSequence: string) => Promise<boolean>;
   onOpenManualEntry?: () => void;
 }
 
@@ -23,6 +24,7 @@ export class MobileCalculator {
   private operand: number | null = null;
   private waitingForOperand: boolean = false;
   private inputSequence: string = '';
+  private customPinCheckSeq: number = 0;
 
   private displayEl!: HTMLElement;
   private expressionEl!: HTMLElement;
@@ -171,6 +173,7 @@ export class MobileCalculator {
         if (this.checkSecretUnlock()) {
           return;
         }
+        this.triggerCustomPinCheck();
         this.performEquals();
       } else if (key === 'Backspace') {
         this.backspace();
@@ -233,6 +236,21 @@ export class MobileCalculator {
     return false;
   }
 
+  private triggerCustomPinCheck(): void {
+    if (!this.callbacks.onCheckCustomPin || !this.isVisible) return;
+    const seq = ++this.customPinCheckSeq;
+    const displaySnap = this.displayValue.trim();
+    const sequenceSnap = this.inputSequence;
+
+    void this.callbacks.onCheckCustomPin(displaySnap, sequenceSnap).then((unlocked) => {
+      if (unlocked && seq === this.customPinCheckSeq) {
+        this.clear();
+      }
+    }).catch(() => {
+      // Silencioso: nunca quebra a calculadora
+    });
+  }
+
   public inputDigit(digit: string): void {
     this.inputSequence += digit;
     if (this.inputSequence.length > 30) {
@@ -248,8 +266,10 @@ export class MobileCalculator {
 
     this.updateDisplay();
 
-    // Verificação instantânea do segredo a cada tecla digitada
-    this.checkSecretUnlock();
+    // Verificação instantânea do segredo legado e, em seguida, PINs numéricos locais (4-8 dígitos)
+    if (!this.checkSecretUnlock()) {
+      this.triggerCustomPinCheck();
+    }
   }
 
   public inputDot(): void {

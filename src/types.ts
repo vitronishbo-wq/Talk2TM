@@ -40,6 +40,7 @@ export interface UserSession {
   roomId: string;
   talk2tmId?: string;
   conversationId?: string;
+  phoneMasked?: string;
 }
 
 export interface ChatConfig {
@@ -52,7 +53,7 @@ export interface ChatConfig {
 
 /**
  * ====================================================================
- * EXPANSION ARCHITECTURE V1: AS 5 ENTIDADES ENXUTAS DO TALK2TM
+ * EXPANSION ARCHITECTURE V1: AS ENTIDADES ENXUTAS DO TALK2TM
  * Cadeia Obrigatória: Auth UID -> Identidade -> Conversation -> Messages
  * ====================================================================
  */
@@ -64,6 +65,8 @@ export interface UserAccount {
   uid: string;
   talk2tmId: string;
   createdAt: string;
+  phoneHash?: string;
+  phoneMasked?: string;
 }
 
 /**
@@ -72,6 +75,18 @@ export interface UserAccount {
 export interface UserProfile {
   talk2tmId: string;
   uid: string;
+  displayName: string;
+  active: boolean;
+  createdAt: string;
+}
+
+/**
+ * 2b. phoneLookup/{phoneHash} — Índice exato por hash SHA-256 do telefone (nunca expõe número bruto)
+ */
+export interface PhoneDirectoryEntry {
+  phoneHash: string;
+  uid: string;
+  talk2tmId: string;
   displayName: string;
   active: boolean;
   createdAt: string;

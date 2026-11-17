@@ -1092,6 +1092,123 @@ async function runEmulatorRulesTests(): Promise<void> {
       // Autenticado ainda consegue verificar existência prévia de conversa/convite inexistente
       const nonExistentConv = await assertSucceeds(getDoc(doc(dbA, 'conversations', 'conv_inexistente_999')));
       assert(!nonExistentConv.exists(), 'Documento inexistente consultado por utilizador autenticado deve retornar exists() === false');
+
+      // Leitura não autenticada em phoneLookup também é rejeitada
+      await assertFails(getDoc(doc(dbUnauth, 'phoneLookup', 'a'.repeat(64))));
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 17: Descoberta por phoneLookup/{phoneHash} (anti-enumeração + integridade)
+    // -----------------------------------------------------------------------
+    await testCase('17. phoneLookup/{phoneHash}: criação vinculada, busca exata autenticada, listagem bloqueada e anti-duplicação', async () => {
+      const uidE = 'uid_user_eee_555';
+      const talkIdE = 'TM-EEEE-6666';
+      const phoneHashE = 'e'.repeat(64);
+      const phoneHashBad = 'not-a-sha256-hash';
+      const ctxE = testEnv.authenticatedContext(uidE, { email: `u_${phoneHashE.slice(0, 32)}@talk2tm.internal` });
+      const dbE = ctxE.firestore();
+
+      // users/{uid} rejeita phoneHash inválido
+      await assertFails(
+        setDoc(doc(dbE, 'users', uidE), {
+          uid: uidE,
+          talk2tmId: talkIdE,
+          phoneHash: phoneHashBad,
+          phoneMasked: '+244 ••• 555',
+          createdAt: nowIso,
+        })
+      );
+
+      // users/{uid} aceita phoneHash SHA-256 válido + phoneMasked
+      await assertSucceeds(
+        setDoc(doc(dbE, 'users', uidE), {
+          uid: uidE,
+          talk2tmId: talkIdE,
+          phoneHash: phoneHashE,
+          phoneMasked: '+244 ••• 555',
+          createdAt: nowIso,
+        })
+      );
+
+      // Não pode criar phoneLookup antes de criar userProfiles/{talkIdE}
+      await assertFails(
+        setDoc(doc(dbE, 'phoneLookup', phoneHashE), {
+          phoneHash: phoneHashE,
+          uid: uidE,
+          talk2tmId: talkIdE,
+          displayName: 'Conta E',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+
+      await assertSucceeds(
+        setDoc(doc(dbE, 'userProfiles', talkIdE), {
+          talk2tmId: talkIdE,
+          uid: uidE,
+          displayName: 'Conta E',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+
+      // Não pode registrar phoneLookup com nome divergente ou falsificando UID/TM-ID alheio
+      await assertFails(
+        setDoc(doc(dbE, 'phoneLookup', phoneHashE), {
+          phoneHash: phoneHashE,
+          uid: uidE,
+          talk2tmId: talkIdE,
+          displayName: 'Nome Diferente',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+      await assertFails(
+        setDoc(doc(dbE, 'phoneLookup', phoneHashE), {
+          phoneHash: phoneHashE,
+          uid: uidA,
+          talk2tmId: talkIdA,
+          displayName: 'Conta A',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+
+      // Criação legítima de phoneLookup/{phoneHashE}
+      await assertSucceeds(
+        setDoc(doc(dbE, 'phoneLookup', phoneHashE), {
+          phoneHash: phoneHashE,
+          uid: uidE,
+          talk2tmId: talkIdE,
+          displayName: 'Conta E',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+
+      // Outro utilizador autenticado (A) consegue consultar exatamente pelo hash, mas NÃO consegue listar (anti-enumeração)
+      const lookupSnap = await assertSucceeds(getDoc(doc(dbA, 'phoneLookup', phoneHashE)));
+      assert(lookupSnap.exists() && lookupSnap.data().talk2tmId === talkIdE, 'Busca exata autenticada deve retornar perfil E');
+      await assertFails(getDocs(collection(dbA, 'phoneLookup')));
+
+      // Bloqueia duplicação/sequestro do mesmo número por outro utilizador ou exclusão
+      await assertFails(
+        setDoc(doc(dbA, 'phoneLookup', phoneHashE), {
+          phoneHash: phoneHashE,
+          uid: uidA,
+          talk2tmId: talkIdA,
+          displayName: 'Conta A',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+      await assertFails(updateDoc(doc(dbA, 'phoneLookup', phoneHashE), { active: false }));
+      await assertFails(deleteDoc(doc(dbE, 'phoneLookup', phoneHashE)));
+
+      // Atualização pelo dono requer sincronismo com displayName de userProfiles
+      await assertFails(updateDoc(doc(dbE, 'phoneLookup', phoneHashE), { displayName: 'Conta E Editada' }));
+      await assertSucceeds(updateDoc(doc(dbE, 'userProfiles', talkIdE), { displayName: 'Conta E Editada', active: true }));
+      await assertSucceeds(updateDoc(doc(dbE, 'phoneLookup', phoneHashE), { displayName: 'Conta E Editada', active: true }));
     });
 
     console.log(`\n\x1b[32m✔ Firebase Emulator Suite: ${passed}/${total} cenários reais aprovados com 100% de rigor.\x1b[0m`);
