@@ -1436,12 +1436,14 @@ export function subscribeToOutgoingInvites(
  */
 export function subscribeToUserConversations(
   myUid: string,
-  onUpdate: (conversations: Conversation[]) => void
+  onUpdate: (conversations: Conversation[], meta?: { fromCache: boolean }) => void
 ): Unsubscribe | null {
   if (!firestoreDb || !isAuthValidAndNonAnonymous() || !myUid) return null;
 
   const convMapA = new Map<string, Conversation>();
   const convMapB = new Map<string, Conversation>();
+  let fromCacheA = true;
+  let fromCacheB = true;
 
   const emitMerged = () => {
     const merged = new Map<string, Conversation>();
@@ -1450,12 +1452,13 @@ export function subscribeToUserConversations(
     const list = Array.from(merged.values()).sort((a, b) =>
       (b.updatedAt || '').localeCompare(a.updatedAt || '')
     );
-    onUpdate(list);
+    onUpdate(list, { fromCache: fromCacheA && fromCacheB });
   };
 
   const unsubA = onSnapshot(
     query(collection(firestoreDb, 'conversations'), where('participantA', '==', myUid)),
     (snap) => {
+      fromCacheA = snap.metadata.fromCache;
       convMapA.clear();
       snap.forEach((d) => {
         const c = d.data() as Conversation;
@@ -1469,6 +1472,7 @@ export function subscribeToUserConversations(
   const unsubB = onSnapshot(
     query(collection(firestoreDb, 'conversations'), where('participantB', '==', myUid)),
     (snap) => {
+      fromCacheB = snap.metadata.fromCache;
       convMapB.clear();
       snap.forEach((d) => {
         const c = d.data() as Conversation;

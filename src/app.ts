@@ -30,6 +30,7 @@ import {
   getLocalRoom,
   saveLocalConversation,
   getLocalConversation,
+  getLocalConversationsForUser,
   updateLocalLastRead,
   saveSession,
   getSession,
@@ -184,6 +185,7 @@ export class Talk2TMApp {
   private hubIncomingInvites: ConversationInvite[] = [];
   private hubOutgoingInvites: ConversationInvite[] = [];
   private hubConversations: Conversation[] = [];
+  private hubHasRemoteConversationsSnapshot: boolean = false;
   private knownAcceptedInviteIds: Set<string> = new Set();
   private pendingOnboardingSession: UserSession | null = null;
   private isCheckingCustomPin: boolean = false;
@@ -1567,9 +1569,15 @@ export class Talk2TMApp {
         await this.connectToConversation(lastConvId);
       }
     } else {
-      // Abre Hub de Conexões imediatamente e acopla listeners após consolidar Auth da conta correta
+      // Abre Hub de Conexões imediatamente com pré-carregamento do IndexedDB e consolida Auth/Firestore em segundo plano
+      this.hubHasRemoteConversationsSnapshot = false;
+      this.hubIncomingInvites = [];
+      this.hubOutgoingInvites = [];
+      this.hubConversations = [];
       this.ui.showConnectView(session);
+      this.renderConnectHubData();
       this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
+      void this.preloadLocalHubConversations(session.userId);
       const authRes = await authPromise;
       if (authRes?.displayName && authRes.displayName !== session.displayName) {
         session.displayName = authRes.displayName;
@@ -1684,8 +1692,24 @@ export class Talk2TMApp {
     });
   }
 
+  private async preloadLocalHubConversations(uid: string): Promise<void> {
+    if (!uid) return;
+    const cached = await getLocalConversationsForUser(uid).catch(() => []);
+    if (
+      this.hubHasRemoteConversationsSnapshot ||
+      !this.ui.isConnectViewActive() ||
+      this.currentSession?.userId !== uid
+    ) {
+      return;
+    }
+    if (cached.length > 0) {
+      this.hubConversations = cached;
+      this.renderConnectHubData();
+    }
+  }
+
   /**
-   * Abre o Hub de Conexões Bilaterais (descoberta por número exato de telefone).
+   * Abre o Hub de Conexões Bilaterais (descoberta por número exato de telefone + pré-carregamento local de conversas).
    */
   public async openBilateralHub(session: UserSession): Promise<void> {
     this.stopActiveChatSyncLoop();
@@ -1707,9 +1731,18 @@ export class Talk2TMApp {
     this.currentRoom = null;
     saveSession(hubSession);
 
+    const sameHubConversations =
+      this.hubConversations.length > 0 &&
+      this.hubConversations.every(
+        (c) => c.participantA === hubSession.userId || c.participantB === hubSession.userId
+      );
+
     this.hubIncomingInvites = [];
     this.hubOutgoingInvites = [];
-    this.hubConversations = [];
+    this.hubHasRemoteConversationsSnapshot = false;
+    if (!sameHubConversations) {
+      this.hubConversations = [];
+    }
     this.knownAcceptedInviteIds.clear();
 
     this.ui.showConnectView(hubSession);
@@ -1717,6 +1750,9 @@ export class Talk2TMApp {
     this.startSessionTimeout();
     this.resetInactivityTimer();
     this.renderConnectHubData();
+
+    // Pré-carrega conversas já sincronizadas no IndexedDB imediatamente (sem bloquear Auth/rede)
+    void this.preloadLocalHubConversations(hubSession.userId);
 
     if (!isAuthValidAndNonAnonymous()) {
       await waitForAuthCompletion(3000);
@@ -1770,7 +1806,12 @@ export class Talk2TMApp {
       this.renderConnectHubData();
     });
 
-    this.unsubscribeUserConversations = subscribeToUserConversations(myUid, (conversations) => {
+    this.unsubscribeUserConversations = subscribeToUserConversations(myUid, (conversations, meta) => {
+      // Se o snapshot vier apenas de cache vazio offline e já pré-carregámos do IndexedDB, preserva os dados locais
+      if (meta?.fromCache && conversations.length === 0 && this.hubConversations.length > 0) {
+        return;
+      }
+      this.hubHasRemoteConversationsSnapshot = !meta?.fromCache || conversations.length > 0;
       this.hubConversations = conversations;
       conversations.forEach((c) => saveLocalConversation(c).catch(() => {}));
       this.renderConnectHubData();
@@ -1791,8 +1832,11 @@ export class Talk2TMApp {
         { uid: invite.toUid, talk2tmId: invite.toTalk2tmId, displayName: partnerDisplayName }
       ).catch(() => null);
     }
-    if (conv && this.ui.isConnectViewActive()) {
-      await this.connectToConversation(conv.conversationId);
+    if (conv) {
+      await saveLocalConversation(conv).catch(() => {});
+      if (this.ui.isConnectViewActive()) {
+        await this.connectToConversation(conv.conversationId);
+      }
     }
   }
 

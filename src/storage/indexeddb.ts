@@ -421,6 +421,41 @@ export async function getAllLocalConversations(): Promise<Conversation[]> {
 }
 
 /**
+ * Filtra conversas bilaterais pertencentes estritamente ao UID ativo e ordena da mais recente para a mais antiga.
+ */
+export function filterAndSortConversationsForUser(
+  conversations: Conversation[],
+  uid: string
+): Conversation[] {
+  if (!uid || !Array.isArray(conversations)) return [];
+  const seen = new Map<string, Conversation>();
+  for (const conv of conversations) {
+    if (!conv || !conv.conversationId) continue;
+    if (conv.participantA !== uid && conv.participantB !== uid) continue;
+    const existing = seen.get(conv.conversationId);
+    if (!existing || (conv.updatedAt || '') > (existing.updatedAt || '')) {
+      seen.set(conv.conversationId, conv);
+    }
+  }
+  return Array.from(seen.values()).sort((a, b) =>
+    (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '')
+  );
+}
+
+/**
+ * Pré-carrega instantaneamente as conversas já sincronizadas no IndexedDB para o UID especificado.
+ */
+export async function getLocalConversationsForUser(uid: string): Promise<Conversation[]> {
+  if (!uid || typeof indexedDB === 'undefined') return [];
+  try {
+    const all = await getAllLocalConversations();
+    return filterAndSortConversationsForUser(all, uid);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Salva mensagem de conversa unificada com idempotência e suporte offline
  */
 export async function saveLocalConversationMessage(msg: ConversationMessage | Message): Promise<void> {

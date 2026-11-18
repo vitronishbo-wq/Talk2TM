@@ -50,6 +50,8 @@ import {
   clearMonitorContext,
   saveLocalLastReadTimestamp,
   getLocalLastReadTimestamp,
+  filterAndSortConversationsForUser,
+  getLocalConversationsForUser,
 } from '../src/storage/indexeddb';
 import {
   hasUnreadIncomingMessage,
@@ -1350,6 +1352,53 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       phoneSection.includes('get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)).data.uid == request.auth.uid'),
       'phoneLookup/{phoneHash} deve permitir apenas get autenticado, proibir list/delete e exigir vínculo real com userProfiles/users'
     );
+  });
+
+  // 57 (Sync). Pré-carregamento do Hub (Opção A): isolamento estrito por UID e ordenação decrescente
+  check('Hub Opção A: filterAndSortConversationsForUser isola conversas por UID e ordena por atividade recente', () => {
+    const convA1: Conversation = {
+      conversationId: 'conv_uidA_uidB',
+      participantA: 'uidA',
+      participantB: 'uidB',
+      talk2tmIdA: 'TM-AAAA-1111',
+      talk2tmIdB: 'TM-BBBB-2222',
+      displayNameA: 'Alice',
+      displayNameB: 'Bruno',
+      createdAt: '2026-11-16T08:00:00.000Z',
+      updatedAt: '2026-11-16T09:00:00.000Z',
+    };
+    const convA2: Conversation = {
+      conversationId: 'conv_uidA_uidC',
+      participantA: 'uidA',
+      participantB: 'uidC',
+      talk2tmIdA: 'TM-AAAA-1111',
+      talk2tmIdB: 'TM-CCCC-3333',
+      displayNameA: 'Alice',
+      displayNameB: 'Carla',
+      createdAt: '2026-11-17T08:00:00.000Z',
+      updatedAt: '2026-11-17T10:30:00.000Z',
+    };
+    const convOtherAccount: Conversation = {
+      conversationId: 'conv_uidX_uidY',
+      participantA: 'uidX',
+      participantB: 'uidY',
+      talk2tmIdA: 'TM-XXXX-8888',
+      talk2tmIdB: 'TM-YYYY-9999',
+      displayNameA: 'Xavier',
+      displayNameB: 'Yara',
+      createdAt: '2026-11-17T11:00:00.000Z',
+      updatedAt: '2026-11-17T12:00:00.000Z',
+    };
+
+    const filteredForA = filterAndSortConversationsForUser([convA1, convOtherAccount, convA2], 'uidA');
+    assert(filteredForA.length === 2, 'Deve retornar exatamente as 2 conversas em que uidA participa');
+    assert(filteredForA[0].conversationId === 'conv_uidA_uidC', 'Conversa mais recente deve aparecer primeiro');
+    assert(filteredForA[1].conversationId === 'conv_uidA_uidB', 'Segunda conversa deve seguir ordem cronológica inversa');
+
+    const filteredForB = filterAndSortConversationsForUser([convA1, convOtherAccount, convA2], 'uidB');
+    assert(filteredForB.length === 1 && filteredForB[0].conversationId === 'conv_uidA_uidB', 'participantB também deve ser reconhecido');
+
+    assert(typeof getLocalConversationsForUser === 'function', 'getLocalConversationsForUser deve estar exportada');
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);
