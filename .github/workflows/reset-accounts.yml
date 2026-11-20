@@ -1,0 +1,62 @@
+name: Reset Seletivo de Contas (Preserva Truman x Maezinha)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Digite RESETAR_CONTAS para confirmar a limpeza de todas as contas novas (mantém Truman x Mãezinha)'
+        required: true
+        type: string
+
+concurrency:
+  group: firebase-production-reset
+  cancel-in-progress: false
+
+jobs:
+  reset_accounts:
+    name: Limpar Contas Novas (Auth + Firestore)
+    runs-on: ubuntu-latest
+    if: ${{ github.repository != '' }}
+
+    steps:
+      - name: Validar Confirmação Explícita
+        run: |
+          if [ "${{ github.event.inputs.confirmacao }}" != "RESETAR_CONTAS" ]; then
+            echo "::error::Confirmação inválida. Digite exatamente RESETAR_CONTAS."
+            exit 1
+          fi
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Reset Firebase Auth (Preserva truman@ e maezinha@) e Coleções de Contas Novas no Firestore
+        env:
+          FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SA_JSON" ]; then
+            echo "::error::Secret FIREBASE_SERVICE_ACCOUNT não configurado em Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          SA_FILE="${{ runner.temp }}/firebase-sa.json"
+          trap 'rm -f "$SA_FILE"' EXIT
+          printf '%s' "$FIREBASE_SA_JSON" > "$SA_FILE"
+          chmod 600 "$SA_FILE"
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
+
+          echo "=== 1/2: Limpando utilizadores extras no Firebase Auth ==="
+          node scripts/reset-accounts.mjs --confirm-reset
+
+          echo "=== 2/2: Limpando coleções de expansão no Firestore (preserva rooms e messages de truman-maezinha) ==="
+          for col in users userProfiles phoneLookup conversationInvites conversations; do
+            echo "Limpando coleção: $col"
+            npx -y firebase-tools@latest firestore:delete "$col" \
+              --recursive \
+              --force \
+              --project gen-lang-client-0618196986
+          done
+          echo "✔ Reset seletivo concluído com sucesso. Truman (852456) e Mãezinha (135790) preservados."

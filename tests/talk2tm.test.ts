@@ -92,6 +92,8 @@ import {
   validateLocalPin,
   findLocalIdentityByPin,
   upsertLocalIdentity,
+  TALK2TM_RESET_EPOCH,
+  applyLocalResetEpochIfNeeded,
   LocalIdentity,
 } from '../src/identity';
 import {
@@ -1407,6 +1409,66 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(filteredForB.length === 1 && filteredForB[0].conversationId === 'conv_uidA_uidB', 'participantB também deve ser reconhecido');
 
     assert(typeof getLocalConversationsForUser === 'function', 'getLocalConversationsForUser deve estar exportada');
+  });
+
+  // 58 (Sync). Reset de época local (v2) limpa contas bilaterais antigas e preserva Truman x Mãezinha
+  check('Reset de Época v2: applyLocalResetEpochIfNeeded limpa resquícios antigos e preserva Truman/Mãezinha', () => {
+    const storeMap: Record<string, string> = {
+      talk2tm_identities_v2: '{"accounts":[{"uid":"u1"}]}',
+      talk2tm_identity_v1: '{"uid":"u1"}',
+      talk2tm_session: '{"userId":"u1"}',
+      talk2tm_last_conv_u1: 'conv_u1_u2',
+      ttm_last_read_conv_u1_u2: '2026-11-18T10:00:00.000Z',
+      talk2tm_hidden_conv_u1_u2: '["m1"]',
+      talk2tm_monitor_v1: JSON.stringify({ channelId: 'conv_u1_u2', isConversation: true, userId: 'u1', displayName: 'Teste' }),
+      ttm_settings: '{"version":2}',
+      'ttm_last_read_truman-maezinha': '2026-11-18T12:00:00.000Z',
+    };
+    const mockStorage = {
+      getItem: (k: string) => storeMap[k] ?? null,
+      setItem: (k: string, v: string) => { storeMap[k] = v; },
+      removeItem: (k: string) => { delete storeMap[k]; },
+      get length() { return Object.keys(storeMap).length; },
+      key: (i: number) => Object.keys(storeMap)[i] ?? null,
+    };
+
+    const res1 = applyLocalResetEpochIfNeeded(mockStorage, 'u_abc@talk2tm.internal');
+    assert(res1.cleared === true && res1.shouldSignOutAuth === true, 'Conta antiga deve exigir signOut e limpeza local');
+    assert(storeMap['talk2tm_identities_v2'] === undefined, 'Cofre v2 antigo deve ser removido');
+    assert(storeMap['talk2tm_last_conv_u1'] === undefined, 'Última conversa bilateral antiga deve ser removida');
+    assert(storeMap['talk2tm_monitor_v1'] === undefined, 'MonitorContext bilateral antigo deve ser removido');
+    assert(storeMap['ttm_settings'] === '{"version":2}', 'Definições locais devem ser preservadas');
+    assert(storeMap['ttm_last_read_truman-maezinha'] === '2026-11-18T12:00:00.000Z', 'Leitura de truman-maezinha deve ser preservada');
+    assert(storeMap['talk2tm_vault_epoch'] === TALK2TM_RESET_EPOCH, 'Época v2 deve ficar marcada');
+
+    // Segunda execução não deve limpar novamente
+    storeMap['talk2tm_identities_v2'] = '{"accounts":[{"uid":"nova"}]}';
+    const res2 = applyLocalResetEpochIfNeeded(mockStorage, 'u_nova@talk2tm.internal');
+    assert(res2.cleared === false && res2.shouldSignOutAuth === false, 'Não deve limpar novamente após época v2 gravada');
+    assert(storeMap['talk2tm_identities_v2'] !== undefined, 'Nova conta criada após reset deve permanecer intacta');
+
+    // Sessão legada de Truman não sofre signOut na migração
+    const trumanStore: Record<string, string> = {
+      talk2tm_monitor_v1: JSON.stringify({ channelId: 'truman-maezinha', isConversation: false, userId: 'uid_t', displayName: 'Truman' }),
+    };
+    const trumanMock = {
+      getItem: (k: string) => trumanStore[k] ?? null,
+      setItem: (k: string, v: string) => { trumanStore[k] = v; },
+      removeItem: (k: string) => { delete trumanStore[k]; },
+      get length() { return Object.keys(trumanStore).length; },
+      key: (i: number) => Object.keys(trumanStore)[i] ?? null,
+    };
+    const resTruman = applyLocalResetEpochIfNeeded(trumanMock, 'truman@talk2tm.internal');
+    assert(resTruman.cleared === true && resTruman.shouldSignOutAuth === false, 'Truman nunca deve ser desconectado no reset');
+    assert(trumanStore['talk2tm_monitor_v1'] !== undefined, 'MonitorContext de truman-maezinha deve permanecer intacto');
+
+    const resetScript = fs.readFileSync(path.resolve(process.cwd(), 'scripts/reset-accounts.mjs'), 'utf8');
+    assert(
+      resetScript.includes("'truman@talk2tm.internal'") &&
+      resetScript.includes("'maezinha@talk2tm.internal'") &&
+      resetScript.includes('--confirm-reset'),
+      'Script de reset na nuvem deve preservar Truman/Mãezinha e exigir --confirm-reset'
+    );
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);

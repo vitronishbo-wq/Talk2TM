@@ -567,3 +567,42 @@ export function getLocalLastReadTimestamp(channelId: string, userId?: string): s
   }
 }
 
+/**
+ * Remove conversas e mensagens bilaterais antigas do IndexedDB durante um reset de época,
+ * preservando integralmente os dados da sala padrão truman-maezinha.
+ */
+export async function clearBilateralLocalStores(): Promise<void> {
+  if (typeof indexedDB === 'undefined') return;
+  try {
+    const db = await getLocalDB();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(['conversations', 'messages', 'outbox', 'hidden_messages'], 'readwrite');
+      tx.objectStore('conversations').clear();
+
+      const pruneBilateralCursor = (storeName: 'messages' | 'outbox' | 'hidden_messages') => {
+        const store = tx.objectStore(storeName);
+        const req = store.openCursor();
+        req.onsuccess = (event) => {
+          const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cursor) return;
+          const val = cursor.value as { room?: string; conversationId?: string } | undefined;
+          const channel = val?.conversationId || val?.room || '';
+          if (channel.startsWith('conv_')) {
+            cursor.delete();
+          }
+          cursor.continue();
+        };
+      };
+
+      pruneBilateralCursor('messages');
+      pruneBilateralCursor('outbox');
+      pruneBilateralCursor('hidden_messages');
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch {
+    // Falha silenciosa se IndexedDB indisponível
+  }
+}

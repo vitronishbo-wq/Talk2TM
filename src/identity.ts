@@ -509,6 +509,82 @@ export function clearLocalIdentity(
   }
 }
 
+export const TALK2TM_RESET_EPOCH = '2';
+const RESET_EPOCH_STORAGE_KEY = 'talk2tm_vault_epoch';
+const PRESERVED_LEGACY_EMAILS = new Set([
+  'truman@talk2tm.internal',
+  'maezinha@talk2tm.internal',
+]);
+
+/**
+ * Executa uma limpeza única de contas locais criadas antes da época atual (v2),
+ * preservando integralmente o acesso e histórico local de Truman e Mãezinha.
+ */
+export function applyLocalResetEpochIfNeeded(
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> & {
+    length?: number;
+    key?: (index: number) => string | null;
+  },
+  activeAuthEmail?: string | null
+): { cleared: boolean; shouldSignOutAuth: boolean } {
+  const s = (storage || (typeof localStorage !== 'undefined' ? localStorage : null)) as
+    | (Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> & {
+        length?: number;
+        key?: (index: number) => string | null;
+      })
+    | null;
+  if (!s) {
+    return { cleared: false, shouldSignOutAuth: false };
+  }
+
+  try {
+    if (s.getItem(RESET_EPOCH_STORAGE_KEY) === TALK2TM_RESET_EPOCH) {
+      return { cleared: false, shouldSignOutAuth: false };
+    }
+
+    const normalizedEmail = (activeAuthEmail || '').trim().toLowerCase();
+    const shouldSignOutAuth = Boolean(normalizedEmail) && !PRESERVED_LEGACY_EMAILS.has(normalizedEmail);
+
+    s.removeItem(LOCAL_VAULT_V2_KEY);
+    s.removeItem(LOCAL_IDENTITY_V1_KEY);
+    s.removeItem('talk2tm_session');
+
+    // Remove monitorContext apenas se pertencia a uma conversa bilateral (mantém truman-maezinha intacto)
+    const rawMonitor = s.getItem('talk2tm_monitor_v1');
+    if (rawMonitor) {
+      try {
+        const parsed = JSON.parse(rawMonitor) as { isConversation?: boolean; channelId?: string };
+        if (parsed?.isConversation || (typeof parsed?.channelId === 'string' && parsed.channelId.startsWith('conv_'))) {
+          s.removeItem('talk2tm_monitor_v1');
+        }
+      } catch {
+        s.removeItem('talk2tm_monitor_v1');
+      }
+    }
+
+    if (typeof s.length === 'number' && typeof s.key === 'function') {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < s.length; i++) {
+        const k = s.key(i);
+        if (!k) continue;
+        if (
+          k.startsWith('talk2tm_last_conv_') ||
+          k.startsWith('ttm_last_read_conv_') ||
+          k.startsWith('talk2tm_hidden_conv_')
+        ) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => s.removeItem(k));
+    }
+
+    s.setItem(RESET_EPOCH_STORAGE_KEY, TALK2TM_RESET_EPOCH);
+    return { cleared: true, shouldSignOutAuth };
+  } catch {
+    return { cleared: false, shouldSignOutAuth: false };
+  }
+}
+
 /**
  * Valida o PIN numérico de 4 a 8 dígitos, bloqueando códigos reservados do sistema (852456 / 135790)
  * e colisões com outras contas salvas no mesmo dispositivo.

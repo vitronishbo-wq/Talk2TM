@@ -42,6 +42,7 @@ import {
   getMonitorContext,
   saveLocalLastReadTimestamp,
   getLocalLastReadTimestamp,
+  clearBilateralLocalStores,
 } from './storage/indexeddb';
 import {
   initFirebase,
@@ -58,6 +59,7 @@ import {
   waitForAuthCompletion,
   getCurrentAuthUser,
   getFirebaseAuth,
+  syncAuthState,
   updateFirestoreLastRead,
   updateConversationLastRead,
   markFirestoreMessagesDeletedForUser,
@@ -83,9 +85,10 @@ import {
 import { conversationToRoom } from './conversation';
 import { ChatUI } from './ui/dom';
 import { Unsubscribe } from 'firebase/firestore';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
 import {
+  applyLocalResetEpochIfNeeded,
   authenticateVaultIdentity,
   findLocalIdentityByPin,
   getActiveVaultPinLengths,
@@ -1443,6 +1446,19 @@ export class Talk2TMApp {
 
     // Layer 4 — 1. Restore Firebase Auth Session (onAuthStateChanged)
     await restoreAuthSession();
+
+    // Limpeza única de contas/caches antigos antes da época v2 (preserva Truman x Mãezinha)
+    const epochReset = applyLocalResetEpochIfNeeded(undefined, getCurrentAuthUser()?.email);
+    if (epochReset.cleared) {
+      if (epochReset.shouldSignOutAuth) {
+        const auth = getFirebaseAuth();
+        if (auth) {
+          await signOut(auth).catch(() => {});
+          syncAuthState(null);
+        }
+      }
+      await clearBilateralLocalStores().catch(() => {});
+    }
 
     // Segurança padrão: o PWA SEMPRE inicia bloqueado na calculadora.
     // Mensagens nunca são exibidas automaticamente ao abrir o app sem digitar o PIN.
