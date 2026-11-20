@@ -1,4 +1,4 @@
-name: CI — Lint, Test & Build
+name: CI — Lint, Test, Rules & Build
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   validate:
-    name: Validation & Build Check
+    name: Validation, Rules Emulator & Build
     runs-on: ubuntu-latest
 
     steps:
@@ -21,14 +21,23 @@ jobs:
           node-version: 22
           cache: 'npm'
 
+      - name: Setup Java 21 (Firestore Emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
       - name: Install Dependencies
         run: npm ci
 
       - name: Lint & Typecheck
         run: npm run lint
 
-      - name: Run Unit Tests
-        run: npx tsx -e "import { runTalk2TMTests } from './tests/talk2tm.test'; const res = runTalk2TMTests(); console.log('Result:', res); if (res.passed !== res.total) process.exit(1);"
+      - name: Run Unit & Crypto Tests
+        run: npm test
+
+      - name: Run Firestore Security Rules Tests (Emulator)
+        run: npx -y firebase-tools@latest emulators:exec --only firestore "npx tsx tests/firestore.rules.test.ts"
 
       - name: Test Build (Client Bundle)
         run: npm run build

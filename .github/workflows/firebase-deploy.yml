@@ -1,13 +1,18 @@
-name: Deploy to Firebase (Hosting & Firestore)
+name: Deploy to Firebase (Hosting, Rules & Indexes)
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: firebase-production-deploy
+  cancel-in-progress: false
 
 jobs:
   firebase_deploy:
-    name: Firebase Hosting & Security Rules
+    name: Validate & Deploy (Hosting + Firestore Rules)
     runs-on: ubuntu-latest
     if: ${{ github.repository != '' }}
 
@@ -21,8 +26,23 @@ jobs:
           node-version: 22
           cache: 'npm'
 
+      - name: Setup Java 21 (Firestore Emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
       - name: Install Dependencies
         run: npm ci
+
+      - name: Lint & Typecheck
+        run: npm run lint
+
+      - name: Run Unit & Crypto Tests
+        run: npm test
+
+      - name: Validate Firestore Security Rules (Emulator)
+        run: npx -y firebase-tools@latest emulators:exec --only firestore "npx tsx tests/firestore.rules.test.ts"
 
       - name: Build Production Bundle
         run: npm run build
@@ -35,7 +55,25 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID || '1:511328922010:web:58c5982b1ab704d93f3223' }}
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
 
-      - name: Deploy to Firebase Hosting & Firestore Rules
+      - name: Deploy Firestore Security Rules & Indexes
+        env:
+          FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SA_JSON" ]; then
+            echo "::error::Secret FIREBASE_SERVICE_ACCOUNT não configurado em Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          SA_FILE="${{ runner.temp }}/firebase-sa.json"
+          trap 'rm -f "$SA_FILE"' EXIT
+          printf '%s' "$FIREBASE_SA_JSON" > "$SA_FILE"
+          chmod 600 "$SA_FILE"
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
+          npx -y firebase-tools@latest deploy \
+            --only firestore:rules,firestore:indexes \
+            --project gen-lang-client-0618196986 \
+            --non-interactive
+
+      - name: Deploy to Firebase Hosting (talk2tm.web.app)
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
