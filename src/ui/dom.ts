@@ -5,6 +5,13 @@ import { MobileCalculator } from './calculator';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
 import { normalizePhoneNumber } from '../utils/phone';
+import {
+  generateRecoveryCode,
+  getAllLocalIdentities,
+  normalizeRecoveryCode,
+  validateLocalPin,
+  validateRecoverySecret,
+} from '../identity';
 
 export interface UIEvents {
   onUnlockByPin: (pin: string) => void;
@@ -14,14 +21,19 @@ export interface UIEvents {
   onLoadOlder: () => void;
   onUpdateSettings: (settings: AppSettings) => void;
   onDeleteMessagesLocally?: (messageIds: string[]) => void;
-  onCreateIdentity?: (params: { displayName: string; phone: string; pin: string }) => Promise<{
+  onCreateIdentity?: (params: {
+    displayName: string;
+    phone: string;
+    pin: string;
+    recoveryCode?: string;
+  }) => Promise<{
     talk2tmId: string;
     recoveryCode: string;
     e164Phone: string;
   }>;
   onFinishOnboarding?: () => Promise<void>;
   onRecoverIdentity?: (params: { phone: string; recoveryCode: string; newPin: string }) => Promise<void>;
-  onRegenerateRecoveryCode?: (currentPin: string) => Promise<string>;
+  onRegenerateRecoveryCode?: (currentPin: string, customRecoveryCode?: string) => Promise<string>;
   onChangeLocalPin?: (currentPin: string, newPin: string) => Promise<void>;
   onSendInvite?: (targetPhone: string) => Promise<string | void>;
   onAcceptInvite?: (invite: ConversationInvite) => Promise<void>;
@@ -48,10 +60,11 @@ export class ChatUI {
 
   // Tela Única de PIN (Acesso manual pelo DEG)
   private passViewEl!: HTMLElement;
+  private passSubtitleEl!: HTMLElement;
   private singlePassInput!: HTMLInputElement;
   private passErrorEl!: HTMLElement;
 
-  // Tela de Cadastro Ultraminimalista (4 campos + código de recuperação único)
+  // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação)
   private onboardingViewEl!: HTMLElement;
   private onboardingFormEl!: HTMLFormElement;
   private onboardingNameInput!: HTMLInputElement;
@@ -62,10 +75,17 @@ export class ChatUI {
   private onboardingErrorEl!: HTMLElement;
   private onboardingSubmitBtn!: HTMLButtonElement;
   private recoveryStepBoxEl!: HTMLElement;
+  private onboardingStep2FormEl!: HTMLFormElement;
+  private onboardingSecretInput!: HTMLInputElement;
+  private onboardingSecretConfirmInput!: HTMLInputElement;
+  private onboardingSecretHintEl!: HTMLElement;
+  private onboardingStep2ErrorEl!: HTMLElement;
+  private onboardingStep2SubmitBtn!: HTMLButtonElement;
   private recoveryStepCodeEl!: HTMLElement;
-  private recoveryStepStatusEl!: HTMLElement;
+  private onboardingCopyCodeBtn!: HTMLButtonElement;
+  private pendingOnboardingDraft: { displayName: string; phone: string; pin: string } | null = null;
 
-  // Tela de Recuperação de Conta (Zero Custos)
+  // Tela de Entrada em Outro Aparelho / Recuperação (Zero Custos)
   private recoveryViewEl!: HTMLElement;
   private recoveryPhoneInput!: HTMLInputElement;
   private recoveryPhonePreviewEl!: HTMLElement;
@@ -284,6 +304,40 @@ export class ChatUI {
     return { wrapper, input, toggleBtn };
   }
 
+  private createSecretInputWithToggle(
+    id: string,
+    placeholder: string,
+    maxLength: number = 40,
+    startVisible: boolean = true
+  ): { wrapper: HTMLElement; input: HTMLInputElement; toggleBtn: HTMLButtonElement } {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'ttm-input-group';
+
+    const input = document.createElement('input');
+    input.type = startVisible ? 'text' : 'password';
+    input.id = id;
+    input.className = 'ttm-input ttm-input-left ttm-input-with-toggle';
+    input.placeholder = placeholder;
+    input.maxLength = maxLength;
+    input.autocomplete = 'off';
+    input.autocapitalize = 'none';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'ttm-toggle-vis-btn';
+    toggleBtn.textContent = startVisible ? 'ocultar' : 'ver';
+    toggleBtn.setAttribute('aria-label', 'Mostrar ou ocultar chave');
+    toggleBtn.addEventListener('click', () => {
+      const showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      toggleBtn.textContent = showing ? 'ver' : 'ocultar';
+    });
+
+    wrapper.appendChild(input);
+    wrapper.appendChild(toggleBtn);
+    return { wrapper, input, toggleBtn };
+  }
+
   private updatePhonePreview(raw: string, previewEl: HTMLElement): void {
     const trimmed = raw.trim();
     if (!trimmed) {
@@ -316,9 +370,9 @@ export class ChatUI {
     titleEl.className = 'ttm-title';
     titleEl.textContent = 'Talk2TM';
 
-    const subtitleEl = document.createElement('p');
-    subtitleEl.className = 'ttm-subtitle';
-    subtitleEl.textContent = 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:';
+    this.passSubtitleEl = document.createElement('p');
+    this.passSubtitleEl.className = 'ttm-subtitle';
+    this.passSubtitleEl.textContent = 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:';
 
     const formEl = document.createElement('form');
     formEl.className = 'ttm-form';
@@ -351,7 +405,7 @@ export class ChatUI {
     const recoverAccountBtn = document.createElement('button');
     recoverAccountBtn.type = 'button';
     recoverAccountBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    recoverAccountBtn.textContent = '[recuperar conta]';
+    recoverAccountBtn.textContent = '[entrar noutro aparelho / recuperar]';
     recoverAccountBtn.addEventListener('click', () => {
       this.showRecoveryView();
     });
@@ -385,7 +439,7 @@ export class ChatUI {
     });
 
     this.passViewEl.appendChild(titleEl);
-    this.passViewEl.appendChild(subtitleEl);
+    this.passViewEl.appendChild(this.passSubtitleEl);
     this.passViewEl.appendChild(formEl);
   }
 
@@ -395,7 +449,7 @@ export class ChatUI {
    * 2. Número de telefone (declarado, com normalização +244 / internacional)
    * 3. PIN numérico de 4 a 8 dígitos
    * 4. Confirmar PIN
-   * + Tela obrigatória de confirmação do Código de Recuperação único (zero custos).
+   * + Passo 2: Definição de Chave Pessoal fácil de lembrar (regras claras, zero custos, sem SMS/e-mail).
    */
   private buildOnboardingView(): void {
     this.onboardingViewEl = document.createElement('div');
@@ -445,7 +499,7 @@ export class ChatUI {
 
     const pin1 = this.createPinInputWithToggle(
       'ttm-onboarding-pin',
-      '3. PIN numérico (4 a 8 dígitos)',
+      '3. PIN da calculadora (4 a 8 dígitos)',
       8,
       'new-password'
     );
@@ -466,7 +520,7 @@ export class ChatUI {
     this.onboardingSubmitBtn = document.createElement('button');
     this.onboardingSubmitBtn.type = 'submit';
     this.onboardingSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.onboardingSubmitBtn.textContent = '[criar conta]';
+    this.onboardingSubmitBtn.textContent = '[continuar]';
 
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
@@ -485,62 +539,131 @@ export class ChatUI {
     this.onboardingFormEl.appendChild(this.onboardingSubmitBtn);
     this.onboardingFormEl.appendChild(backBtn);
 
-    // Passo 2 pós-cadastro: exibição única do código de recuperação (sem auto-desaparecer)
+    // Passo 2: Definir Chave Pessoal simples (sem códigos aleatórios difíceis de decorar)
     this.recoveryStepBoxEl = document.createElement('div');
     this.recoveryStepBoxEl.className = 'ttm-recovery-confirm-box';
     this.recoveryStepBoxEl.style.display = 'none';
 
     const recTitle = document.createElement('div');
     recTitle.className = 'ttm-recovery-title';
-    recTitle.textContent = 'Guarde o seu Código de Recuperação';
+    recTitle.textContent = 'Passo 2: Chave Pessoal (Outro Aparelho)';
 
     const recDesc = document.createElement('p');
     recDesc.className = 'ttm-onboarding-tip';
     recDesc.textContent =
-      'Mostrado apenas esta vez. Use-o com seu telefone se precisar recuperar a conta noutro aparelho (sem SMS nem e-mail).';
+      'Para entrar noutro aparelho ou no modo anónimo sem SMS pago, defina uma chave pessoal fácil que já tenha em mente (ex.: nomedamae1985 ou luanda1992).';
+
+    this.onboardingStep2FormEl = document.createElement('form');
+    this.onboardingStep2FormEl.className = 'ttm-form';
+
+    const sec1 = this.createSecretInputWithToggle(
+      'ttm-onboarding-secret',
+      'Chave pessoal (mín. 6 letras/números)',
+      40,
+      true
+    );
+    this.onboardingSecretInput = sec1.input;
+
+    this.onboardingSecretHintEl = document.createElement('div');
+    this.onboardingSecretHintEl.className = 'ttm-field-hint';
+    this.onboardingSecretHintEl.textContent =
+      'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
+
+    const sec2 = this.createSecretInputWithToggle(
+      'ttm-onboarding-secret-confirm',
+      'Confirmar chave pessoal',
+      40,
+      true
+    );
+    this.onboardingSecretConfirmInput = sec2.input;
 
     this.recoveryStepCodeEl = document.createElement('div');
-    this.recoveryStepCodeEl.className = 'ttm-code-badge';
-    this.recoveryStepCodeEl.textContent = '';
+    this.recoveryStepCodeEl.className = 'ttm-code-badge ttm-code-badge-compact';
+    this.recoveryStepCodeEl.style.display = 'none';
 
-    this.recoveryStepStatusEl = document.createElement('div');
-    this.recoveryStepStatusEl.className = 'ttm-field-hint is-valid';
-    this.recoveryStepStatusEl.textContent = '';
-
-    const copyRecBtn = document.createElement('button');
-    copyRecBtn.type = 'button';
-    copyRecBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    copyRecBtn.textContent = '[copiar código de recuperação]';
-    copyRecBtn.addEventListener('click', async () => {
+    this.onboardingCopyCodeBtn = document.createElement('button');
+    this.onboardingCopyCodeBtn.type = 'button';
+    this.onboardingCopyCodeBtn.className = 'ttm-btn ttm-btn-secondary';
+    this.onboardingCopyCodeBtn.textContent = '[copiar código gerado]';
+    this.onboardingCopyCodeBtn.style.display = 'none';
+    this.onboardingCopyCodeBtn.addEventListener('click', async () => {
       const code = this.recoveryStepCodeEl.textContent || '';
       if (!code) return;
-      try {
-        await navigator.clipboard?.writeText(code);
-        this.recoveryStepStatusEl.textContent = 'Código copiado! Guarde num local seguro fora deste aparelho.';
-      } catch {
-        this.recoveryStepStatusEl.textContent = 'Selecione e anote o código acima antes de continuar.';
+      await navigator.clipboard?.writeText(code).catch(() => {});
+      this.onboardingSecretHintEl.textContent = 'Código copiado! Guarde num local seguro fora deste aparelho.';
+      this.onboardingSecretHintEl.classList.add('is-valid');
+      this.onboardingSecretHintEl.classList.remove('is-invalid');
+    });
+
+    this.onboardingSecretInput.addEventListener('input', () => {
+      const raw = this.onboardingSecretInput.value;
+      if (!raw.trim()) {
+        this.onboardingSecretHintEl.textContent =
+          'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
+        this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
+        return;
+      }
+      const check = validateRecoverySecret(raw, this.pendingOnboardingDraft?.pin);
+      if (check.valid) {
+        this.onboardingSecretHintEl.textContent = `Chave válida (${check.normalized.length} caracteres). Fácil de replicar de memória.`;
+        this.onboardingSecretHintEl.classList.add('is-valid');
+        this.onboardingSecretHintEl.classList.remove('is-invalid');
+      } else {
+        this.onboardingSecretHintEl.textContent = check.error || 'Chave inválida.';
+        this.onboardingSecretHintEl.classList.add('is-invalid');
+        this.onboardingSecretHintEl.classList.remove('is-valid');
       }
     });
 
-    const enterAfterRecBtn = document.createElement('button');
-    enterAfterRecBtn.type = 'button';
-    enterAfterRecBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    enterAfterRecBtn.textContent = '[já guardei, entrar]';
-    enterAfterRecBtn.addEventListener('click', async () => {
-      enterAfterRecBtn.disabled = true;
-      try {
-        await this.events.onFinishOnboarding?.();
-      } finally {
-        enterAfterRecBtn.disabled = false;
-      }
+    this.onboardingStep2ErrorEl = document.createElement('div');
+    this.onboardingStep2ErrorEl.className = 'ttm-error';
+    this.onboardingStep2ErrorEl.textContent = '';
+
+    this.onboardingStep2SubmitBtn = document.createElement('button');
+    this.onboardingStep2SubmitBtn.type = 'submit';
+    this.onboardingStep2SubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.onboardingStep2SubmitBtn.textContent = '[criar conta e entrar]';
+
+    const genRandomBtn = document.createElement('button');
+    genRandomBtn.type = 'button';
+    genRandomBtn.className = 'ttm-btn ttm-btn-secondary';
+    genRandomBtn.textContent = '[ou gerar código automático]';
+    genRandomBtn.addEventListener('click', () => {
+      const generated = generateRecoveryCode();
+      this.onboardingSecretInput.value = generated;
+      this.onboardingSecretConfirmInput.value = generated;
+      this.recoveryStepCodeEl.textContent = generated;
+      this.recoveryStepCodeEl.style.display = 'block';
+      this.onboardingCopyCodeBtn.style.display = 'inline-block';
+      this.onboardingSecretHintEl.textContent = 'Código automático preenchido. Copie ou anote se preferir usá-lo.';
+      this.onboardingSecretHintEl.classList.add('is-valid');
+      this.onboardingSecretHintEl.classList.remove('is-invalid');
+      this.onboardingStep2ErrorEl.textContent = '';
     });
+
+    const backStep1Btn = document.createElement('button');
+    backStep1Btn.type = 'button';
+    backStep1Btn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    backStep1Btn.textContent = '[voltar aos dados]';
+    backStep1Btn.addEventListener('click', () => {
+      this.recoveryStepBoxEl.style.display = 'none';
+      this.onboardingFormEl.style.display = 'flex';
+      this.onboardingStep2ErrorEl.textContent = '';
+    });
+
+    this.onboardingStep2FormEl.appendChild(sec1.wrapper);
+    this.onboardingStep2FormEl.appendChild(this.onboardingSecretHintEl);
+    this.onboardingStep2FormEl.appendChild(sec2.wrapper);
+    this.onboardingStep2FormEl.appendChild(this.recoveryStepCodeEl);
+    this.onboardingStep2FormEl.appendChild(this.onboardingCopyCodeBtn);
+    this.onboardingStep2FormEl.appendChild(this.onboardingStep2ErrorEl);
+    this.onboardingStep2FormEl.appendChild(this.onboardingStep2SubmitBtn);
+    this.onboardingStep2FormEl.appendChild(genRandomBtn);
+    this.onboardingStep2FormEl.appendChild(backStep1Btn);
 
     this.recoveryStepBoxEl.appendChild(recTitle);
     this.recoveryStepBoxEl.appendChild(recDesc);
-    this.recoveryStepBoxEl.appendChild(this.recoveryStepCodeEl);
-    this.recoveryStepBoxEl.appendChild(this.recoveryStepStatusEl);
-    this.recoveryStepBoxEl.appendChild(copyRecBtn);
-    this.recoveryStepBoxEl.appendChild(enterAfterRecBtn);
+    this.recoveryStepBoxEl.appendChild(this.onboardingStep2FormEl);
 
     this.onboardingFormEl.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -568,21 +691,62 @@ export class ChatUI {
         this.onboardingErrorEl.textContent = 'Os dois PINs não coincidem.';
         return;
       }
+      const pinValid = await validateLocalPin(pin, true);
+      if (!pinValid.valid) {
+        this.onboardingErrorEl.textContent = pinValid.error || 'PIN inválido.';
+        return;
+      }
+
+      this.pendingOnboardingDraft = { displayName, phone, pin };
+      this.onboardingFormEl.style.display = 'none';
+      this.recoveryStepBoxEl.style.display = 'flex';
+      this.onboardingStep2ErrorEl.textContent = '';
+      setTimeout(() => {
+        this.onboardingSecretInput.focus();
+      }, 80);
+    });
+
+    this.onboardingStep2FormEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      this.onboardingStep2ErrorEl.textContent = '';
+
+      const draft = this.pendingOnboardingDraft;
+      if (!draft) {
+        this.recoveryStepBoxEl.style.display = 'none';
+        this.onboardingFormEl.style.display = 'flex';
+        return;
+      }
+
+      const secret = this.onboardingSecretInput.value.trim();
+      const secretConfirm = this.onboardingSecretConfirmInput.value.trim();
+
+      const check = validateRecoverySecret(secret, draft.pin);
+      if (!check.valid) {
+        this.onboardingStep2ErrorEl.textContent = check.error || 'Chave pessoal inválida.';
+        return;
+      }
+      if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
+        this.onboardingStep2ErrorEl.textContent = 'As duas chaves pessoais não coincidem.';
+        return;
+      }
 
       if (this.events.onCreateIdentity) {
-        this.onboardingSubmitBtn.disabled = true;
-        this.onboardingSubmitBtn.textContent = '[criando conta...]';
+        this.onboardingStep2SubmitBtn.disabled = true;
+        this.onboardingStep2SubmitBtn.textContent = '[criando conta...]';
         try {
-          const result = await this.events.onCreateIdentity({ displayName, phone, pin });
-          this.onboardingFormEl.style.display = 'none';
-          this.recoveryStepCodeEl.textContent = result.recoveryCode;
-          this.recoveryStepStatusEl.textContent = `Conta pronta para ${displayName}. Use seu PIN numérico na calculadora para entrar.`;
-          this.recoveryStepBoxEl.style.display = 'flex';
+          await this.events.onCreateIdentity({
+            displayName: draft.displayName,
+            phone: draft.phone,
+            pin: draft.pin,
+            recoveryCode: secret,
+          });
+          this.pendingOnboardingDraft = null;
+          await this.events.onFinishOnboarding?.();
         } catch (err: any) {
-          this.onboardingErrorEl.textContent = this.extractReadableError(err);
+          this.onboardingStep2ErrorEl.textContent = this.extractReadableError(err);
         } finally {
-          this.onboardingSubmitBtn.disabled = false;
-          this.onboardingSubmitBtn.textContent = '[criar conta]';
+          this.onboardingStep2SubmitBtn.disabled = false;
+          this.onboardingStep2SubmitBtn.textContent = '[criar conta e entrar]';
         }
       }
     });
@@ -595,8 +759,8 @@ export class ChatUI {
   }
 
   /**
-   * Recuperação gratuita de conta (sem SMS, sem e-mail, sem custos):
-   * Telefone + Código de Recuperação + Novo PIN numérico local
+   * Entrada em Outro Aparelho / Recuperação gratuita (sem SMS, sem e-mail, sem custos):
+   * Telefone + Chave Pessoal (mín. 6 caracteres) ou Código + PIN da calculadora neste aparelho
    */
   private buildRecoveryView(): void {
     this.recoveryViewEl = document.createElement('div');
@@ -609,11 +773,12 @@ export class ChatUI {
 
     const titleEl = document.createElement('h1');
     titleEl.className = 'ttm-title';
-    titleEl.textContent = 'Recuperar Conta';
+    titleEl.textContent = 'Entrar / Recuperar Conta';
 
     const subtitleEl = document.createElement('p');
     subtitleEl.className = 'ttm-subtitle';
-    subtitleEl.textContent = 'Informe seu telefone, o código de recuperação e defina um novo PIN para este aparelho.';
+    subtitleEl.textContent =
+      'Para entrar no modo anónimo ou noutro aparelho, informe seu telefone, sua chave pessoal e defina o PIN da calculadora neste aparelho.';
 
     const formEl = document.createElement('form');
     formEl.className = 'ttm-form';
@@ -635,17 +800,21 @@ export class ChatUI {
       this.updatePhonePreview(this.recoveryPhoneInput.value, this.recoveryPhonePreviewEl);
     });
 
-    this.recoveryCodeInput = document.createElement('input');
-    this.recoveryCodeInput.type = 'text';
-    this.recoveryCodeInput.id = 'ttm-recovery-code';
-    this.recoveryCodeInput.className = 'ttm-input ttm-input-code';
-    this.recoveryCodeInput.placeholder = '2. Código (XXXX-XXXX-...)';
-    this.recoveryCodeInput.maxLength = 36;
-    this.recoveryCodeInput.autocomplete = 'off';
+    const recKeyField = this.createSecretInputWithToggle(
+      'ttm-recovery-code',
+      '2. Chave pessoal (mín. 6 caracteres) ou código',
+      40,
+      false
+    );
+    this.recoveryCodeInput = recKeyField.input;
+
+    const recKeyHintEl = document.createElement('div');
+    recKeyHintEl.className = 'ttm-field-hint';
+    recKeyHintEl.textContent = 'A chave pessoal que definiu ao criar a conta (maiúsculas e espaços são ignorados).';
 
     const newPin1 = this.createPinInputWithToggle(
       'ttm-recovery-pin',
-      '3. Novo PIN numérico (4 a 8 dígitos)',
+      '3. PIN da calculadora neste aparelho (4 a 8 dígitos)',
       8,
       'new-password'
     );
@@ -653,7 +822,7 @@ export class ChatUI {
 
     const newPin2 = this.createPinInputWithToggle(
       'ttm-recovery-pin-confirm',
-      '4. Confirmar novo PIN',
+      '4. Confirmar PIN',
       8,
       'new-password'
     );
@@ -666,7 +835,7 @@ export class ChatUI {
     this.recoverySubmitBtn = document.createElement('button');
     this.recoverySubmitBtn.type = 'submit';
     this.recoverySubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.recoverySubmitBtn.textContent = '[recuperar e entrar]';
+    this.recoverySubmitBtn.textContent = '[entrar na conta]';
 
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
@@ -678,7 +847,8 @@ export class ChatUI {
 
     formEl.appendChild(this.recoveryPhoneInput);
     formEl.appendChild(this.recoveryPhonePreviewEl);
-    formEl.appendChild(this.recoveryCodeInput);
+    formEl.appendChild(recKeyField.wrapper);
+    formEl.appendChild(recKeyHintEl);
     formEl.appendChild(newPin1.wrapper);
     formEl.appendChild(newPin2.wrapper);
     formEl.appendChild(this.recoveryErrorEl);
@@ -699,12 +869,12 @@ export class ChatUI {
         this.recoveryErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
         return;
       }
-      if (!recoveryCode) {
-        this.recoveryErrorEl.textContent = 'Informe o código de recuperação.';
+      if (normalizeRecoveryCode(recoveryCode).length < 6) {
+        this.recoveryErrorEl.textContent = 'Informe sua chave pessoal (mínimo 6 caracteres) ou código gerado.';
         return;
       }
       if (!/^\d{4,8}$/.test(newPin)) {
-        this.recoveryErrorEl.textContent = 'O novo PIN deve ter entre 4 e 8 dígitos numéricos.';
+        this.recoveryErrorEl.textContent = 'O PIN deve ter entre 4 e 8 dígitos numéricos.';
         return;
       }
       if (newPin !== confirmPin) {
@@ -714,14 +884,14 @@ export class ChatUI {
 
       if (this.events.onRecoverIdentity) {
         this.recoverySubmitBtn.disabled = true;
-        this.recoverySubmitBtn.textContent = '[recuperando...]';
+        this.recoverySubmitBtn.textContent = '[entrando...]';
         try {
           await this.events.onRecoverIdentity({ phone, recoveryCode, newPin });
         } catch (err: any) {
           this.recoveryErrorEl.textContent = this.extractReadableError(err);
         } finally {
           this.recoverySubmitBtn.disabled = false;
-          this.recoverySubmitBtn.textContent = '[recuperar e entrar]';
+          this.recoverySubmitBtn.textContent = '[entrar na conta]';
         }
       }
     });
@@ -773,8 +943,8 @@ export class ChatUI {
     const rotateCodeBtn = document.createElement('button');
     rotateCodeBtn.type = 'button';
     rotateCodeBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    rotateCodeBtn.textContent = '[novo código rec.]';
-    rotateCodeBtn.title = 'Gerar novo código de recuperação (invalida o anterior)';
+    rotateCodeBtn.textContent = '[chave de recuperação]';
+    rotateCodeBtn.title = 'Definir chave pessoal fácil ou gerar novo código';
 
     const changePinBtn = document.createElement('button');
     changePinBtn.type = 'button';
@@ -786,59 +956,87 @@ export class ChatUI {
     selfRow.appendChild(selfMeta);
     selfRow.appendChild(selfActions);
 
-    // Painel inline: Gerar novo código de recuperação
+    // Painel inline: Definir Chave Pessoal de recuperação (ou gerar código automático)
     this.connectRecoveryPanelEl = document.createElement('div');
     this.connectRecoveryPanelEl.className = 'ttm-inline-security-panel';
     this.connectRecoveryPanelEl.style.display = 'none';
 
     const rotForm = document.createElement('form');
-    rotForm.className = 'ttm-inline-form';
+    rotForm.className = 'ttm-form';
+    const rotCustomInput = document.createElement('input');
+    rotCustomInput.type = 'text';
+    rotCustomInput.maxLength = 40;
+    rotCustomInput.placeholder = 'Chave pessoal (mín. 6 caracteres, opcional p/ gerar)';
+    rotCustomInput.className = 'ttm-connect-input ttm-connect-input-phone';
     const rotPinInput = document.createElement('input');
     rotPinInput.type = 'password';
     rotPinInput.inputMode = 'numeric';
     rotPinInput.maxLength = 8;
     rotPinInput.placeholder = 'Confirme seu PIN atual';
     rotPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    const rotBtnRow = document.createElement('div');
+    rotBtnRow.className = 'ttm-inline-form';
     const rotSubmitBtn = document.createElement('button');
     rotSubmitBtn.type = 'submit';
     rotSubmitBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    rotSubmitBtn.textContent = '[gerar]';
+    rotSubmitBtn.textContent = '[salvar chave]';
+    const rotGenBtn = document.createElement('button');
+    rotGenBtn.type = 'button';
+    rotGenBtn.className = 'ttm-btn-mini';
+    rotGenBtn.textContent = '[gerar automático]';
+    rotBtnRow.appendChild(rotSubmitBtn);
+    rotBtnRow.appendChild(rotGenBtn);
+
     const rotResultEl = document.createElement('div');
     rotResultEl.className = 'ttm-code-badge ttm-code-badge-compact';
     rotResultEl.style.display = 'none';
     const rotHintEl = document.createElement('div');
     rotHintEl.className = 'ttm-field-hint';
-    rotHintEl.textContent = 'Gerar um novo código invalida o anterior.';
+    rotHintEl.textContent =
+      'Defina uma chave pessoal fácil (mín. 6 caracteres, diferente do PIN) para entrar noutro aparelho.';
     const rotCopyBtn = document.createElement('button');
     rotCopyBtn.type = 'button';
     rotCopyBtn.className = 'ttm-btn-mini';
-    rotCopyBtn.textContent = '[copiar novo código]';
+    rotCopyBtn.textContent = '[copiar chave]';
     rotCopyBtn.style.display = 'none';
     rotCopyBtn.addEventListener('click', async () => {
       const code = rotResultEl.textContent || '';
       if (code) {
         await navigator.clipboard?.writeText(code).catch(() => {});
-        this.showConnectFeedback('Novo código de recuperação copiado.');
+        this.showConnectFeedback('Chave de recuperação copiada.');
       }
+    });
+
+    rotGenBtn.addEventListener('click', () => {
+      rotCustomInput.value = generateRecoveryCode();
     });
 
     rotForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const pin = rotPinInput.value.trim();
+      const customKey = rotCustomInput.value.trim();
       if (!/^\d{4,8}$/.test(pin)) {
         this.showConnectFeedback('Digite seu PIN atual (4 a 8 dígitos).', true);
         return;
       }
+      if (customKey) {
+        const keyCheck = validateRecoverySecret(customKey, pin);
+        if (!keyCheck.valid) {
+          this.showConnectFeedback(keyCheck.error || 'Chave pessoal inválida.', true);
+          return;
+        }
+      }
       if (!this.events.onRegenerateRecoveryCode) return;
       rotSubmitBtn.disabled = true;
       try {
-        const newCode = await this.events.onRegenerateRecoveryCode(pin);
+        const savedCode = await this.events.onRegenerateRecoveryCode(pin, customKey || undefined);
         rotPinInput.value = '';
-        rotResultEl.textContent = newCode;
+        rotCustomInput.value = '';
+        rotResultEl.textContent = savedCode;
         rotResultEl.style.display = 'block';
         rotCopyBtn.style.display = 'inline-block';
-        rotHintEl.textContent = 'Novo código gerado! Guarde em local seguro.';
-        this.showConnectFeedback('Código de recuperação atualizado.');
+        rotHintEl.textContent = 'Chave de recuperação atualizada! Já pode usá-la no modo anónimo ou noutro aparelho.';
+        this.showConnectFeedback('Chave de recuperação atualizada.');
       } catch (err) {
         this.showConnectFeedback(this.extractReadableError(err), true);
       } finally {
@@ -846,8 +1044,9 @@ export class ChatUI {
       }
     });
 
+    rotForm.appendChild(rotCustomInput);
     rotForm.appendChild(rotPinInput);
-    rotForm.appendChild(rotSubmitBtn);
+    rotForm.appendChild(rotBtnRow);
     this.connectRecoveryPanelEl.appendChild(rotHintEl);
     this.connectRecoveryPanelEl.appendChild(rotForm);
     this.connectRecoveryPanelEl.appendChild(rotResultEl);
@@ -1432,6 +1631,10 @@ export class ChatUI {
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.passViewEl.style.display = 'flex';
+    const hasSavedVault = getAllLocalIdentities().length > 0;
+    this.passSubtitleEl.textContent = hasSavedVault
+      ? 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:'
+      : 'Modo anónimo ou aparelho novo? Para entrar numa conta já criada, toque em [entrar noutro aparelho / recuperar].';
     this.singlePassInput.value = '';
     this.singlePassInput.type = 'password';
     this.passErrorEl.textContent = '';
@@ -1451,6 +1654,7 @@ export class ChatUI {
     this.onboardingViewEl.style.display = 'flex';
     this.onboardingFormEl.style.display = 'flex';
     this.recoveryStepBoxEl.style.display = 'none';
+    this.pendingOnboardingDraft = null;
     this.onboardingNameInput.value = '';
     this.onboardingPhoneInput.value = '';
     this.onboardingPinInput.value = '';
@@ -1458,9 +1662,20 @@ export class ChatUI {
     this.onboardingPinInput.type = 'password';
     this.onboardingPinConfirmInput.type = 'password';
     this.onboardingErrorEl.textContent = '';
+    this.onboardingSecretInput.value = '';
+    this.onboardingSecretConfirmInput.value = '';
+    this.onboardingSecretHintEl.textContent =
+      'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
+    this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
+    this.onboardingStep2ErrorEl.textContent = '';
+    this.recoveryStepCodeEl.textContent = '';
+    this.recoveryStepCodeEl.style.display = 'none';
+    this.onboardingCopyCodeBtn.style.display = 'none';
     this.updatePhonePreview('', this.onboardingPhonePreviewEl);
     this.onboardingSubmitBtn.disabled = false;
-    this.onboardingSubmitBtn.textContent = '[criar conta]';
+    this.onboardingSubmitBtn.textContent = '[continuar]';
+    this.onboardingStep2SubmitBtn.disabled = false;
+    this.onboardingStep2SubmitBtn.textContent = '[criar conta e entrar]';
     setTimeout(() => {
       this.onboardingNameInput.focus();
     }, 100);
@@ -1477,6 +1692,7 @@ export class ChatUI {
     this.recoveryViewEl.style.display = 'flex';
     this.recoveryPhoneInput.value = '';
     this.recoveryCodeInput.value = '';
+    this.recoveryCodeInput.type = 'password';
     this.recoveryPinInput.value = '';
     this.recoveryPinConfirmInput.value = '';
     this.recoveryPinInput.type = 'password';
@@ -1485,7 +1701,7 @@ export class ChatUI {
     this.recoveryPhonePreviewEl.textContent = 'Use o mesmo número declarado no cadastro.';
     this.recoveryPhonePreviewEl.classList.remove('is-valid', 'is-invalid');
     this.recoverySubmitBtn.disabled = false;
-    this.recoverySubmitBtn.textContent = '[recuperar e entrar]';
+    this.recoverySubmitBtn.textContent = '[entrar na conta]';
     setTimeout(() => {
       this.recoveryPhoneInput.focus();
     }, 100);

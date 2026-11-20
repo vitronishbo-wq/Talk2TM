@@ -89,6 +89,7 @@ import {
   authenticateVaultIdentity,
   findLocalIdentityByPin,
   getActiveVaultPinLengths,
+  getAllLocalIdentities,
   getLocalIdentity,
   recoverPhoneIdentity,
   regenerateRecoveryCodeWithPin,
@@ -234,8 +235,8 @@ export class Talk2TMApp {
       onRecoverIdentity: async (params) => {
         await this.handleRecoverIdentity(params);
       },
-      onRegenerateRecoveryCode: async (currentPin: string) => {
-        return await this.handleRegenerateRecoveryCode(currentPin);
+      onRegenerateRecoveryCode: async (currentPin: string, customRecoveryCode?: string) => {
+        return await this.handleRegenerateRecoveryCode(currentPin, customRecoveryCode);
       },
       onChangeLocalPin: async (currentPin: string, newPin: string) => {
         await this.handleChangeLocalPin(currentPin, newPin);
@@ -337,9 +338,15 @@ export class Talk2TMApp {
       }
 
       const isTmInput = /^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(cleanInput);
-      const errMsg = isTmInput
-        ? 'O acesso agora usa o seu PIN numérico (4 a 8 dígitos). Se mudou de aparelho, toque em [recuperar conta].'
-        : 'PIN inválido. Verifique ou use [criar conta] / [recuperar conta].';
+      const hasSavedVault = getAllLocalIdentities().length > 0;
+      let errMsg: string;
+      if (isTmInput) {
+        errMsg = 'O acesso neste aparelho usa o PIN numérico (4 a 8 dígitos). Se mudou de aparelho, toque em [entrar noutro aparelho / recuperar].';
+      } else if (!hasSavedVault) {
+        errMsg = 'Este navegador ou modo anónimo ainda não tem nenhuma conta guardada. Se já tem conta, toque em [entrar noutro aparelho / recuperar].';
+      } else {
+        errMsg = 'PIN incorreto neste aparelho. Tente novamente ou toque em [entrar noutro aparelho / recuperar].';
+      }
       this.ui.showPassError(errMsg);
       this.ui.showTemporaryNotice(errMsg);
       return false;
@@ -1592,13 +1599,14 @@ export class Talk2TMApp {
   }
 
   /**
-   * Cadastro Zero Custos (4 campos: Nome, Telefone, PIN, Confirmar PIN):
-   * Cria identidade, gera código de recuperação único e aguarda confirmação explícita do utilizador.
+   * Cadastro Zero Custos (4 campos + Chave Pessoal de Recuperação escolhida ou gerada):
+   * Cria identidade e prepara sessão para entrar imediatamente.
    */
   public async handleCreateIdentity(params: {
     displayName: string;
     phone: string;
     pin: string;
+    recoveryCode?: string;
   }): Promise<{ talk2tmId: string; recoveryCode: string; e164Phone: string }> {
     const result = await registerPhoneIdentity(params);
 
@@ -1648,12 +1656,12 @@ export class Talk2TMApp {
     await this.unlockWithLocalIdentity(identity, params.newPin.trim());
   }
 
-  public async handleRegenerateRecoveryCode(currentPin: string): Promise<string> {
+  public async handleRegenerateRecoveryCode(currentPin: string, customRecoveryCode?: string): Promise<string> {
     if (!this.currentSession) {
       throw new Error('Sessão ativa necessária.');
     }
     const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
-    const res = await regenerateRecoveryCodeWithPin(uid, currentPin);
+    const res = await regenerateRecoveryCodeWithPin(uid, currentPin, customRecoveryCode);
     return res.recoveryCode;
   }
 

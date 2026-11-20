@@ -85,6 +85,7 @@ import {
   findProfileByTalk2TMId,
   generateRecoveryCode,
   normalizeRecoveryCode,
+  validateRecoverySecret,
   deriveAuthPassword,
   sealAuthSecretWithPin,
   unsealAuthSecretWithPin,
@@ -1330,12 +1331,19 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(derivedEmail === `u_${'a'.repeat(32)}@talk2tm.internal`, 'E-mail interno deve ser derivado deterministicamente do phoneHash');
   });
 
-  // 55. Zero Custos: Código de recuperação sem caracteres ambíguos e normalização tolerante a hífens/minúsculas
-  check('Zero Custos: generateRecoveryCode e normalizeRecoveryCode garantem formato de alta entropia', () => {
+  // 55. Zero Custos: Código de recuperação e chave pessoal fácil com normalização tolerante
+  check('Zero Custos: generateRecoveryCode, normalizeRecoveryCode e validateRecoverySecret garantem regras claras', () => {
     const rec = generateRecoveryCode();
     assert(/^[2-9A-HJ-NP-Z]{4}(-[2-9A-HJ-NP-Z]{4}){5}$/.test(rec), 'Código de recuperação deve seguir 6 grupos de 4 caracteres sem 0/O/1/I');
     const stripped = rec.toLowerCase().replace(/-/g, ' ');
     assert(normalizeRecoveryCode(stripped) === normalizeRecoveryCode(rec), 'Normalização deve aceitar minúsculas, espaços e ausência de hífens');
+    assert(normalizeRecoveryCode('Mãe 1975') === 'MAE1975', 'Normalização deve remover acentos e espaços de chaves pessoais');
+
+    assert(validateRecoverySecret('96321', '12369').valid === false, 'Chave com menos de 6 caracteres deve ser recusada');
+    assert(validateRecoverySecret('123456', '123456').valid === false, 'Chave igual ao PIN da calculadora deve ser recusada');
+    assert(validateRecoverySecret('123456', '9988').valid === false, 'Sequência óbvia 123456 deve ser recusada');
+    assert(validateRecoverySecret('111111', '9988').valid === false, 'Sequência repetida 111111 deve ser recusada');
+    assert(validateRecoverySecret('Luanda 1990', '12369').valid === true, 'Chave pessoal memorável (>=6 chars) deve ser aceita');
   });
 
   // 56. Zero Custos: Regras Firestore de phoneLookup impedem listagem e mantêm integridade
@@ -1442,6 +1450,10 @@ export async function runAsyncZeroCostTests(): Promise<{ passed: number; total: 
     assert(pwd1 === pwd2, 'Recuperação com código sem hífens/minúsculas deve derivar exatamente a mesma senha Auth');
     assert(pwd1 !== pwdOtherPhone, 'Mesmo código não deve servir para outro phoneHash');
     assert(pwd1.startsWith('T2M$') && pwd1.length === 68, 'Senha derivada deve conter 256 bits hexadecimais');
+
+    const memPwd1 = await deriveAuthPassword('Mãe 1975', phA);
+    const memPwd2 = await deriveAuthPassword('mae1975', phA);
+    assert(memPwd1 === memPwd2 && memPwd1.startsWith('T2M$'), 'Chave pessoal memorável (>=6 chars) deve derivar mesma senha Auth independente de acentos/espaços/maiúsculas');
   });
 
   // 59. Cofre local AES-256-GCM + PBKDF2 (sem Base64/texto simples no disco)

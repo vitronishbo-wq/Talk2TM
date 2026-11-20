@@ -66,6 +66,7 @@ export interface RegisterPhoneIdentityParams {
   displayName: string;
   phone: string;
   pin: string;
+  recoveryCode?: string;
 }
 
 export interface RegisterPhoneIdentityResult {
@@ -171,17 +172,77 @@ export function generateRecoveryCode(): string {
 }
 
 export function normalizeRecoveryCode(raw: string): string {
-  return (raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return (raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+const WEAK_RECOVERY_KEYS = new Set([
+  '123456',
+  '654321',
+  '1234567',
+  '12345678',
+  '87654321',
+  '123456789',
+  '012345',
+  '543210',
+  'ABCDEF',
+  'QWERTY',
+  'SENHA1',
+  'PASSWORD',
+  'TALK2TM',
+]);
+
+/**
+ * Valida uma chave pessoal de recuperação (mínimo 6 caracteres após normalização),
+ * garantindo que não seja idêntica ao PIN da calculadora nem trivialmente previsível.
+ */
+export function validateRecoverySecret(
+  rawSecret: string,
+  pin?: string
+): { valid: boolean; normalized: string; error?: string } {
+  const normalized = normalizeRecoveryCode(rawSecret);
+  if (normalized.length < 6) {
+    return {
+      valid: false,
+      normalized,
+      error: 'A chave pessoal deve ter pelo menos 6 caracteres (letras ou números).',
+    };
+  }
+  if (normalized.length > 40) {
+    return {
+      valid: false,
+      normalized,
+      error: 'A chave pessoal deve ter no máximo 40 caracteres.',
+    };
+  }
+  if (pin && normalized === pin.trim().toUpperCase()) {
+    return {
+      valid: false,
+      normalized,
+      error: 'Por segurança, a chave pessoal não pode ser igual ao PIN da calculadora.',
+    };
+  }
+  if (/^(.)\1+$/.test(normalized) || WEAK_RECOVERY_KEYS.has(normalized)) {
+    return {
+      valid: false,
+      normalized,
+      error: 'Escolha uma chave pessoal menos óbvia (evite sequências como 123456 ou caracteres repetidos).',
+    };
+  }
+  return { valid: true, normalized };
 }
 
 /**
- * Deriva deterministicamente a senha do Firebase Auth a partir do código de recuperação + phoneHash.
- * Permite recuperar a mesma conta (mesmo UID) em qualquer dispositivo sem SMS, e-mail ou Cloud Functions.
+ * Deriva deterministicamente a senha do Firebase Auth a partir da chave pessoal / código de recuperação + phoneHash.
+ * Permite recuperar ou entrar na mesma conta (mesmo UID) em qualquer dispositivo sem SMS, e-mail ou Cloud Functions.
  */
 export async function deriveAuthPassword(recoveryCode: string, phoneHash: string): Promise<string> {
   const normalizedCode = normalizeRecoveryCode(recoveryCode);
-  if (normalizedCode.length < 12) {
-    throw new Error('Código de recuperação inválido.');
+  if (normalizedCode.length < 6) {
+    throw new Error('Chave de recuperação inválida (mínimo 6 caracteres).');
   }
   const webCrypto = getWebCrypto();
   const encoder = new TextEncoder();
@@ -533,12 +594,22 @@ export async function registerPhoneIdentity(
     throw new Error(pinCheck.error || 'PIN inválido.');
   }
 
+  let recoveryCode: string;
+  if (params.recoveryCode && params.recoveryCode.trim()) {
+    const recCheck = validateRecoverySecret(params.recoveryCode, params.pin);
+    if (!recCheck.valid) {
+      throw new Error(recCheck.error || 'Chave de recuperação inválida.');
+    }
+    recoveryCode = params.recoveryCode.trim();
+  } else {
+    recoveryCode = generateRecoveryCode();
+  }
+
   const e164Phone = phoneCheck.e164;
   const phoneHash = await hashPhoneNumber(e164Phone);
   const phoneMasked = maskPhoneNumber(e164Phone);
   const internalEmail = phoneHashToInternalEmail(phoneHash);
   const talk2tmId = generateTalk2TMId();
-  const recoveryCode = generateRecoveryCode();
   const authPassword = await deriveAuthPassword(recoveryCode, phoneHash);
 
   await initFirebase();
@@ -647,8 +718,8 @@ export async function recoverPhoneIdentity(
   }
 
   const normalizedCode = normalizeRecoveryCode(params.recoveryCode);
-  if (normalizedCode.length < 16) {
-    throw new Error('Informe o código de recuperação completo.');
+  if (normalizedCode.length < 6) {
+    throw new Error('Informe sua chave pessoal (mínimo 6 caracteres) ou código de recuperação.');
   }
 
   const e164Phone = phoneCheck.e164;
@@ -682,7 +753,7 @@ export async function recoverPhoneIdentity(
       err?.code === 'auth/wrong-password' ||
       err?.code === 'auth/user-not-found'
     ) {
-      throw new Error('Telefone ou código de recuperação incorreto.');
+      throw new Error('Telefone ou chave pessoal de recuperação incorreto.');
     }
     throw new Error(err?.message || 'Não foi possível autenticar a recuperação.');
   }
@@ -778,15 +849,25 @@ export async function authenticateVaultIdentity(
  */
 export async function regenerateRecoveryCodeWithPin(
   uid: string,
-  currentPin: string
+  currentPin: string,
+  customRecoveryCode?: string
 ): Promise<{ recoveryCode: string }> {
   const identity = getAllLocalIdentities().find((a) => a.uid === uid);
   if (!identity || !identity.phoneHash) {
-    throw new Error('Esta conta não suporta rotação de código de recuperação.');
+    throw new Error('Esta conta não suporta alteração de chave de recuperação.');
   }
 
   const oldAuthPassword = await unsealAuthSecretWithPin(identity, currentPin.trim());
-  const newRecoveryCode = generateRecoveryCode();
+  let newRecoveryCode: string;
+  if (customRecoveryCode && customRecoveryCode.trim()) {
+    const check = validateRecoverySecret(customRecoveryCode, currentPin);
+    if (!check.valid) {
+      throw new Error(check.error || 'Chave pessoal inválida.');
+    }
+    newRecoveryCode = customRecoveryCode.trim();
+  } else {
+    newRecoveryCode = generateRecoveryCode();
+  }
   const newAuthPassword = await deriveAuthPassword(newRecoveryCode, identity.phoneHash);
 
   await initFirebase();
