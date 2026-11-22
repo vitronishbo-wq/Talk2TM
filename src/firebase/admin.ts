@@ -153,25 +153,35 @@ export async function signInAdminWithGoogle(): Promise<AdminUsersPageResult> {
   try {
     await signInWithPopup(auth, provider);
   } catch (err: any) {
-    const code = err?.code || '';
+    const code = typeof err?.code === 'string' ? err.code : '';
+    let message = 'Não foi possível autenticar via Google.';
     if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-      throw new Error('Autenticação Google cancelada.');
+      message = 'Autenticação Google cancelada.';
+    } else if (code === 'auth/popup-blocked') {
+      message = 'O navegador bloqueou a janela do Google. Permita pop-ups para continuar.';
+    } else if (code === 'auth/unauthorized-domain') {
+      message = 'Domínio não autorizado no Firebase Auth para login Google.';
+    } else if (code === 'auth/operation-not-allowed') {
+      message = 'Provedor Google desativado no Firebase Authentication.';
     }
-    if (code === 'auth/popup-blocked') {
-      throw new Error('O navegador bloqueou a janela do Google. Permita pop-ups para continuar.');
+    const authErr = new Error(message) as Error & { code?: string };
+    if (code) {
+      authErr.code = code;
     }
-    if (code === 'auth/unauthorized-domain') {
-      throw new Error('Domínio não autorizado no Firebase Auth para login Google.');
-    }
-    throw new Error('Não foi possível autenticar via Google.');
+    throw authErr;
   }
 
   try {
     return await fetchAdminUsersPage({ filter: 'all', pageSize: ADMIN_PAGE_SIZE });
   } catch (err: any) {
     await signOutAdmin();
-    if (err?.code === 'permission-denied' || String(err?.message || '').includes('permission')) {
-      throw new Error('Acesso negado: esta conta Google não está autorizada ou o e-mail não está verificado nas regras.');
+    const code = typeof err?.code === 'string' ? err.code : '';
+    if (code === 'permission-denied' || String(err?.message || '').includes('permission')) {
+      const permErr = new Error(
+        'Acesso negado: esta conta Google não está autorizada ou o e-mail não está verificado nas regras.'
+      ) as Error & { code?: string };
+      permErr.code = code || 'permission-denied';
+      throw permErr;
     }
     throw err;
   }

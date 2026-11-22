@@ -451,7 +451,13 @@ export function mountAdminOverlay(
       showAuthenticatedPanel(firstPage);
     } catch (err: any) {
       if (!isDestroyed) {
-        loginErrorEl.textContent = err?.message || 'Falha na autenticação Google.';
+        const rawMsg = typeof err?.message === 'string' ? err.message.trim() : '';
+        const errorCode = typeof err?.code === 'string' && err.code.trim() ? err.code.trim() : '';
+        const baseMsg = rawMsg && !rawMsg.includes('Não foi possível autenticar via Google')
+          ? `Não foi possível autenticar via Google: ${rawMsg}`
+          : rawMsg || 'Não foi possível autenticar via Google.';
+        loginErrorEl.textContent =
+          errorCode && !baseMsg.includes(errorCode) ? `${baseMsg} [${errorCode}]` : baseMsg;
       }
     } finally {
       if (!isDestroyed) {
