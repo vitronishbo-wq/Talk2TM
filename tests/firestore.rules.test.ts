@@ -100,10 +100,15 @@ async function runEmulatorRulesTests(): Promise<void> {
     const convAD = `conv_${uidA}_${uidD}`;
     const nowIso = new Date().toISOString();
 
-    const adminEmailMatch = rules.match(/request\.auth\.token\.email\s*==\s*'([^']+)'/);
+    const isAdminStart = rules.indexOf('function isAdmin()');
+    const isAdminEnd = rules.indexOf('function isProtectedLegacyUid(uid)');
+    const isAdminBlock =
+      isAdminStart >= 0 && isAdminEnd > isAdminStart ? rules.slice(isAdminStart, isAdminEnd) : '';
+    const adminEmailMatch = isAdminBlock.match(/request\.auth\.token\.email\s*==\s*'([^']+)'/);
     assert(
       Boolean(adminEmailMatch && adminEmailMatch[1] === 'vitronis.hbo@gmail.com') &&
-      rules.includes('request.auth.token.email_verified == true'),
+      isAdminBlock.includes('request.auth != null') &&
+      isAdminBlock.includes('request.auth.token.email_verified == true'),
       'firestore.rules deve exigir token.email == vitronis.hbo@gmail.com e token.email_verified == true em isAdmin()'
     );
     const adminEmail = adminEmailMatch![1];
