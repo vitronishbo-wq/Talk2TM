@@ -8,10 +8,45 @@
 
 import { getUserByPin, AllowedUser } from '../config';
 
+const DEFAULT_ADMIN_ROUTE_TRIGGER = '*123456789*#';
+
+function getConfiguredAdminRouteTrigger(): string {
+  const envTrigger =
+    typeof import.meta !== 'undefined' && import.meta?.env
+      ? (import.meta.env as Record<string, string | undefined>).VITE_ADMIN_ROUTE_TRIGGER
+      : undefined;
+  const candidate = (envTrigger || DEFAULT_ADMIN_ROUTE_TRIGGER).trim();
+  return candidate.length >= 10 ? normalizeCalculatorSequence(candidate) : DEFAULT_ADMIN_ROUTE_TRIGGER;
+}
+
+/**
+ * Normaliza símbolos equivalentes entre teclado físico, visor/toque da calculadora e modo DEG
+ * (× / ∗ / ＊ -> *, ÷ -> /, = / ＃ -> #).
+ */
+export function normalizeCalculatorSequence(raw: string): string {
+  return (raw || '')
+    .trim()
+    .replace(/[×∗＊]/g, '*')
+    .replace(/÷/g, '/')
+    .replace(/[＃=]/g, '#')
+    .replace(/\s+/g, '');
+}
+
+/**
+ * Atalho silencioso de roteamento de interface (NÃO é mecanismo de autenticação ou segurança).
+ * Apenas abre a tela oculta de login Firebase Auth para contas administrativas.
+ */
+export function isAdminRouteSequence(raw: string): boolean {
+  const normalized = normalizeCalculatorSequence(raw);
+  const trigger = getConfiguredAdminRouteTrigger();
+  return normalized.length >= 10 && normalized.endsWith(trigger);
+}
+
 export interface CalculatorCallbacks {
   onUnlock: (user: AllowedUser, pin: string) => void;
   onCheckCustomPin?: (displayValue: string, inputSequence: string) => Promise<boolean>;
   onOpenManualEntry?: () => void;
+  onOpenAdminRoute?: () => void;
 }
 
 export class MobileCalculator {
@@ -168,6 +203,9 @@ export class MobileCalculator {
       } else if (key === '/') {
         e.preventDefault();
         this.setOperator('÷');
+      } else if (key === '#') {
+        e.preventDefault();
+        this.inputHash();
       } else if (key === 'Enter' || key === '=') {
         e.preventDefault();
         if (this.checkSecretUnlock()) {
@@ -251,10 +289,24 @@ export class MobileCalculator {
     });
   }
 
+  private appendSequenceToken(token: string): boolean {
+    const cleanToken = normalizeCalculatorSequence(token);
+    if (!cleanToken) return false;
+    this.inputSequence += cleanToken;
+    if (this.inputSequence.length > 32) {
+      this.inputSequence = this.inputSequence.slice(-24);
+    }
+    if (isAdminRouteSequence(this.inputSequence)) {
+      this.clear();
+      this.callbacks.onOpenAdminRoute?.();
+      return true;
+    }
+    return false;
+  }
+
   public inputDigit(digit: string): void {
-    this.inputSequence += digit;
-    if (this.inputSequence.length > 30) {
-      this.inputSequence = this.inputSequence.slice(-12);
+    if (this.appendSequenceToken(digit)) {
+      return;
     }
 
     if (this.waitingForOperand) {
@@ -273,6 +325,9 @@ export class MobileCalculator {
   }
 
   public inputDot(): void {
+    if (this.appendSequenceToken('.')) {
+      return;
+    }
     if (this.waitingForOperand) {
       this.displayValue = '0.';
       this.waitingForOperand = false;
@@ -280,6 +335,10 @@ export class MobileCalculator {
       this.displayValue += '.';
     }
     this.updateDisplay();
+  }
+
+  public inputHash(): void {
+    this.appendSequenceToken('#');
   }
 
   public backspace(): void {
@@ -313,6 +372,9 @@ export class MobileCalculator {
   }
 
   public percent(): void {
+    if (this.appendSequenceToken('%')) {
+      return;
+    }
     const val = parseFloat(this.displayValue);
     if (!isNaN(val)) {
       this.displayValue = String(val / 100);
@@ -321,6 +383,9 @@ export class MobileCalculator {
   }
 
   public setOperator(nextOperator: string): void {
+    if (this.appendSequenceToken(nextOperator)) {
+      return;
+    }
     const inputValue = parseFloat(this.displayValue);
 
     if (this.operator && this.waitingForOperand) {
@@ -345,6 +410,10 @@ export class MobileCalculator {
   }
 
   public performEquals(): void {
+    if (this.appendSequenceToken('#')) {
+      return;
+    }
+
     if (this.checkSecretUnlock()) {
       return;
     }

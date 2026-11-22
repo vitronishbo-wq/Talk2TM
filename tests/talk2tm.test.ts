@@ -92,6 +92,7 @@ import {
   validateLocalPin,
   findLocalIdentityByPin,
   upsertLocalIdentity,
+  validateOptionalRecoveryEmail,
   TALK2TM_RESET_EPOCH,
   applyLocalResetEpochIfNeeded,
   LocalIdentity,
@@ -103,6 +104,9 @@ import {
   phoneHashToInternalEmail,
 } from '../src/utils/phone';
 import { testIdentityAcceptanceFlow } from '../src/firebase/diagnostic';
+import { normalizeCalculatorSequence, isAdminRouteSequence } from '../src/ui/calculator';
+import { formatAdminActivationDate } from '../src/ui/admin';
+import { ADMIN_PAGE_SIZE } from '../src/firebase/admin';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -1299,12 +1303,12 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       firestoreRules.indexOf('match /userProfiles/{talk2tmId}')
     );
     assert(
-      usersSection.includes('allow get: if isUser(uid);') &&
+      usersSection.includes('allow get: if isUser(uid) || isAdmin();') &&
       usersSection.includes('allow list: if false;') &&
       usersSection.includes('allow create: if isUser(uid)') &&
       usersSection.includes('allow update: if false;') &&
       usersSection.includes('isValidTalk2tmId(request.resource.data.talk2tmId)'),
-      'users/{uid} deve permitir leitura/criação apenas pelo próprio UID autenticado e bloquear list/update após criação'
+      'users/{uid} deve permitir leitura get apenas ao próprio UID ou Admin explícito e bloquear list/update após criação'
     );
   });
 
@@ -1471,6 +1475,99 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     );
   });
 
+  // 59. Opção C: E-mail de recuperação opcional (nunca obrigatório, bloqueia domínio interno e normaliza)
+  check('Opção C: validateOptionalRecoveryEmail aceita vazio, normaliza e bloqueia inválidos/@talk2tm.internal', () => {
+    const empty = validateOptionalRecoveryEmail('');
+    assert(empty.valid === true && empty.email === undefined, 'Campo vazio deve ser aceito sem erro');
+
+    const spaces = validateOptionalRecoveryEmail('   ');
+    assert(spaces.valid === true && spaces.email === undefined, 'Apenas espaços deve ser tratado como não informado');
+
+    const valid = validateOptionalRecoveryEmail('  Usuario.Teste@Gmail.COM  ');
+    assert(valid.valid === true && valid.email === 'usuario.teste@gmail.com', 'E-mail válido deve ser normalizado para minúsculas');
+
+    const badFormat = validateOptionalRecoveryEmail('nao-e-email');
+    assert(badFormat.valid === false, 'E-mail malformado deve ser rejeitado');
+
+    const internalEmail = validateOptionalRecoveryEmail('u_123@talk2tm.internal');
+    assert(internalEmail.valid === false, 'Domínio interno @talk2tm.internal deve ser rejeitado');
+  });
+
+  // 60. Admin Routing Discreto (>= 10 caracteres entre números e símbolos)
+  check('Admin Route: sequência *123456789*# na calculadora e DEG normaliza */× e #/= sem conflito com PINs', () => {
+    assert(normalizeCalculatorSequence(' * 123456789 * # ') === '*123456789*#', 'Deve remover espaços e preservar * e #');
+    assert(normalizeCalculatorSequence('×123456789×#') === '*123456789*#', 'Deve normalizar × para *');
+    assert(normalizeCalculatorSequence('×123456789×=') === '*123456789*#', 'Deve normalizar = da calculadora touch para #');
+    assert(normalizeCalculatorSequence('∗123456789∗＃') === '*123456789*#', 'Deve normalizar variantes Unicode de * e #');
+    assert(normalizeCalculatorSequence('9÷3') === '9/3', 'Deve normalizar ÷');
+    assert(isAdminRouteSequence('*123456789*#') === true, 'Sequência padrão no DEG deve acionar rota admin');
+    assert(isAdminRouteSequence('×123456789×#') === true, 'Sequência mista ×/# deve acionar rota admin');
+    assert(isAdminRouteSequence('×123456789×=') === true, 'Sequência por toque (×123456789×=) deve acionar rota admin');
+    assert(isAdminRouteSequence('55*123456789*#') === true, 'Sequência com sufixo deve acionar rota admin');
+    assert(isAdminRouteSequence('852456') === false, 'PIN de Truman não pode acionar rota admin');
+    assert(isAdminRouteSequence('135790') === false, 'PIN de Mãezinha não pode acionar rota admin');
+    assert(isAdminRouteSequence('*123456*#') === false, 'Sequência curta < 10 chars não deve acionar rota admin');
+  });
+
+  // 61. Admin UI & Isolamento de Sessão / Privacidade / Sem Segredos
+  check('Admin Contratos: sessão isolada inMemoryPersistence, Google Sign-In, paginação 20, phoneMasked e zero segredos no JS', () => {
+    assert(ADMIN_PAGE_SIZE === 20, 'Paginação administrativa deve ser exactamente de 20 utilizadores por página');
+    assert(formatAdminActivationDate('2026-11-11T12:00:00.000Z') === '11/11/2026', 'Data deve formatar em DD/MM/AAAA');
+    assert(formatAdminActivationDate('') === '—', 'Data vazia deve retornar travessão');
+
+    const adminFirebaseSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/firebase/admin.ts'), 'utf8');
+    const adminUiSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/admin.ts'), 'utf8');
+
+    assert(adminFirebaseSrc.includes("'talk2tm-admin'"), 'Admin deve usar instância Firebase nomeada isolada');
+    assert(adminFirebaseSrc.includes('inMemoryPersistence'), 'Auth Admin deve usar inMemoryPersistence em RAM');
+    assert(
+      adminFirebaseSrc.includes('GoogleAuthProvider') &&
+      adminFirebaseSrc.includes('signInWithPopup') &&
+      adminFirebaseSrc.includes('signInAdminWithGoogle'),
+      'Módulo admin deve oferecer Google Sign-In isolado em RAM'
+    );
+    assert(adminUiSrc.includes('signInAdminWithGoogle') && adminUiSrc.includes('[entrar com Google]'), 'UI admin deve exibir botão Google Sign-In junto ao formulário');
+    assert(adminFirebaseSrc.includes('Base Orgânico'), 'Plano fallback deve ser Base Orgânico');
+    assert(!adminFirebaseSrc.includes("'conversationInvites'") && !adminFirebaseSrc.includes('"conversationInvites"'), 'Módulo admin não pode consultar conversationInvites nesta fase');
+    assert(
+      !adminFirebaseSrc.includes("'conversations'") &&
+      !adminFirebaseSrc.includes("'messages'") &&
+      !adminFirebaseSrc.includes("'rooms'"),
+      'Módulo admin não pode consultar conversas ou mensagens'
+    );
+    assert(!adminUiSrc.includes('Convidados'), 'Coluna Convidados por utilizador deve permanecer removida nesta fase');
+    assert(!adminUiSrc.includes('@talk2tm') && !adminFirebaseSrc.includes('password123') && !adminUiSrc.includes('vitronis.hbo'), 'Nenhuma credencial administrativa pode existir no JS');
+  });
+
+  // 62. Auditoria Estática de firestore.rules: isAdmin() por e-mail verificado, isCallerActive() e isolamento
+  check('Firestore Rules Audit: autorização Admin por e-mail master verificado, suspensão real e proteção do legado', () => {
+    const rulesSrc = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
+    assert(rulesSrc.includes('function isAdmin()'), 'firestore.rules deve definir isAdmin()');
+    const adminFnBlock = rulesSrc.slice(
+      rulesSrc.indexOf('function isAdmin()'),
+      rulesSrc.indexOf('function isProtectedLegacyUid(uid)')
+    );
+    assert(
+      adminFnBlock.includes('request.auth != null') &&
+      adminFnBlock.includes("request.auth.token.email == 'vitronis.hbo@gmail.com'") &&
+      adminFnBlock.includes('request.auth.token.email_verified == true'),
+      'isAdmin() deve autorizar apenas e-mail master vitronis.hbo@gmail.com com email_verified == true'
+    );
+    assert(rulesSrc.includes('function isCallerActive()'), 'firestore.rules deve definir isCallerActive()');
+    assert(rulesSrc.includes('function isProtectedLegacyUid(uid)'), 'firestore.rules deve proteger UIDs legados Truman/Mãezinha');
+    assert(rulesSrc.includes('allow list: if isAdmin();'), 'Apenas Admin pode listar userProfiles');
+
+    const invitesBlock = rulesSrc.slice(rulesSrc.indexOf('match /conversationInvites/{inviteId}'));
+    assert(!invitesBlock.includes('isAdmin()'), 'conversationInvites não pode conceder leitura ou escrita ao Admin');
+
+    const convBlock = rulesSrc.slice(
+      rulesSrc.indexOf('match /conversations/{conversationId}'),
+      rulesSrc.indexOf('match /conversationInvites/{inviteId}')
+    );
+    assert(!convBlock.includes('isAdmin()'), 'conversations e messages nunca podem ser lidos pelo Admin');
+    assert(convBlock.includes('isCallerActive()'), 'conversations e messages devem exigir isCallerActive()');
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
@@ -1632,6 +1729,41 @@ export async function runAsyncZeroCostTests(): Promise<{ passed: number; total: 
     assert(found1?.uid === 'uid_multi_1' && found1.displayName === 'Joao', 'PIN de 4 dígitos deve resolver Conta 1');
     assert(found2?.uid === 'uid_multi_2' && found2.displayName === 'Maria', 'PIN de 6 dígitos deve resolver Conta 2');
     assert(notFound === null, 'PIN desconhecido deve retornar null');
+  });
+
+  // 62. Opção C: upsertLocalIdentity preserva recoveryEmail e pendingRecoveryEmail ao sanitizar segredo
+  await checkAsync('Opção C: upsertLocalIdentity preserva recoveryEmail e pendingRecoveryEmail no cofre local', async () => {
+    const fakeStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => fakeStore[k] ?? null,
+      setItem: (k: string, v: string) => { fakeStore[k] = v; },
+      removeItem: (k: string) => { delete fakeStore[k]; },
+    };
+
+    const sealed = await sealAuthSecretWithPin('sec_email_test', '7410');
+    upsertLocalIdentity(
+      {
+        uid: 'uid_email_1',
+        talk2tmId: 'TM-EMAI-1234',
+        displayName: 'Carlos',
+        internalEmail: 'carlos@example.com',
+        recoveryEmail: 'carlos@example.com',
+        pendingRecoveryEmail: 'carlos.novo@example.com',
+        internalSecret: 'DeveriaSumir',
+        phoneHash: 'c'.repeat(64),
+        phoneMasked: '+244 ••• 999',
+        ...sealed,
+        createdAt: '2026-11-20T00:00:00.000Z',
+      },
+      true,
+      mockStorage
+    );
+
+    const restored = getLocalIdentity(mockStorage);
+    assert(restored !== null, 'Identidade deve existir no cofre');
+    assert(restored?.recoveryEmail === 'carlos@example.com', 'recoveryEmail deve ser preservado');
+    assert(restored?.pendingRecoveryEmail === 'carlos.novo@example.com', 'pendingRecoveryEmail deve ser preservado');
+    assert(restored?.internalSecret === undefined, 'internalSecret deve continuar sendo removido');
   });
 
   console.log(`\x1b[32m✔ Talk2TM Zero-Cost Async: ${passed}/${total} testes assíncronos executados com 100% de aprovação.\x1b[0m`);

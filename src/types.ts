@@ -41,6 +41,8 @@ export interface UserSession {
   talk2tmId?: string;
   conversationId?: string;
   phoneMasked?: string;
+  recoveryEmail?: string;
+  pendingRecoveryEmail?: string;
 }
 
 export interface ChatConfig {
@@ -78,6 +80,20 @@ export interface UserProfile {
   displayName: string;
   active: boolean;
   createdAt: string;
+  plan?: string;
+}
+
+export type AdminStatusFilter = 'all' | 'active' | 'inactive';
+
+export interface AdminUserRow {
+  uid: string;
+  talk2tmId: string;
+  displayName: string;
+  phoneMasked: string;
+  phoneHash?: string;
+  createdAt: string;
+  plan: string;
+  active: boolean;
 }
 
 /**

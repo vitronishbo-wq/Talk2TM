@@ -36,11 +36,14 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 
 function assert(cond: boolean, message: string): void {
@@ -97,10 +100,26 @@ async function runEmulatorRulesTests(): Promise<void> {
     const convAD = `conv_${uidA}_${uidD}`;
     const nowIso = new Date().toISOString();
 
+    const adminEmailMatch = rules.match(/request\.auth\.token\.email\s*==\s*'([^']+)'/);
+    assert(
+      Boolean(adminEmailMatch && adminEmailMatch[1] === 'vitronis.hbo@gmail.com') &&
+      rules.includes('request.auth.token.email_verified == true'),
+      'firestore.rules deve exigir token.email == vitronis.hbo@gmail.com e token.email_verified == true em isAdmin()'
+    );
+    const adminEmail = adminEmailMatch![1];
+
     const ctxA = testEnv.authenticatedContext(uidA, { email: 'tm_aaaa_2222@talk2tm.internal' });
     const ctxB = testEnv.authenticatedContext(uidB, { email: 'tm_bbbb_3333@talk2tm.internal' });
     const ctxC = testEnv.authenticatedContext(uidC, { email: 'tm_cccc_4444@talk2tm.internal' });
     const ctxD = testEnv.authenticatedContext(uidD, { email: 'tm_dddd_5555@talk2tm.internal' });
+    const ctxAdmin = testEnv.authenticatedContext('uid_admin_master_vitronis', {
+      email: adminEmail,
+      email_verified: true,
+    });
+    const ctxAdminUnverified = testEnv.authenticatedContext('uid_admin_unverified', {
+      email: adminEmail,
+      email_verified: false,
+    });
     const ctxTruman = testEnv.authenticatedContext('uid_truman_852456', {
       email: 'truman@talk2tm.internal',
     });
@@ -113,6 +132,8 @@ async function runEmulatorRulesTests(): Promise<void> {
     const dbB = ctxB.firestore();
     const dbC = ctxC.firestore();
     const dbD = ctxD.firestore();
+    const dbAdmin = ctxAdmin.firestore();
+    const dbAdminUnverified = ctxAdminUnverified.firestore();
     const dbTruman = ctxTruman.firestore();
     const dbMaezinha = ctxMaezinha.firestore();
     const dbUnauth = unauth.firestore();
@@ -979,8 +1000,11 @@ async function runEmulatorRulesTests(): Promise<void> {
     await testCase('15. Perfis inactivos (active: false) bloqueados ao criar ou reabrir convites', async () => {
       const convCD = `conv_${uidC}_${uidD}`; // uidC < uidD
 
-      // Remetente D inactivo não pode criar convite
-      await assertSucceeds(updateDoc(doc(dbD, 'userProfiles', talkIdD), { displayName: 'Conta D', active: false }));
+      // Utilizador comum não pode desactivar o próprio perfil
+      await assertFails(updateDoc(doc(dbD, 'userProfiles', talkIdD), { displayName: 'Conta D', active: false }));
+
+      // Remetente D inactivo (desactivado pelo Admin) não pode criar convite
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdD), { active: false }));
       await assertFails(
         setDoc(doc(dbD, 'conversationInvites', convCD), {
           inviteId: convCD,
@@ -997,8 +1021,8 @@ async function runEmulatorRulesTests(): Promise<void> {
       );
 
       // Remetente D activo mas destinatário C inactivo também não pode criar convite
-      await assertSucceeds(updateDoc(doc(dbD, 'userProfiles', talkIdD), { displayName: 'Conta D', active: true }));
-      await assertSucceeds(updateDoc(doc(dbC, 'userProfiles', talkIdC), { displayName: 'Conta C', active: false }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdD), { active: true }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdC), { active: false }));
       await assertFails(
         setDoc(doc(dbD, 'conversationInvites', convCD), {
           inviteId: convCD,
@@ -1015,7 +1039,7 @@ async function runEmulatorRulesTests(): Promise<void> {
       );
 
       // Com ambos activos, cria e recusa para testar reabertura
-      await assertSucceeds(updateDoc(doc(dbC, 'userProfiles', talkIdC), { displayName: 'Conta C', active: true }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdC), { active: true }));
       await assertSucceeds(
         setDoc(doc(dbD, 'conversationInvites', convCD), {
           inviteId: convCD,
@@ -1033,7 +1057,7 @@ async function runEmulatorRulesTests(): Promise<void> {
       await assertSucceeds(updateDoc(doc(dbC, 'conversationInvites', convCD), { status: 'declined', updatedAt: nowIso }));
 
       // Se remetente estiver inactivo na reabertura -> rejeita
-      await assertSucceeds(updateDoc(doc(dbD, 'userProfiles', talkIdD), { displayName: 'Conta D', active: false }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdD), { active: false }));
       await assertFails(
         updateDoc(doc(dbD, 'conversationInvites', convCD), {
           fromUid: uidD,
@@ -1047,8 +1071,8 @@ async function runEmulatorRulesTests(): Promise<void> {
       );
 
       // Se destinatário estiver inactivo na reabertura -> rejeita
-      await assertSucceeds(updateDoc(doc(dbD, 'userProfiles', talkIdD), { displayName: 'Conta D', active: true }));
-      await assertSucceeds(updateDoc(doc(dbC, 'userProfiles', talkIdC), { displayName: 'Conta C', active: false }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdD), { active: true }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdC), { active: false }));
       await assertFails(
         updateDoc(doc(dbD, 'conversationInvites', convCD), {
           fromUid: uidD,
@@ -1062,7 +1086,7 @@ async function runEmulatorRulesTests(): Promise<void> {
       );
 
       // Com ambos activos novamente, reabertura funciona
-      await assertSucceeds(updateDoc(doc(dbC, 'userProfiles', talkIdC), { displayName: 'Conta C', active: true }));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdC), { active: true }));
       await assertSucceeds(
         updateDoc(doc(dbD, 'conversationInvites', convCD), {
           fromUid: uidD,
@@ -1209,6 +1233,192 @@ async function runEmulatorRulesTests(): Promise<void> {
       await assertFails(updateDoc(doc(dbE, 'phoneLookup', phoneHashE), { displayName: 'Conta E Editada' }));
       await assertSucceeds(updateDoc(doc(dbE, 'userProfiles', talkIdE), { displayName: 'Conta E Editada', active: true }));
       await assertSucceeds(updateDoc(doc(dbE, 'phoneLookup', phoneHashE), { displayName: 'Conta E Editada', active: true }));
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 18: Administração (isAdmin): metadados paginados, isolamento de privacidade e legado protegido
+    // -----------------------------------------------------------------------
+    await testCase('18. Admin consulta metadados paginados, NÃO acede mensagens/convites e NÃO desactiva legado', async () => {
+      // Utilizador comum e e-mail master NÃO verificado nunca acedem ao escopo administrativo
+      await assertFails(getDocs(collection(dbC, 'userProfiles')));
+      await assertFails(updateDoc(doc(dbA, 'userProfiles', talkIdA), { plan: 'Pro', displayName: 'Conta A', active: true }));
+      await assertFails(updateDoc(doc(dbC, 'userProfiles', talkIdA), { active: false }));
+      await assertFails(getDocs(collection(dbAdminUnverified, 'userProfiles')));
+      await assertFails(getDoc(doc(dbAdminUnverified, 'users', 'uid_user_eee_555')));
+      await assertFails(updateDoc(doc(dbAdminUnverified, 'userProfiles', talkIdA), { active: false }));
+
+      // Admin consegue listar paginado (limit 20) e filtrar por active + orderBy createdAt
+      const pageSnap = await assertSucceeds(
+        getDocs(query(collection(dbAdmin, 'userProfiles'), orderBy('createdAt', 'desc'), limit(20)))
+      );
+      assert(pageSnap.size >= 4, 'Admin deve listar perfis paginados');
+
+      const activeSnap = await assertSucceeds(
+        getDocs(
+          query(
+            collection(dbAdmin, 'userProfiles'),
+            where('active', '==', true),
+            orderBy('createdAt', 'desc'),
+            limit(20)
+          )
+        )
+      );
+      assert(activeSnap.size >= 4, 'Admin deve filtrar perfis activos com índice composto');
+
+      // Admin consegue obter metadado users/{uid} (ex.: phoneMasked), mas nunca listar users
+      const userSnap = await assertSucceeds(getDoc(doc(dbAdmin, 'users', 'uid_user_eee_555')));
+      assert(userSnap.exists() && userSnap.data().phoneMasked === '+244 ••• 555', 'Admin consulta phoneMasked do utilizador');
+      await assertFails(getDocs(collection(dbAdmin, 'users')));
+
+      // PRIVACIDADE & ESCOPO: Admin NUNCA pode consultar/listar convites, conversas ou mensagens (bilaterais ou legado)
+      await assertFails(getDoc(doc(dbAdmin, 'conversationInvites', convAB)));
+      await assertFails(getDocs(collection(dbAdmin, 'conversationInvites')));
+      await assertFails(getDoc(doc(dbAdmin, 'conversations', convAB)));
+      await assertFails(getDocs(collection(dbAdmin, 'conversations')));
+      await assertFails(getDoc(doc(dbAdmin, 'conversations', convAB, 'messages', msgIdA1)));
+      await assertFails(getDocs(collection(dbAdmin, 'conversations', convAB, 'messages')));
+      await assertFails(getDoc(doc(dbAdmin, 'rooms', 'truman-maezinha')));
+      await assertFails(getDocs(collection(dbAdmin, 'rooms')));
+      await assertFails(getDoc(doc(dbAdmin, 'messages', legacyMsgT)));
+      await assertFails(getDocs(collection(dbAdmin, 'messages')));
+
+      // Admin não pode alterar displayName nem apagar contas
+      await assertFails(updateDoc(doc(dbAdmin, 'userProfiles', talkIdA), { displayName: 'AlteradoAdmin' }));
+      await assertFails(deleteDoc(doc(dbAdmin, 'userProfiles', talkIdA)));
+
+      // LEGADO PROTEGIDO: Mesmo que exista perfil de Truman/Mãezinha, Admin NÃO pode desactivar UIDs legados
+      const legacyTrumanProfileId = 'TM-TRUM-8524';
+      const legacyMaezinhaProfileId = 'TM-MAEZ-1357';
+      await testEnv.withSecurityRulesDisabled(async (emulAdminCtx) => {
+        const emulDb = emulAdminCtx.firestore();
+        await setDoc(doc(emulDb, 'userProfiles', legacyTrumanProfileId), {
+          talk2tmId: legacyTrumanProfileId,
+          uid: 'uid_truman_852456',
+          displayName: 'Truman',
+          active: true,
+          createdAt: nowIso,
+        });
+        await setDoc(doc(emulDb, 'userProfiles', legacyMaezinhaProfileId), {
+          talk2tmId: legacyMaezinhaProfileId,
+          uid: 'uid_maezinha_135790',
+          displayName: 'Mãezinha',
+          active: true,
+          createdAt: nowIso,
+        });
+      });
+
+      await assertFails(updateDoc(doc(dbAdmin, 'userProfiles', legacyTrumanProfileId), { active: false }));
+      await assertFails(updateDoc(doc(dbAdmin, 'userProfiles', legacyMaezinhaProfileId), { active: false }));
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 19: Suspensão real em sessão já aberta e recuperação após reactivação
+    // -----------------------------------------------------------------------
+    await testCase('19. Suspensão bloqueia envio/leitura/auto-reactivação na sessão aberta; reactivação restaura acesso', async () => {
+      const uidE = 'uid_user_eee_555';
+      const talkIdE = 'TM-EEEE-6666';
+      const phoneHashE = 'e'.repeat(64);
+      const ctxE = testEnv.authenticatedContext(uidE, { email: `u_${phoneHashE.slice(0, 32)}@talk2tm.internal` });
+      const dbE = ctxE.firestore();
+
+      // 1. Admin desactiva conta A (sessão já aberta em convAB) e conta E (userProfiles + phoneLookup)
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdA), { active: false, plan: 'Base Orgânico' }));
+
+      const batchDeactivateE = writeBatch(dbAdmin);
+      batchDeactivateE.update(doc(dbAdmin, 'userProfiles', talkIdE), { active: false });
+      batchDeactivateE.update(doc(dbAdmin, 'phoneLookup', phoneHashE), { active: false });
+      await assertSucceeds(batchDeactivateE.commit());
+
+      // 2. Utilizador A desactivado que continua com sessão Auth aberta FALHA em todas as operações protegidas:
+      //    a) Tentativa de enviar mensagem
+      const blockedMsgId = `${convAB}_cli_blocked_while_suspended`;
+      await assertFails(
+        setDoc(doc(dbA, 'conversations', convAB, 'messages', blockedMsgId), {
+          messageId: blockedMsgId,
+          conversationId: convAB,
+          senderId: uidA,
+          senderTalk2tmId: talkIdA,
+          text: 'Não devo conseguir enviar suspenso',
+          clientId: 'cli_blocked',
+          createdAt: new Date().toISOString(),
+          status: 'synced',
+        })
+      );
+
+      //    b) Tentativa de ler ou listar mensagens e ler/atualizar conversa
+      await assertFails(getDoc(doc(dbA, 'conversations', convAB, 'messages', msgIdA1)));
+      await assertFails(getDocs(collection(dbA, 'conversations', convAB, 'messages')));
+      await assertFails(getDoc(doc(dbA, 'conversations', convAB)));
+      await assertFails(getDocs(query(collection(dbA, 'conversations'), where('participantA', '==', uidA))));
+      await assertFails(updateDoc(doc(dbA, 'conversations', convAB), { lastReadA: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+
+      //    c) Tentativa de reactivar a própria conta (userProfiles e phoneLookup) ou alterar nome enquanto suspensa
+      await assertFails(updateDoc(doc(dbA, 'userProfiles', talkIdA), { active: true }));
+      await assertFails(updateDoc(doc(dbA, 'userProfiles', talkIdA), { displayName: 'Tentativa', active: true }));
+      await assertFails(updateDoc(doc(dbE, 'userProfiles', talkIdE), { active: true }));
+      await assertFails(updateDoc(doc(dbE, 'phoneLookup', phoneHashE), { active: true }));
+
+      //    d) Tentativa de criar ou modificar convites enquanto suspensa
+      await assertFails(
+        setDoc(doc(dbA, 'conversationInvites', convAD), {
+          inviteId: convAD,
+          fromUid: uidA,
+          fromDisplayName: 'Conta A',
+          fromTalk2tmId: talkIdA,
+          toTalk2tmId: talkIdD,
+          toUid: uidD,
+          conversationId: convAD,
+          status: 'pending',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      //    e) Truman e Mãezinha continuam totalmente operacionais sem impacto
+      const legAfterSuspendId = 'truman-maezinha_cli_leg_ok_suspended_others';
+      await assertSucceeds(
+        setDoc(doc(dbTruman, 'messages', legAfterSuspendId), {
+          messageId: legAfterSuspendId,
+          room: 'truman-maezinha',
+          sender: 'Truman',
+          senderId: 'uid_truman_852456',
+          text: 'Legado intacto!',
+          clientId: 'cli_leg_ok',
+          createdAt: new Date().toISOString(),
+          status: 'synced',
+        })
+      );
+
+      // 3. Admin reactiva conta A (e conta E)
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'userProfiles', talkIdA), { active: true }));
+      const batchReactivateE = writeBatch(dbAdmin);
+      batchReactivateE.update(doc(dbAdmin, 'userProfiles', talkIdE), { active: true });
+      batchReactivateE.update(doc(dbAdmin, 'phoneLookup', phoneHashE), { active: true });
+      await assertSucceeds(batchReactivateE.commit());
+
+      // 4. Utilizador reactivado recupera o acesso imediatamente
+      await assertSucceeds(getDoc(doc(dbA, 'conversations', convAB)));
+      const msgsAfterReactivate = await assertSucceeds(getDocs(collection(dbA, 'conversations', convAB, 'messages')));
+      assert(msgsAfterReactivate.size >= 1, 'A reactivado deve voltar a listar mensagens');
+      await assertSucceeds(
+        updateDoc(doc(dbA, 'conversations', convAB), {
+          lastReadA: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+      );
+      const recoveredMsgId = `${convAB}_cli_recovered_after_reactivation`;
+      await assertSucceeds(
+        setDoc(doc(dbA, 'conversations', convAB, 'messages', recoveredMsgId), {
+          messageId: recoveredMsgId,
+          conversationId: convAB,
+          senderId: uidA,
+          senderTalk2tmId: talkIdA,
+          text: 'Conta reactivada com sucesso!',
+          clientId: 'cli_recovered',
+          createdAt: new Date().toISOString(),
+          status: 'synced',
+        })
+      );
     });
 
     console.log(`\n\x1b[32m✔ Firebase Emulator Suite: ${passed}/${total} cenários reais aprovados com 100% de rigor.\x1b[0m`);

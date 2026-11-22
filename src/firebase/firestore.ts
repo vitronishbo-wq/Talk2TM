@@ -1,4 +1,4 @@
-import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
+import { initializeApp, getApps, FirebaseApp, FirebaseOptions } from 'firebase/app';
 import {
   getAuth,
   signInWithEmailAndPassword,
@@ -147,6 +147,13 @@ export function getFirebaseAuth(): Auth | null {
 
 export function getFirebaseDB(): Firestore | null {
   return firestoreDb;
+}
+
+export async function getFirebaseAppOptions(): Promise<FirebaseOptions | null> {
+  if (!firebaseApp) {
+    await initFirebase();
+  }
+  return firebaseApp ? firebaseApp.options : null;
 }
 
 /**
@@ -416,10 +423,11 @@ export async function initFirebase(): Promise<{ db: Firestore | null; configured
   }
 
   try {
-    if (!getApps().length) {
+    const defaultApp = getApps().find((a) => a.name === '[DEFAULT]');
+    if (!defaultApp) {
       firebaseApp = initializeApp(config);
     } else {
-      firebaseApp = getApps()[0];
+      firebaseApp = defaultApp;
     }
 
     try {
@@ -1635,5 +1643,30 @@ export async function fetchChannelMetadataFromServer(
       return null;
     }
   }
+}
+
+/**
+ * Monitora o próprio documento userProfiles/{talk2tmId} em tempo real enquanto a sessão está aberta,
+ * permitindo aplicar desativação administrativa imediatamente sem esperar nova autenticação.
+ */
+export function subscribeToOwnUserProfile(
+  talk2tmId: string,
+  onProfile: (profile: UserProfile) => void
+): Unsubscribe {
+  if (!firestoreDb || !talk2tmId || !isAuthValidAndNonAnonymous()) {
+    return () => {};
+  }
+  const ref = doc(firestoreDb, 'userProfiles', talk2tmId);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (snap.exists()) {
+        onProfile(snap.data() as UserProfile);
+      }
+    },
+    (err) => {
+      console.debug('Talk2TM: Listener de estado do perfil encerrado:', err?.message);
+    }
+  );
 }
 

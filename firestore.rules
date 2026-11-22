@@ -42,6 +42,17 @@ service cloud.firestore {
       return request.auth.token.email == 'truman@talk2tm.internal' ? 'Truman' : 'Mãezinha';
     }
 
+    // Conta administrativa autorizada exclusivamente pelo e-mail master verificado no Firebase Auth
+    function isAdmin() {
+      return request.auth != null &&
+        request.auth.token.email == 'vitronis.hbo@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isProtectedLegacyUid(uid) {
+      return uid == 'uid_truman_852456' || uid == 'uid_maezinha_135790';
+    }
+
     // Validação estrita da política de eliminação individual (deletedFor)
     function isValidIndividualDelete(existingData, newData) {
       return newData.diff(existingData).affectedKeys().hasOnly(['deletedFor']) &&
@@ -238,9 +249,20 @@ service cloud.firestore {
       return hash is string && hash.matches('^[a-f0-9]{64}$');
     }
 
-    // 1. users/{uid} — Metadados privados da conta (imutável após criação)
+    function callerTalk2tmId() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId;
+    }
+
+    function isCallerActive() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        exists(/databases/$(database)/documents/userProfiles/$(callerTalk2tmId())) &&
+        get(/databases/$(database)/documents/userProfiles/$(callerTalk2tmId())).data.active == true;
+    }
+
+    // 1. users/{uid} — Metadados privados da conta (imutável após criação; get permitido ao dono ou admin)
     match /users/{uid} {
-      allow get: if isUser(uid);
+      allow get: if isUser(uid) || isAdmin();
       allow list: if false;
       allow create: if isUser(uid) &&
                        request.resource.data.keys().hasAll(['uid', 'talk2tmId', 'createdAt']) &&
@@ -255,34 +277,59 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // 2. userProfiles/{talk2tmId} — Índice público para busca e vínculo bilateral interno
+    // 2. userProfiles/{talk2tmId} — Índice para descoberta 1:1 e gestão administrativa de estado/plano
     match /userProfiles/{talk2tmId} {
-      allow read: if isAuthenticated();
+      allow get: if isAuthenticated();
+      allow list: if isAdmin();
       allow create: if isAuthenticated() &&
                        isValidTalk2tmId(talk2tmId) &&
                        request.resource.data.keys().hasAll(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt']) &&
-                       request.resource.data.keys().hasOnly(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt', 'plan']) &&
                        request.resource.data.uid == request.auth.uid &&
                        request.resource.data.talk2tmId == talk2tmId &&
                        request.resource.data.displayName is string &&
                        request.resource.data.displayName.size() >= 1 &&
                        request.resource.data.displayName.size() <= 30 &&
                        request.resource.data.active is bool &&
+                       request.resource.data.active == true &&
+                       (!('plan' in request.resource.data) || (
+                         request.resource.data.plan is string &&
+                         request.resource.data.plan.size() >= 1 &&
+                         request.resource.data.plan.size() <= 40
+                       )) &&
                        request.resource.data.createdAt is string &&
                        request.resource.data.createdAt.size() >= 1 &&
                        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId == talk2tmId;
       allow update: if isAuthenticated() &&
                        isValidTalk2tmId(talk2tmId) &&
-                       resource.data.uid == request.auth.uid &&
                        request.resource.data.uid == resource.data.uid &&
                        request.resource.data.talk2tmId == resource.data.talk2tmId &&
                        request.resource.data.createdAt == resource.data.createdAt &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
-                       request.resource.data.displayName is string &&
-                       request.resource.data.displayName.size() >= 1 &&
-                       request.resource.data.displayName.size() <= 30 &&
-                       request.resource.data.active is bool;
+                       (
+                         (
+                           resource.data.uid == request.auth.uid &&
+                           resource.data.active == true &&
+                           request.resource.data.active == true &&
+                           request.resource.data.get('plan', null) == resource.data.get('plan', null) &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
+                           request.resource.data.displayName is string &&
+                           request.resource.data.displayName.size() >= 1 &&
+                           request.resource.data.displayName.size() <= 30
+                         ) ||
+                         (
+                           isAdmin() &&
+                           !isProtectedLegacyUid(resource.data.uid) &&
+                           request.resource.data.displayName == resource.data.displayName &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active', 'plan']) &&
+                           request.resource.data.active is bool &&
+                           (!('plan' in request.resource.data) || (
+                             request.resource.data.plan is string &&
+                             request.resource.data.plan.size() >= 1 &&
+                             request.resource.data.plan.size() <= 40
+                           ))
+                         )
+                       );
       allow delete: if false;
     }
 
@@ -301,6 +348,7 @@ service cloud.firestore {
                        request.resource.data.displayName.size() >= 1 &&
                        request.resource.data.displayName.size() <= 30 &&
                        request.resource.data.active is bool &&
+                       request.resource.data.active == true &&
                        request.resource.data.createdAt is string &&
                        request.resource.data.createdAt.size() >= 1 &&
                        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
@@ -310,18 +358,31 @@ service cloud.firestore {
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)).data.displayName == request.resource.data.displayName;
       allow update: if isAuthenticated() &&
                        isValidPhoneHash(phoneHash) &&
-                       resource.data.uid == request.auth.uid &&
                        request.resource.data.uid == resource.data.uid &&
                        request.resource.data.phoneHash == resource.data.phoneHash &&
                        request.resource.data.talk2tmId == resource.data.talk2tmId &&
                        request.resource.data.createdAt == resource.data.createdAt &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
-                       request.resource.data.displayName is string &&
-                       request.resource.data.displayName.size() >= 1 &&
-                       request.resource.data.displayName.size() <= 30 &&
-                       request.resource.data.active is bool &&
-                       exists(/databases/$(database)/documents/userProfiles/$(resource.data.talk2tmId)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(resource.data.talk2tmId)).data.displayName == request.resource.data.displayName;
+                       (
+                         (
+                           resource.data.uid == request.auth.uid &&
+                           resource.data.active == true &&
+                           request.resource.data.active == true &&
+                           isCallerActive() &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'active']) &&
+                           request.resource.data.displayName is string &&
+                           request.resource.data.displayName.size() >= 1 &&
+                           request.resource.data.displayName.size() <= 30 &&
+                           exists(/databases/$(database)/documents/userProfiles/$(resource.data.talk2tmId)) &&
+                           get(/databases/$(database)/documents/userProfiles/$(resource.data.talk2tmId)).data.displayName == request.resource.data.displayName
+                         ) ||
+                         (
+                           isAdmin() &&
+                           !isProtectedLegacyUid(resource.data.uid) &&
+                           request.resource.data.displayName == resource.data.displayName &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active']) &&
+                           request.resource.data.active is bool
+                         )
+                       );
       allow delete: if false;
     }
 
@@ -355,10 +416,11 @@ service cloud.firestore {
     match /conversations/{conversationId} {
       allow get: if isAuthenticated() &&
                     isValidId(conversationId) &&
-                    (resource == null || isConversationParticipant(resource.data));
-      allow list: if isConversationParticipant(resource.data);
+                    (resource == null || (isConversationParticipant(resource.data) && isCallerActive()));
+      allow list: if isConversationParticipant(resource.data) && isCallerActive();
       allow create: if isAuthenticated() &&
                        isValidId(conversationId) &&
+                       isCallerActive() &&
                        request.resource.data.keys().hasAll([
                          'conversationId', 'participantA', 'participantB',
                          'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
@@ -399,9 +461,11 @@ service cloud.firestore {
                        get(/databases/$(database)/documents/users/$(request.resource.data.participantB)).data.talk2tmId == request.resource.data.talk2tmIdB &&
                        exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)) &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.uid == request.resource.data.participantA &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.active == true &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.displayName == request.resource.data.displayNameA &&
                        exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)) &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.uid == request.resource.data.participantB &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.active == true &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.displayName == request.resource.data.displayNameB &&
                        exists(/databases/$(database)/documents/conversationInvites/$(conversationId)) &&
                        inviteMatchesConversationPair(
@@ -414,6 +478,7 @@ service cloud.firestore {
                        );
       allow update: if isValidId(conversationId) &&
                        isConversationParticipant(resource.data) &&
+                       isCallerActive() &&
                        request.resource.data.conversationId == resource.data.conversationId &&
                        request.resource.data.participantA == resource.data.participantA &&
                        request.resource.data.participantB == resource.data.participantB &&
@@ -449,13 +514,16 @@ service cloud.firestore {
         allow get: if isAuthenticated() &&
                       isValidId(conversationId) &&
                       isValidId(messageId) &&
-                      isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
+                      isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                      isCallerActive();
         allow list: if isAuthenticated() &&
                        isValidId(conversationId) &&
-                       isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
+                       isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                       isCallerActive();
         allow create: if isValidId(conversationId) &&
                          isValidId(messageId) &&
                          isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         isCallerActive() &&
                          request.resource.data.keys().hasAll([
                            'messageId', 'conversationId', 'senderId', 'senderTalk2tmId',
                            'text', 'clientId', 'createdAt'
@@ -482,6 +550,7 @@ service cloud.firestore {
         allow update: if isValidId(conversationId) &&
                          isValidId(messageId) &&
                          isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         isCallerActive() &&
                          isValidIndividualDelete(resource.data, request.resource.data);
         allow delete: if false;
       }
@@ -543,6 +612,7 @@ service cloud.firestore {
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.active == true;
       allow update: if isAuthenticated() &&
                        isValidId(inviteId) &&
+                       isCallerActive() &&
                        request.resource.data.inviteId == resource.data.inviteId &&
                        request.resource.data.conversationId == resource.data.conversationId &&
                        request.resource.data.createdAt == resource.data.createdAt &&
@@ -554,10 +624,17 @@ service cloud.firestore {
                            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
                            (
                              (resource.data.fromUid == request.auth.uid && request.resource.data.status == 'cancelled') ||
-                             (resource.data.toUid == request.auth.uid && (
-                               request.resource.data.status == 'accepted' ||
-                               request.resource.data.status == 'declined'
-                             ))
+                             (
+                               resource.data.toUid == request.auth.uid &&
+                               (
+                                 (
+                                   request.resource.data.status == 'accepted' &&
+                                   exists(/databases/$(database)/documents/userProfiles/$(resource.data.fromTalk2tmId)) &&
+                                   get(/databases/$(database)/documents/userProfiles/$(resource.data.fromTalk2tmId)).data.active == true
+                                 ) ||
+                                 request.resource.data.status == 'declined'
+                               )
+                             )
                            )
                          ) ||
                          (

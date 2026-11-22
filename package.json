@@ -11,6 +11,7 @@
     "lint": "tsc --noEmit",
     "test": "NODE_ENV=test tsx tests/talk2tm.test.ts",
     "test:rules": "firebase emulators:exec --only firestore \"npx tsx tests/firestore.rules.test.ts\"",
+    "deploy:firestore": "firebase deploy --only firestore:rules,firestore:indexes --project gen-lang-client-0618196986",
     "test:authz:live": "tsx tests/verify-live-authz.ts",
     "test:realtime": "tsx tests/test-realtime.ts",
     "diagnostic": "tsx tests/test-diagnostic.ts"

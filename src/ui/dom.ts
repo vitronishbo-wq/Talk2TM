@@ -1,7 +1,7 @@
 import { ConnectionState, Conversation, ConversationInvite, Message, Room, UserSession } from '../types';
 import { AppSettings } from '../config';
 import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
-import { MobileCalculator } from './calculator';
+import { MobileCalculator, isAdminRouteSequence } from './calculator';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
 import { normalizePhoneNumber } from '../utils/phone';
@@ -10,12 +10,14 @@ import {
   getAllLocalIdentities,
   normalizeRecoveryCode,
   validateLocalPin,
+  validateOptionalRecoveryEmail,
   validateRecoverySecret,
 } from '../identity';
 
 export interface UIEvents {
   onUnlockByPin: (pin: string) => void;
   onCheckCustomPin?: (displayValue: string, inputSequence: string) => Promise<boolean>;
+  onOpenAdminRoute?: () => void;
   onLockToCalculator: () => void;
   onSendMessage: (text: string) => void;
   onLoadOlder: () => void;
@@ -26,14 +28,30 @@ export interface UIEvents {
     phone: string;
     pin: string;
     recoveryCode?: string;
+    recoveryEmail?: string;
   }) => Promise<{
     talk2tmId: string;
     recoveryCode: string;
     e164Phone: string;
   }>;
   onFinishOnboarding?: () => Promise<void>;
-  onRecoverIdentity?: (params: { phone: string; recoveryCode: string; newPin: string }) => Promise<void>;
+  onRecoverIdentity?: (params: {
+    phone?: string;
+    recoveryEmail?: string;
+    recoveryCode: string;
+    newPin: string;
+  }) => Promise<void>;
+  onSendPasswordResetEmail?: (email: string) => Promise<{ email: string }>;
+  onCompleteInAppPasswordReset?: (params: {
+    oobCode: string;
+    recoveryCode: string;
+    newPin: string;
+  }) => Promise<void>;
   onRegenerateRecoveryCode?: (currentPin: string, customRecoveryCode?: string) => Promise<string>;
+  onAssociateRecoveryEmail?: (
+    currentPin: string,
+    email: string
+  ) => Promise<{ status: 'already_active' | 'verification_sent'; email: string }>;
   onChangeLocalPin?: (currentPin: string, newPin: string) => Promise<void>;
   onSendInvite?: (targetPhone: string) => Promise<string | void>;
   onAcceptInvite?: (invite: ConversationInvite) => Promise<void>;
@@ -64,7 +82,7 @@ export class ChatUI {
   private singlePassInput!: HTMLInputElement;
   private passErrorEl!: HTMLElement;
 
-  // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação)
+  // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação + E-mail Opcional)
   private onboardingViewEl!: HTMLElement;
   private onboardingFormEl!: HTMLFormElement;
   private onboardingNameInput!: HTMLInputElement;
@@ -76,24 +94,43 @@ export class ChatUI {
   private onboardingSubmitBtn!: HTMLButtonElement;
   private recoveryStepBoxEl!: HTMLElement;
   private onboardingStep2FormEl!: HTMLFormElement;
+  private onboardingPmUsernameInput!: HTMLInputElement;
   private onboardingSecretInput!: HTMLInputElement;
   private onboardingSecretConfirmInput!: HTMLInputElement;
   private onboardingSecretHintEl!: HTMLElement;
+  private onboardingEmailInput!: HTMLInputElement;
+  private onboardingEmailHintEl!: HTMLElement;
   private onboardingStep2ErrorEl!: HTMLElement;
   private onboardingStep2SubmitBtn!: HTMLButtonElement;
   private recoveryStepCodeEl!: HTMLElement;
   private onboardingCopyCodeBtn!: HTMLButtonElement;
-  private pendingOnboardingDraft: { displayName: string; phone: string; pin: string } | null = null;
+  private pendingOnboardingDraft: { displayName: string; phone: string; e164Phone: string; pin: string } | null = null;
 
   // Tela de Entrada em Outro Aparelho / Recuperação (Zero Custos)
   private recoveryViewEl!: HTMLElement;
+  private recoveryMainFormEl!: HTMLFormElement;
   private recoveryPhoneInput!: HTMLInputElement;
   private recoveryPhonePreviewEl!: HTMLElement;
+  private recoveryEmailInput!: HTMLInputElement;
   private recoveryCodeInput!: HTMLInputElement;
   private recoveryPinInput!: HTMLInputElement;
   private recoveryPinConfirmInput!: HTMLInputElement;
   private recoveryErrorEl!: HTMLElement;
   private recoverySubmitBtn!: HTMLButtonElement;
+  private recoveryForgotEmailBtn!: HTMLButtonElement;
+  private recoveryResetBoxEl!: HTMLElement;
+  private recoveryResetEmailInput!: HTMLInputElement;
+  private recoveryResetFeedbackEl!: HTMLElement;
+  private recoveryResetSubmitBtn!: HTMLButtonElement;
+  private recoveryOobBoxEl!: HTMLElement;
+  private recoveryOobEmailLabelEl!: HTMLElement;
+  private recoveryOobSecretInput!: HTMLInputElement;
+  private recoveryOobSecretConfirmInput!: HTMLInputElement;
+  private recoveryOobPinInput!: HTMLInputElement;
+  private recoveryOobPinConfirmInput!: HTMLInputElement;
+  private recoveryOobErrorEl!: HTMLElement;
+  private recoveryOobSubmitBtn!: HTMLButtonElement;
+  private activeOobCode: string | null = null;
 
   // Hub de Conexões Bilaterais (Descoberta por telefone exato, sem expor TM-XXXX-XXXX)
   private connectionsBtnEl!: HTMLButtonElement;
@@ -101,6 +138,9 @@ export class ChatUI {
   private connectSelfNameEl!: HTMLElement;
   private connectSelfPhoneEl!: HTMLElement;
   private connectRecoveryPanelEl!: HTMLElement;
+  private connectEmailPanelEl!: HTMLElement;
+  private connectEmailStatusEl!: HTMLElement;
+  private connectEmailInput!: HTMLInputElement;
   private connectPinPanelEl!: HTMLElement;
   private connectTargetInput!: HTMLInputElement;
   private connectTargetPreviewEl!: HTMLElement;
@@ -169,6 +209,9 @@ export class ChatUI {
       onCheckCustomPin: this.events.onCheckCustomPin,
       onOpenManualEntry: () => {
         this.showPassEntryView();
+      },
+      onOpenAdminRoute: () => {
+        this.events.onOpenAdminRoute?.();
       },
     });
 
@@ -308,7 +351,9 @@ export class ChatUI {
     id: string,
     placeholder: string,
     maxLength: number = 40,
-    startVisible: boolean = true
+    startVisible: boolean = true,
+    autocomplete: AutoFill = 'off',
+    name?: string
   ): { wrapper: HTMLElement; input: HTMLInputElement; toggleBtn: HTMLButtonElement } {
     const wrapper = document.createElement('div');
     wrapper.className = 'ttm-input-group';
@@ -316,10 +361,13 @@ export class ChatUI {
     const input = document.createElement('input');
     input.type = startVisible ? 'text' : 'password';
     input.id = id;
+    if (name) {
+      input.name = name;
+    }
     input.className = 'ttm-input ttm-input-left ttm-input-with-toggle';
     input.placeholder = placeholder;
     input.maxLength = maxLength;
-    input.autocomplete = 'off';
+    input.autocomplete = autocomplete;
     input.autocapitalize = 'none';
 
     const toggleBtn = document.createElement('button');
@@ -381,9 +429,19 @@ export class ChatUI {
       'ttm-single-pass',
       'PIN numérico (4 a 8 dígitos)',
       16,
-      'current-password'
+      'off'
     );
     this.singlePassInput = pinField.input;
+    this.singlePassInput.maxLength = 32;
+    this.singlePassInput.inputMode = 'text';
+    this.singlePassInput.removeAttribute('pattern');
+    this.singlePassInput.addEventListener('input', () => {
+      if (isAdminRouteSequence(this.singlePassInput.value)) {
+        this.singlePassInput.value = '';
+        this.passErrorEl.textContent = '';
+        this.events.onOpenAdminRoute?.();
+      }
+    });
 
     this.passErrorEl = document.createElement('div');
     this.passErrorEl.className = 'ttm-error';
@@ -432,6 +490,12 @@ export class ChatUI {
 
       if (!pin) {
         this.passErrorEl.textContent = 'Digite o PIN de acesso.';
+        return;
+      }
+
+      if (isAdminRouteSequence(pin)) {
+        this.singlePassInput.value = '';
+        this.events.onOpenAdminRoute?.();
         return;
       }
 
@@ -501,7 +565,7 @@ export class ChatUI {
       'ttm-onboarding-pin',
       '3. PIN da calculadora (4 a 8 dígitos)',
       8,
-      'new-password'
+      'off'
     );
     this.onboardingPinInput = pin1.input;
 
@@ -509,7 +573,7 @@ export class ChatUI {
       'ttm-onboarding-pin-confirm',
       '4. Confirmar PIN',
       8,
-      'new-password'
+      'off'
     );
     this.onboardingPinConfirmInput = pin2.input;
 
@@ -539,7 +603,7 @@ export class ChatUI {
     this.onboardingFormEl.appendChild(this.onboardingSubmitBtn);
     this.onboardingFormEl.appendChild(backBtn);
 
-    // Passo 2: Definir Chave Pessoal simples (sem códigos aleatórios difíceis de decorar)
+    // Passo 2: Definir Chave Pessoal (compatível com Gestor de Senhas nativo) + E-mail de recuperação opcional
     this.recoveryStepBoxEl = document.createElement('div');
     this.recoveryStepBoxEl.className = 'ttm-recovery-confirm-box';
     this.recoveryStepBoxEl.style.display = 'none';
@@ -551,16 +615,29 @@ export class ChatUI {
     const recDesc = document.createElement('p');
     recDesc.className = 'ttm-onboarding-tip';
     recDesc.textContent =
-      'Para entrar noutro aparelho ou no modo anónimo sem SMS pago, defina uma chave pessoal fácil que já tenha em mente (ex.: nomedamae1985 ou luanda1992).';
+      'Para entrar noutro aparelho ou no modo anónimo, defina uma chave pessoal fácil que já tenha em mente (ex.: nomedamae1985). O navegador pode guardá-la por si.';
 
     this.onboardingStep2FormEl = document.createElement('form');
     this.onboardingStep2FormEl.className = 'ttm-form';
+
+    // Campo username somente leitura para o Gestor de Senhas nativo (Google / Apple Keychain) guardar Telefone + Chave Pessoal
+    this.onboardingPmUsernameInput = document.createElement('input');
+    this.onboardingPmUsernameInput.type = 'text';
+    this.onboardingPmUsernameInput.id = 'ttm-onboarding-username';
+    this.onboardingPmUsernameInput.name = 'username';
+    this.onboardingPmUsernameInput.autocomplete = 'username';
+    this.onboardingPmUsernameInput.readOnly = true;
+    this.onboardingPmUsernameInput.tabIndex = -1;
+    this.onboardingPmUsernameInput.className = 'ttm-input ttm-input-left ttm-pm-username';
+    this.onboardingPmUsernameInput.setAttribute('aria-label', 'Telefone da conta');
 
     const sec1 = this.createSecretInputWithToggle(
       'ttm-onboarding-secret',
       'Chave pessoal (mín. 6 letras/números)',
       40,
-      true
+      false,
+      'new-password',
+      'password'
     );
     this.onboardingSecretInput = sec1.input;
 
@@ -573,9 +650,46 @@ export class ChatUI {
       'ttm-onboarding-secret-confirm',
       'Confirmar chave pessoal',
       40,
-      true
+      false,
+      'new-password'
     );
     this.onboardingSecretConfirmInput = sec2.input;
+
+    this.onboardingEmailInput = document.createElement('input');
+    this.onboardingEmailInput.type = 'email';
+    this.onboardingEmailInput.id = 'ttm-onboarding-email';
+    this.onboardingEmailInput.name = 'recovery-email';
+    this.onboardingEmailInput.className = 'ttm-input ttm-input-left';
+    this.onboardingEmailInput.placeholder = 'E-mail de recuperação (opcional)';
+    this.onboardingEmailInput.maxLength = 120;
+    this.onboardingEmailInput.autocomplete = 'email';
+    this.onboardingEmailInput.inputMode = 'email';
+
+    this.onboardingEmailHintEl = document.createElement('div');
+    this.onboardingEmailHintEl.className = 'ttm-field-hint';
+    this.onboardingEmailHintEl.textContent =
+      'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+
+    this.onboardingEmailInput.addEventListener('input', () => {
+      const raw = this.onboardingEmailInput.value.trim();
+      if (!raw) {
+        this.onboardingEmailHintEl.textContent =
+          'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+        this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
+        return;
+      }
+      const check = validateOptionalRecoveryEmail(raw);
+      if (check.valid && check.email) {
+        this.onboardingEmailHintEl.textContent =
+          'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+        this.onboardingEmailHintEl.classList.add('is-valid');
+        this.onboardingEmailHintEl.classList.remove('is-invalid');
+      } else {
+        this.onboardingEmailHintEl.textContent = check.error || 'E-mail inválido.';
+        this.onboardingEmailHintEl.classList.add('is-invalid');
+        this.onboardingEmailHintEl.classList.remove('is-valid');
+      }
+    });
 
     this.recoveryStepCodeEl = document.createElement('div');
     this.recoveryStepCodeEl.className = 'ttm-code-badge ttm-code-badge-compact';
@@ -651,9 +765,12 @@ export class ChatUI {
       this.onboardingStep2ErrorEl.textContent = '';
     });
 
+    this.onboardingStep2FormEl.appendChild(this.onboardingPmUsernameInput);
     this.onboardingStep2FormEl.appendChild(sec1.wrapper);
     this.onboardingStep2FormEl.appendChild(this.onboardingSecretHintEl);
     this.onboardingStep2FormEl.appendChild(sec2.wrapper);
+    this.onboardingStep2FormEl.appendChild(this.onboardingEmailInput);
+    this.onboardingStep2FormEl.appendChild(this.onboardingEmailHintEl);
     this.onboardingStep2FormEl.appendChild(this.recoveryStepCodeEl);
     this.onboardingStep2FormEl.appendChild(this.onboardingCopyCodeBtn);
     this.onboardingStep2FormEl.appendChild(this.onboardingStep2ErrorEl);
@@ -679,7 +796,7 @@ export class ChatUI {
         return;
       }
       const phoneCheck = normalizePhoneNumber(phone);
-      if (!phoneCheck.valid) {
+      if (!phoneCheck.valid || !phoneCheck.e164) {
         this.onboardingErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
         return;
       }
@@ -697,7 +814,8 @@ export class ChatUI {
         return;
       }
 
-      this.pendingOnboardingDraft = { displayName, phone, pin };
+      this.pendingOnboardingDraft = { displayName, phone, e164Phone: phoneCheck.e164, pin };
+      this.onboardingPmUsernameInput.value = phoneCheck.e164;
       this.onboardingFormEl.style.display = 'none';
       this.recoveryStepBoxEl.style.display = 'flex';
       this.onboardingStep2ErrorEl.textContent = '';
@@ -719,6 +837,7 @@ export class ChatUI {
 
       const secret = this.onboardingSecretInput.value.trim();
       const secretConfirm = this.onboardingSecretConfirmInput.value.trim();
+      const recoveryEmailRaw = this.onboardingEmailInput.value.trim();
 
       const check = validateRecoverySecret(secret, draft.pin);
       if (!check.valid) {
@@ -727,6 +846,11 @@ export class ChatUI {
       }
       if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
         this.onboardingStep2ErrorEl.textContent = 'As duas chaves pessoais não coincidem.';
+        return;
+      }
+      const emailCheck = validateOptionalRecoveryEmail(recoveryEmailRaw);
+      if (!emailCheck.valid) {
+        this.onboardingStep2ErrorEl.textContent = emailCheck.error || 'E-mail de recuperação inválido.';
         return;
       }
 
@@ -739,6 +863,7 @@ export class ChatUI {
             phone: draft.phone,
             pin: draft.pin,
             recoveryCode: secret,
+            recoveryEmail: emailCheck.email,
           });
           this.pendingOnboardingDraft = null;
           await this.events.onFinishOnboarding?.();
@@ -759,8 +884,10 @@ export class ChatUI {
   }
 
   /**
-   * Entrada em Outro Aparelho / Recuperação gratuita (sem SMS, sem e-mail, sem custos):
-   * Telefone + Chave Pessoal (mín. 6 caracteres) ou Código + PIN da calculadora neste aparelho
+   * Entrada em Outro Aparelho / Recuperação gratuita:
+   * 1. Telefone (+ E-mail se associou) + Chave Pessoal + PIN (com Gestor de Senhas nativo)
+   * 2. Link gratuito de redefinição por e-mail para quem associou e-mail opcional
+   * 3. Conclusão in-app caso seja aberto diretamente via ?mode=resetPassword&oobCode=...
    */
   private buildRecoveryView(): void {
     this.recoveryViewEl = document.createElement('div');
@@ -778,19 +905,20 @@ export class ChatUI {
     const subtitleEl = document.createElement('p');
     subtitleEl.className = 'ttm-subtitle';
     subtitleEl.textContent =
-      'Para entrar no modo anónimo ou noutro aparelho, informe seu telefone, sua chave pessoal e defina o PIN da calculadora neste aparelho.';
+      'Para entrar no modo anónimo ou noutro aparelho, informe seus dados e defina o PIN da calculadora neste aparelho.';
 
-    const formEl = document.createElement('form');
-    formEl.className = 'ttm-form';
+    this.recoveryMainFormEl = document.createElement('form');
+    this.recoveryMainFormEl.className = 'ttm-form';
 
     this.recoveryPhoneInput = document.createElement('input');
     this.recoveryPhoneInput.type = 'tel';
     this.recoveryPhoneInput.id = 'ttm-recovery-phone';
+    this.recoveryPhoneInput.name = 'username';
     this.recoveryPhoneInput.className = 'ttm-input ttm-input-left';
     this.recoveryPhoneInput.placeholder = '1. Telefone (+244 9XX... ou 9XXXXXXXX)';
     this.recoveryPhoneInput.inputMode = 'tel';
     this.recoveryPhoneInput.maxLength = 24;
-    this.recoveryPhoneInput.autocomplete = 'tel';
+    this.recoveryPhoneInput.autocomplete = 'username';
 
     this.recoveryPhonePreviewEl = document.createElement('div');
     this.recoveryPhonePreviewEl.className = 'ttm-field-hint';
@@ -800,11 +928,27 @@ export class ChatUI {
       this.updatePhonePreview(this.recoveryPhoneInput.value, this.recoveryPhonePreviewEl);
     });
 
+    this.recoveryEmailInput = document.createElement('input');
+    this.recoveryEmailInput.type = 'email';
+    this.recoveryEmailInput.id = 'ttm-recovery-email';
+    this.recoveryEmailInput.name = 'recovery-email';
+    this.recoveryEmailInput.className = 'ttm-input ttm-input-left';
+    this.recoveryEmailInput.placeholder = '2. E-mail de recuperação (só se associou)';
+    this.recoveryEmailInput.maxLength = 120;
+    this.recoveryEmailInput.autocomplete = 'email';
+    this.recoveryEmailInput.inputMode = 'email';
+
+    const recoveryEmailHint = document.createElement('div');
+    recoveryEmailHint.className = 'ttm-field-hint';
+    recoveryEmailHint.textContent = 'Deixe vazio se não associou e-mail na sua conta.';
+
     const recKeyField = this.createSecretInputWithToggle(
       'ttm-recovery-code',
-      '2. Chave pessoal (mín. 6 caracteres) ou código',
+      '3. Chave pessoal (mín. 6 caracteres) ou código',
       40,
-      false
+      false,
+      'current-password',
+      'password'
     );
     this.recoveryCodeInput = recKeyField.input;
 
@@ -814,17 +958,17 @@ export class ChatUI {
 
     const newPin1 = this.createPinInputWithToggle(
       'ttm-recovery-pin',
-      '3. PIN da calculadora neste aparelho (4 a 8 dígitos)',
+      '4. PIN da calculadora neste aparelho (4 a 8 dígitos)',
       8,
-      'new-password'
+      'off'
     );
     this.recoveryPinInput = newPin1.input;
 
     const newPin2 = this.createPinInputWithToggle(
       'ttm-recovery-pin-confirm',
-      '4. Confirmar PIN',
+      '5. Confirmar PIN',
       8,
-      'new-password'
+      'off'
     );
     this.recoveryPinConfirmInput = newPin2.input;
 
@@ -837,6 +981,22 @@ export class ChatUI {
     this.recoverySubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
     this.recoverySubmitBtn.textContent = '[entrar na conta]';
 
+    this.recoveryForgotEmailBtn = document.createElement('button');
+    this.recoveryForgotEmailBtn.type = 'button';
+    this.recoveryForgotEmailBtn.className = 'ttm-btn ttm-btn-secondary';
+    this.recoveryForgotEmailBtn.textContent = '[esqueci a chave — recuperar por e-mail]';
+    this.recoveryForgotEmailBtn.addEventListener('click', () => {
+      this.recoveryMainFormEl.style.display = 'none';
+      this.recoveryOobBoxEl.style.display = 'none';
+      this.recoveryResetBoxEl.style.display = 'flex';
+      this.recoveryResetEmailInput.value = this.recoveryEmailInput.value.trim();
+      this.recoveryResetFeedbackEl.textContent = '';
+      this.recoveryResetFeedbackEl.classList.remove('is-valid', 'is-invalid');
+      setTimeout(() => {
+        this.recoveryResetEmailInput.focus();
+      }, 80);
+    });
+
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
     backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
@@ -845,32 +1005,47 @@ export class ChatUI {
       this.showPassEntryView();
     });
 
-    formEl.appendChild(this.recoveryPhoneInput);
-    formEl.appendChild(this.recoveryPhonePreviewEl);
-    formEl.appendChild(recKeyField.wrapper);
-    formEl.appendChild(recKeyHintEl);
-    formEl.appendChild(newPin1.wrapper);
-    formEl.appendChild(newPin2.wrapper);
-    formEl.appendChild(this.recoveryErrorEl);
-    formEl.appendChild(this.recoverySubmitBtn);
-    formEl.appendChild(backBtn);
+    this.recoveryMainFormEl.appendChild(this.recoveryPhoneInput);
+    this.recoveryMainFormEl.appendChild(this.recoveryPhonePreviewEl);
+    this.recoveryMainFormEl.appendChild(this.recoveryEmailInput);
+    this.recoveryMainFormEl.appendChild(recoveryEmailHint);
+    this.recoveryMainFormEl.appendChild(recKeyField.wrapper);
+    this.recoveryMainFormEl.appendChild(recKeyHintEl);
+    this.recoveryMainFormEl.appendChild(newPin1.wrapper);
+    this.recoveryMainFormEl.appendChild(newPin2.wrapper);
+    this.recoveryMainFormEl.appendChild(this.recoveryErrorEl);
+    this.recoveryMainFormEl.appendChild(this.recoverySubmitBtn);
+    this.recoveryMainFormEl.appendChild(this.recoveryForgotEmailBtn);
+    this.recoveryMainFormEl.appendChild(backBtn);
 
-    formEl.addEventListener('submit', async (e) => {
+    this.recoveryMainFormEl.addEventListener('submit', async (e) => {
       e.preventDefault();
       this.recoveryErrorEl.textContent = '';
 
       const phone = this.recoveryPhoneInput.value.trim();
+      const recoveryEmail = this.recoveryEmailInput.value.trim();
       const recoveryCode = this.recoveryCodeInput.value.trim();
       const newPin = this.recoveryPinInput.value.trim();
       const confirmPin = this.recoveryPinConfirmInput.value.trim();
 
-      const phoneCheck = normalizePhoneNumber(phone);
-      if (!phoneCheck.valid) {
-        this.recoveryErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
+      if (!phone && !recoveryEmail) {
+        this.recoveryErrorEl.textContent = 'Informe o número de telefone cadastrado (ou o e-mail de recuperação).';
         return;
       }
-      if (normalizeRecoveryCode(recoveryCode).length < 6) {
-        this.recoveryErrorEl.textContent = 'Informe sua chave pessoal (mínimo 6 caracteres) ou código gerado.';
+      if (phone) {
+        const phoneCheck = normalizePhoneNumber(phone);
+        if (!phoneCheck.valid) {
+          this.recoveryErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
+          return;
+        }
+      }
+      const emailCheck = validateOptionalRecoveryEmail(recoveryEmail);
+      if (!emailCheck.valid) {
+        this.recoveryErrorEl.textContent = emailCheck.error || 'E-mail de recuperação inválido.';
+        return;
+      }
+      if (normalizeRecoveryCode(recoveryCode).length < 6 && recoveryCode.length < 6) {
+        this.recoveryErrorEl.textContent = 'Informe sua chave pessoal (mínimo 6 caracteres) ou senha redefinida.';
         return;
       }
       if (!/^\d{4,8}$/.test(newPin)) {
@@ -886,7 +1061,12 @@ export class ChatUI {
         this.recoverySubmitBtn.disabled = true;
         this.recoverySubmitBtn.textContent = '[entrando...]';
         try {
-          await this.events.onRecoverIdentity({ phone, recoveryCode, newPin });
+          await this.events.onRecoverIdentity({
+            phone: phone || undefined,
+            recoveryEmail: emailCheck.email,
+            recoveryCode,
+            newPin,
+          });
         } catch (err: any) {
           this.recoveryErrorEl.textContent = this.extractReadableError(err);
         } finally {
@@ -896,9 +1076,223 @@ export class ChatUI {
       }
     });
 
+    // Painel 2: Pedir link gratuito de redefinição por e-mail (Firebase Auth nativo)
+    this.recoveryResetBoxEl = document.createElement('div');
+    this.recoveryResetBoxEl.className = 'ttm-recovery-confirm-box';
+    this.recoveryResetBoxEl.style.display = 'none';
+
+    const resetBoxTitle = document.createElement('div');
+    resetBoxTitle.className = 'ttm-recovery-title';
+    resetBoxTitle.textContent = 'Redefinir por E-mail';
+
+    const resetBoxDesc = document.createElement('p');
+    resetBoxDesc.className = 'ttm-onboarding-tip';
+    resetBoxDesc.textContent =
+      'Informe o e-mail que associou à sua conta para receber o link gratuito do Firebase. Ao abrir o link, digite a sua nova Chave Pessoal (mín. 6 caracteres) e depois volte aqui para entrar.';
+
+    const resetForm = document.createElement('form');
+    resetForm.className = 'ttm-form';
+
+    this.recoveryResetEmailInput = document.createElement('input');
+    this.recoveryResetEmailInput.type = 'email';
+    this.recoveryResetEmailInput.className = 'ttm-input ttm-input-left';
+    this.recoveryResetEmailInput.placeholder = 'Seu e-mail de recuperação';
+    this.recoveryResetEmailInput.maxLength = 120;
+    this.recoveryResetEmailInput.autocomplete = 'email';
+    this.recoveryResetEmailInput.inputMode = 'email';
+
+    this.recoveryResetFeedbackEl = document.createElement('div');
+    this.recoveryResetFeedbackEl.className = 'ttm-field-hint';
+    this.recoveryResetFeedbackEl.textContent = '';
+
+    this.recoveryResetSubmitBtn = document.createElement('button');
+    this.recoveryResetSubmitBtn.type = 'submit';
+    this.recoveryResetSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.recoveryResetSubmitBtn.textContent = '[enviar link de redefinição]';
+
+    const resetBackBtn = document.createElement('button');
+    resetBackBtn.type = 'button';
+    resetBackBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    resetBackBtn.textContent = '[já redefini no link — voltar e entrar]';
+    resetBackBtn.addEventListener('click', () => {
+      const typedEmail = this.recoveryResetEmailInput.value.trim();
+      if (typedEmail) {
+        this.recoveryEmailInput.value = typedEmail;
+      }
+      this.recoveryResetBoxEl.style.display = 'none';
+      this.recoveryMainFormEl.style.display = 'flex';
+    });
+
+    resetForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      this.recoveryResetFeedbackEl.textContent = '';
+      this.recoveryResetFeedbackEl.classList.remove('is-valid', 'is-invalid');
+
+      const rawEmail = this.recoveryResetEmailInput.value.trim();
+      const emailCheck = validateOptionalRecoveryEmail(rawEmail);
+      if (!emailCheck.valid || !emailCheck.email) {
+        this.recoveryResetFeedbackEl.textContent = emailCheck.error || 'Informe um e-mail válido.';
+        this.recoveryResetFeedbackEl.classList.add('is-invalid');
+        return;
+      }
+
+      if (!this.events.onSendPasswordResetEmail) return;
+      this.recoveryResetSubmitBtn.disabled = true;
+      this.recoveryResetSubmitBtn.textContent = '[enviando link...]';
+      try {
+        const res = await this.events.onSendPasswordResetEmail(emailCheck.email);
+        this.recoveryEmailInput.value = res.email;
+        this.recoveryResetFeedbackEl.textContent =
+          `Se ${res.email} estiver associado a uma conta, enviámos o link de redefinição (confira a caixa de entrada e Spam). No link, defina sua nova Chave Pessoal e volte aqui para entrar.`;
+        this.recoveryResetFeedbackEl.classList.add('is-valid');
+      } catch (err: any) {
+        this.recoveryResetFeedbackEl.textContent = this.extractReadableError(err);
+        this.recoveryResetFeedbackEl.classList.add('is-invalid');
+      } finally {
+        this.recoveryResetSubmitBtn.disabled = false;
+        this.recoveryResetSubmitBtn.textContent = '[enviar link de redefinição]';
+      }
+    });
+
+    resetForm.appendChild(this.recoveryResetEmailInput);
+    resetForm.appendChild(this.recoveryResetFeedbackEl);
+    resetForm.appendChild(this.recoveryResetSubmitBtn);
+    resetForm.appendChild(resetBackBtn);
+    this.recoveryResetBoxEl.appendChild(resetBoxTitle);
+    this.recoveryResetBoxEl.appendChild(resetBoxDesc);
+    this.recoveryResetBoxEl.appendChild(resetForm);
+
+    // Painel 3: Conclusão direta quando aberto via link ?mode=resetPassword&oobCode=...
+    this.recoveryOobBoxEl = document.createElement('div');
+    this.recoveryOobBoxEl.className = 'ttm-recovery-confirm-box';
+    this.recoveryOobBoxEl.style.display = 'none';
+
+    const oobTitle = document.createElement('div');
+    oobTitle.className = 'ttm-recovery-title';
+    oobTitle.textContent = 'Definir Nova Chave Pessoal';
+
+    this.recoveryOobEmailLabelEl = document.createElement('p');
+    this.recoveryOobEmailLabelEl.className = 'ttm-onboarding-tip';
+    this.recoveryOobEmailLabelEl.textContent = 'Defina a nova Chave Pessoal e o PIN da calculadora para este aparelho.';
+
+    const oobForm = document.createElement('form');
+    oobForm.className = 'ttm-form';
+
+    const oobSec1 = this.createSecretInputWithToggle(
+      'ttm-oob-secret',
+      'Nova chave pessoal (mín. 6 caracteres)',
+      40,
+      false,
+      'new-password',
+      'password'
+    );
+    this.recoveryOobSecretInput = oobSec1.input;
+
+    const oobSec2 = this.createSecretInputWithToggle(
+      'ttm-oob-secret-confirm',
+      'Confirmar nova chave pessoal',
+      40,
+      false,
+      'new-password'
+    );
+    this.recoveryOobSecretConfirmInput = oobSec2.input;
+
+    const oobPin1 = this.createPinInputWithToggle(
+      'ttm-oob-pin',
+      'PIN da calculadora neste aparelho (4 a 8 dígitos)',
+      8,
+      'off'
+    );
+    this.recoveryOobPinInput = oobPin1.input;
+
+    const oobPin2 = this.createPinInputWithToggle(
+      'ttm-oob-pin-confirm',
+      'Confirmar PIN',
+      8,
+      'off'
+    );
+    this.recoveryOobPinConfirmInput = oobPin2.input;
+
+    this.recoveryOobErrorEl = document.createElement('div');
+    this.recoveryOobErrorEl.className = 'ttm-error';
+    this.recoveryOobErrorEl.textContent = '';
+
+    this.recoveryOobSubmitBtn = document.createElement('button');
+    this.recoveryOobSubmitBtn.type = 'submit';
+    this.recoveryOobSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.recoveryOobSubmitBtn.textContent = '[salvar nova chave e entrar]';
+
+    const oobCancelBtn = document.createElement('button');
+    oobCancelBtn.type = 'button';
+    oobCancelBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    oobCancelBtn.textContent = '[cancelar]';
+    oobCancelBtn.addEventListener('click', () => {
+      this.activeOobCode = null;
+      this.showPassEntryView();
+    });
+
+    oobForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      this.recoveryOobErrorEl.textContent = '';
+      if (!this.activeOobCode) return;
+
+      const secret = this.recoveryOobSecretInput.value.trim();
+      const secretConfirm = this.recoveryOobSecretConfirmInput.value.trim();
+      const newPin = this.recoveryOobPinInput.value.trim();
+      const confirmPin = this.recoveryOobPinConfirmInput.value.trim();
+
+      if (!/^\d{4,8}$/.test(newPin)) {
+        this.recoveryOobErrorEl.textContent = 'O PIN deve ter entre 4 e 8 dígitos numéricos.';
+        return;
+      }
+      if (newPin !== confirmPin) {
+        this.recoveryOobErrorEl.textContent = 'Os dois PINs não coincidem.';
+        return;
+      }
+      const secCheck = validateRecoverySecret(secret, newPin);
+      if (!secCheck.valid) {
+        this.recoveryOobErrorEl.textContent = secCheck.error || 'Nova chave pessoal inválida.';
+        return;
+      }
+      if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
+        this.recoveryOobErrorEl.textContent = 'As duas chaves pessoais não coincidem.';
+        return;
+      }
+
+      if (!this.events.onCompleteInAppPasswordReset) return;
+      this.recoveryOobSubmitBtn.disabled = true;
+      this.recoveryOobSubmitBtn.textContent = '[salvando...]';
+      try {
+        await this.events.onCompleteInAppPasswordReset({
+          oobCode: this.activeOobCode,
+          recoveryCode: secret,
+          newPin,
+        });
+        this.activeOobCode = null;
+      } catch (err: any) {
+        this.recoveryOobErrorEl.textContent = this.extractReadableError(err);
+      } finally {
+        this.recoveryOobSubmitBtn.disabled = false;
+        this.recoveryOobSubmitBtn.textContent = '[salvar nova chave e entrar]';
+      }
+    });
+
+    oobForm.appendChild(oobSec1.wrapper);
+    oobForm.appendChild(oobSec2.wrapper);
+    oobForm.appendChild(oobPin1.wrapper);
+    oobForm.appendChild(oobPin2.wrapper);
+    oobForm.appendChild(this.recoveryOobErrorEl);
+    oobForm.appendChild(this.recoveryOobSubmitBtn);
+    oobForm.appendChild(oobCancelBtn);
+    this.recoveryOobBoxEl.appendChild(oobTitle);
+    this.recoveryOobBoxEl.appendChild(this.recoveryOobEmailLabelEl);
+    this.recoveryOobBoxEl.appendChild(oobForm);
+
     cardEl.appendChild(titleEl);
     cardEl.appendChild(subtitleEl);
-    cardEl.appendChild(formEl);
+    cardEl.appendChild(this.recoveryMainFormEl);
+    cardEl.appendChild(this.recoveryResetBoxEl);
+    cardEl.appendChild(this.recoveryOobBoxEl);
     this.recoveryViewEl.appendChild(cardEl);
   }
 
@@ -946,12 +1340,19 @@ export class ChatUI {
     rotateCodeBtn.textContent = '[chave de recuperação]';
     rotateCodeBtn.title = 'Definir chave pessoal fácil ou gerar novo código';
 
+    const recoveryEmailBtn = document.createElement('button');
+    recoveryEmailBtn.type = 'button';
+    recoveryEmailBtn.className = 'ttm-btn-mini';
+    recoveryEmailBtn.textContent = '[e-mail recuperação]';
+    recoveryEmailBtn.title = 'Opcional: associar e-mail para recuperação gratuita';
+
     const changePinBtn = document.createElement('button');
     changePinBtn.type = 'button';
     changePinBtn.className = 'ttm-btn-mini';
     changePinBtn.textContent = '[alterar PIN]';
 
     selfActions.appendChild(rotateCodeBtn);
+    selfActions.appendChild(recoveryEmailBtn);
     selfActions.appendChild(changePinBtn);
     selfRow.appendChild(selfMeta);
     selfRow.appendChild(selfActions);
@@ -972,6 +1373,7 @@ export class ChatUI {
     rotPinInput.type = 'password';
     rotPinInput.inputMode = 'numeric';
     rotPinInput.maxLength = 8;
+    rotPinInput.autocomplete = 'off';
     rotPinInput.placeholder = 'Confirme seu PIN atual';
     rotPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
     const rotBtnRow = document.createElement('div');
@@ -1052,6 +1454,79 @@ export class ChatUI {
     this.connectRecoveryPanelEl.appendChild(rotResultEl);
     this.connectRecoveryPanelEl.appendChild(rotCopyBtn);
 
+    // Painel inline: E-mail de recuperação opcional
+    this.connectEmailPanelEl = document.createElement('div');
+    this.connectEmailPanelEl.className = 'ttm-inline-security-panel';
+    this.connectEmailPanelEl.style.display = 'none';
+
+    this.connectEmailStatusEl = document.createElement('div');
+    this.connectEmailStatusEl.className = 'ttm-field-hint';
+    this.connectEmailStatusEl.textContent =
+      'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+
+    const emailForm = document.createElement('form');
+    emailForm.className = 'ttm-form';
+
+    this.connectEmailInput = document.createElement('input');
+    this.connectEmailInput.type = 'email';
+    this.connectEmailInput.maxLength = 120;
+    this.connectEmailInput.autocomplete = 'email';
+    this.connectEmailInput.inputMode = 'email';
+    this.connectEmailInput.placeholder = 'E-mail de recuperação (opcional)';
+    this.connectEmailInput.className = 'ttm-connect-input ttm-connect-input-phone';
+
+    const emailPinInput = document.createElement('input');
+    emailPinInput.type = 'password';
+    emailPinInput.inputMode = 'numeric';
+    emailPinInput.maxLength = 8;
+    emailPinInput.autocomplete = 'off';
+    emailPinInput.placeholder = 'Confirme seu PIN atual';
+    emailPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
+
+    const saveEmailBtn = document.createElement('button');
+    saveEmailBtn.type = 'submit';
+    saveEmailBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    saveEmailBtn.textContent = '[associar e-mail]';
+
+    emailForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const rawEmail = this.connectEmailInput.value.trim();
+      const pin = emailPinInput.value.trim();
+      const check = validateOptionalRecoveryEmail(rawEmail);
+      if (!check.valid || !check.email) {
+        this.showConnectFeedback(check.error || 'Informe um endereço de e-mail válido.', true);
+        return;
+      }
+      if (!/^\d{4,8}$/.test(pin)) {
+        this.showConnectFeedback('Digite seu PIN atual (4 a 8 dígitos).', true);
+        return;
+      }
+      if (!this.events.onAssociateRecoveryEmail) return;
+      saveEmailBtn.disabled = true;
+      try {
+        const res = await this.events.onAssociateRecoveryEmail(pin, check.email);
+        emailPinInput.value = '';
+        if (res.status === 'already_active') {
+          this.connectEmailStatusEl.textContent = `E-mail ativo: ${res.email}`;
+          this.showConnectFeedback('Este e-mail já está ativo para recuperação.');
+        } else {
+          this.connectEmailStatusEl.textContent =
+            `Confirmação enviada para ${res.email}. Abra o link no seu e-mail para ativar.`;
+          this.showConnectFeedback(`Link de confirmação enviado para ${res.email}.`);
+        }
+      } catch (err) {
+        this.showConnectFeedback(this.extractReadableError(err), true);
+      } finally {
+        saveEmailBtn.disabled = false;
+      }
+    });
+
+    emailForm.appendChild(this.connectEmailInput);
+    emailForm.appendChild(emailPinInput);
+    emailForm.appendChild(saveEmailBtn);
+    this.connectEmailPanelEl.appendChild(this.connectEmailStatusEl);
+    this.connectEmailPanelEl.appendChild(emailForm);
+
     // Painel inline: Alterar PIN local
     this.connectPinPanelEl = document.createElement('div');
     this.connectPinPanelEl.className = 'ttm-inline-security-panel';
@@ -1063,18 +1538,21 @@ export class ChatUI {
     curPinInp.type = 'password';
     curPinInp.inputMode = 'numeric';
     curPinInp.maxLength = 8;
+    curPinInp.autocomplete = 'off';
     curPinInp.placeholder = 'PIN atual';
     curPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
     const nextPinInp = document.createElement('input');
     nextPinInp.type = 'password';
     nextPinInp.inputMode = 'numeric';
     nextPinInp.maxLength = 8;
+    nextPinInp.autocomplete = 'off';
     nextPinInp.placeholder = 'Novo PIN (4 a 8 dígitos)';
     nextPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
     const nextPinConfInp = document.createElement('input');
     nextPinConfInp.type = 'password';
     nextPinConfInp.inputMode = 'numeric';
     nextPinConfInp.maxLength = 8;
+    nextPinConfInp.autocomplete = 'off';
     nextPinConfInp.placeholder = 'Confirmar novo PIN';
     nextPinConfInp.className = 'ttm-connect-input ttm-connect-input-phone';
     const savePinBtn = document.createElement('button');
@@ -1120,20 +1598,30 @@ export class ChatUI {
     rotateCodeBtn.addEventListener('click', () => {
       const visible = this.connectRecoveryPanelEl.style.display === 'flex';
       this.connectRecoveryPanelEl.style.display = visible ? 'none' : 'flex';
+      this.connectEmailPanelEl.style.display = 'none';
       this.connectPinPanelEl.style.display = 'none';
       rotResultEl.style.display = 'none';
       rotCopyBtn.style.display = 'none';
+    });
+
+    recoveryEmailBtn.addEventListener('click', () => {
+      const visible = this.connectEmailPanelEl.style.display === 'flex';
+      this.connectEmailPanelEl.style.display = visible ? 'none' : 'flex';
+      this.connectRecoveryPanelEl.style.display = 'none';
+      this.connectPinPanelEl.style.display = 'none';
     });
 
     changePinBtn.addEventListener('click', () => {
       const visible = this.connectPinPanelEl.style.display === 'flex';
       this.connectPinPanelEl.style.display = visible ? 'none' : 'flex';
       this.connectRecoveryPanelEl.style.display = 'none';
+      this.connectEmailPanelEl.style.display = 'none';
     });
 
     selfCard.appendChild(selfTitle);
     selfCard.appendChild(selfRow);
     selfCard.appendChild(this.connectRecoveryPanelEl);
+    selfCard.appendChild(this.connectEmailPanelEl);
     selfCard.appendChild(this.connectPinPanelEl);
 
     // Cartão 2: Procurar contacto por telefone exato e convidar
@@ -1610,15 +2098,24 @@ export class ChatUI {
     }
   }
 
-  public showCalculatorView(): void {
+  public getAppWrapper(): HTMLElement {
+    return this.appWrapper;
+  }
+
+  public hideAllPrimaryViews(): void {
     this.exitSelectionMode();
     this.closeSettingsModal();
+    this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
+  }
+
+  public showCalculatorView(): void {
+    this.hideAllPrimaryViews();
     this.calculator.show();
   }
 
@@ -1663,7 +2160,14 @@ export class ChatUI {
     this.onboardingPinConfirmInput.type = 'password';
     this.onboardingErrorEl.textContent = '';
     this.onboardingSecretInput.value = '';
+    this.onboardingSecretInput.type = 'password';
     this.onboardingSecretConfirmInput.value = '';
+    this.onboardingSecretConfirmInput.type = 'password';
+    this.onboardingPmUsernameInput.value = '';
+    this.onboardingEmailInput.value = '';
+    this.onboardingEmailHintEl.textContent =
+      'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+    this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
     this.onboardingSecretHintEl.textContent =
       'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
     this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
@@ -1690,7 +2194,12 @@ export class ChatUI {
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'flex';
+    this.recoveryMainFormEl.style.display = 'flex';
+    this.recoveryResetBoxEl.style.display = 'none';
+    this.recoveryOobBoxEl.style.display = 'none';
+    this.activeOobCode = null;
     this.recoveryPhoneInput.value = '';
+    this.recoveryEmailInput.value = '';
     this.recoveryCodeInput.value = '';
     this.recoveryCodeInput.type = 'password';
     this.recoveryPinInput.value = '';
@@ -1707,6 +2216,26 @@ export class ChatUI {
     }, 100);
   }
 
+  public showInAppPasswordResetView(oobCode: string, email: string): void {
+    this.showRecoveryView();
+    this.activeOobCode = oobCode;
+    this.recoveryMainFormEl.style.display = 'none';
+    this.recoveryResetBoxEl.style.display = 'none';
+    this.recoveryOobBoxEl.style.display = 'flex';
+    this.recoveryOobEmailLabelEl.textContent =
+      `Conta: ${email}. Defina a sua nova Chave Pessoal e o PIN da calculadora neste aparelho.`;
+    this.recoveryOobSecretInput.value = '';
+    this.recoveryOobSecretInput.type = 'password';
+    this.recoveryOobSecretConfirmInput.value = '';
+    this.recoveryOobSecretConfirmInput.type = 'password';
+    this.recoveryOobPinInput.value = '';
+    this.recoveryOobPinConfirmInput.value = '';
+    this.recoveryOobErrorEl.textContent = '';
+    setTimeout(() => {
+      this.recoveryOobSecretInput.focus();
+    }, 100);
+  }
+
   public showConnectView(session: UserSession): void {
     this.currentSession = session;
     this.exitSelectionMode();
@@ -1719,12 +2248,24 @@ export class ChatUI {
     this.headerEl.style.display = 'flex';
     this.connectViewEl.style.display = 'flex';
     this.connectRecoveryPanelEl.style.display = 'none';
+    this.connectEmailPanelEl.style.display = 'none';
     this.connectPinPanelEl.style.display = 'none';
     this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
     this.connectSelfNameEl.textContent = session.displayName || 'Minha conta';
     this.connectSelfPhoneEl.textContent = session.phoneMasked
       ? `${session.phoneMasked} · descoberta ativa`
       : 'Descoberta ativa pelo número declarado';
+    this.connectEmailInput.value = session.recoveryEmail || session.pendingRecoveryEmail || '';
+    if (session.pendingRecoveryEmail) {
+      this.connectEmailStatusEl.textContent =
+        `Confirmação pendente para ${session.pendingRecoveryEmail}. Abra o link enviado ao seu e-mail para ativar.`;
+    } else if (session.recoveryEmail) {
+      this.connectEmailStatusEl.textContent =
+        `E-mail de recuperação ativo: ${session.recoveryEmail}. Opcional — apenas para efeitos de recuperação de conta.`;
+    } else {
+      this.connectEmailStatusEl.textContent =
+        'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+    }
     this.connectFeedbackEl.textContent = '';
     this.connectFeedbackEl.classList.remove('is-error');
     this.roomInfoEl.textContent = `você: ${session.displayName} | convide por telefone ou aceite um convite`;

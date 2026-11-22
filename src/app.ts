@@ -75,6 +75,7 @@ import {
   subscribeToIncomingInvites,
   subscribeToOutgoingInvites,
   subscribeToUserConversations,
+  subscribeToOwnUserProfile,
 } from './firebase/firestore';
 import {
   hasUnreadIncomingMessage,
@@ -89,7 +90,9 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
 import {
   applyLocalResetEpochIfNeeded,
+  associateRecoveryEmailWithPin,
   authenticateVaultIdentity,
+  completePasswordResetInApp,
   findLocalIdentityByPin,
   getActiveVaultPinLengths,
   getAllLocalIdentities,
@@ -98,7 +101,9 @@ import {
   regenerateRecoveryCodeWithPin,
   registerPhoneIdentity,
   restoreLocalIdentity,
+  sendPasswordResetForRecoveryEmail,
   updateLocalPinForAccount,
+  verifyInAppPasswordResetCode,
   LocalIdentity,
 } from './identity';
 
@@ -193,6 +198,8 @@ export class Talk2TMApp {
   private knownAcceptedInviteIds: Set<string> = new Set();
   private pendingOnboardingSession: UserSession | null = null;
   private isCheckingCustomPin: boolean = false;
+  private adminOverlayController: { destroy: () => Promise<void> } | null = null;
+  private unsubscribeOwnProfile: Unsubscribe | null = null;
 
   constructor(container: HTMLElement) {
     this.appSettings = loadSettings();
@@ -201,6 +208,9 @@ export class Talk2TMApp {
       onUnlockByPin: (password: string) => this.unlockChatWithPassword(password),
       onCheckCustomPin: async (displayValue: string, inputSequence: string) => {
         return await this.tryUnlockCustomPinFromCalculator(displayValue, inputSequence);
+      },
+      onOpenAdminRoute: () => {
+        void this.openAdminOverlay();
       },
       onLockToCalculator: () => this.lockToCalculator(),
       onSendMessage: (text: string) => this.sendMessage(text),
@@ -238,8 +248,17 @@ export class Talk2TMApp {
       onRecoverIdentity: async (params) => {
         await this.handleRecoverIdentity(params);
       },
+      onSendPasswordResetEmail: async (email: string) => {
+        return await sendPasswordResetForRecoveryEmail(email);
+      },
+      onCompleteInAppPasswordReset: async (params) => {
+        await this.handleCompleteInAppPasswordReset(params);
+      },
       onRegenerateRecoveryCode: async (currentPin: string, customRecoveryCode?: string) => {
         return await this.handleRegenerateRecoveryCode(currentPin, customRecoveryCode);
+      },
+      onAssociateRecoveryEmail: async (currentPin: string, email: string) => {
+        return await this.handleAssociateRecoveryEmail(currentPin, email);
       },
       onChangeLocalPin: async (currentPin: string, newPin: string) => {
         await this.handleChangeLocalPin(currentPin, newPin);
@@ -271,11 +290,45 @@ export class Talk2TMApp {
     this.registerServiceWorker();
   }
 
+  private async openAdminOverlay(): Promise<void> {
+    if (this.adminOverlayController) return;
+
+    // Suspende sessão PIN ou monitor passivo sem apagar o cofre local nem o MonitorContext
+    if (this.currentSession) {
+      this.leaveSession();
+    }
+    this.stopBackgroundMonitor();
+    this.ui.hideAllPrimaryViews();
+
+    try {
+      const { mountAdminOverlay } = await import('./ui/admin');
+      if (this.adminOverlayController) return;
+
+      this.adminOverlayController = mountAdminOverlay(this.ui.getAppWrapper(), {
+        onExit: () => {
+          this.adminOverlayController = null;
+          this.ui.showCalculatorView();
+          if (getMonitorContext()) {
+            this.startBackgroundMonitor(true);
+          }
+        },
+      });
+    } catch (err) {
+      console.error('Erro ao abrir interface administrativa:', err);
+      this.adminOverlayController = null;
+      this.ui.showCalculatorView();
+      if (getMonitorContext()) {
+        this.startBackgroundMonitor(true);
+      }
+      this.ui.showTemporaryNotice('Não foi possível abrir o módulo administrativo.');
+    }
+  }
+
   private async tryUnlockCustomPinFromCalculator(
     displayValue: string,
     inputSequence: string
   ): Promise<boolean> {
-    if (this.currentSession || this.isCheckingCustomPin) return false;
+    if (this.adminOverlayController || this.currentSession || this.isCheckingCustomPin) return false;
     const lengths = getActiveVaultPinLengths();
     if (lengths.length === 0) return false;
 
@@ -322,6 +375,7 @@ export class Talk2TMApp {
    * a interface do chat de forma otimista, sem travar na rede.
    */
   public async unlockChatWithPassword(password: string): Promise<boolean> {
+    if (this.adminOverlayController) return false;
     const cleanInput = (password || '').trim();
     const verification = verifyPassword(cleanInput);
 
@@ -563,10 +617,40 @@ export class Talk2TMApp {
     this.ui.showCalculatorView();
   }
 
+  private stopOwnProfileSubscription(): void {
+    if (this.unsubscribeOwnProfile) {
+      this.unsubscribeOwnProfile();
+      this.unsubscribeOwnProfile = null;
+    }
+  }
+
+  private handleAccountSuspended(talk2tmId: string): void {
+    if (!this.currentSession || this.currentSession.talk2tmId !== talk2tmId) {
+      return;
+    }
+    this.leaveSession();
+    this.stopBackgroundMonitor();
+    this.ui.showCalculatorView();
+    this.ui.showTemporaryNotice('Esta conta foi desactivada pelo administrador.');
+  }
+
+  private attachOwnProfileSuspensionGuard(talk2tmId?: string): void {
+    this.stopOwnProfileSubscription();
+    if (!talk2tmId || !isAuthValidAndNonAnonymous()) {
+      return;
+    }
+    this.unsubscribeOwnProfile = subscribeToOwnUserProfile(talk2tmId, (profile) => {
+      if (profile.active === false) {
+        this.handleAccountSuspended(talk2tmId);
+      }
+    });
+  }
+
   public leaveSession(): void {
     this.stopAllTimers();
     this.stopActiveChatSyncLoop();
     this.stopConnectHubListeners();
+    this.stopOwnProfileSubscription();
     if (this.unsubscribeMessages) {
       this.unsubscribeMessages();
       this.unsubscribeMessages = null;
@@ -1508,6 +1592,30 @@ export class Talk2TMApp {
     }
 
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
+
+    // Se o utilizador abriu um link nativo de redefinição (?mode=resetPassword&oobCode=...), mostra fluxo direto
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const searchParams = new URLSearchParams(window.location.search);
+      const mode = searchParams.get('mode');
+      const oobCode = searchParams.get('oobCode');
+      if (mode === 'resetPassword' && oobCode) {
+        if (window.history?.replaceState) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        try {
+          const resetEmail = await verifyInAppPasswordResetCode(oobCode);
+          this.ui.showInAppPasswordResetView(oobCode, resetEmail);
+          return;
+        } catch (err: any) {
+          this.ui.showRecoveryView();
+          this.ui.showTemporaryNotice(
+            err?.message || 'Link de redefinição inválido ou expirado. Peça um novo link.'
+          );
+          return;
+        }
+      }
+    }
+
     this.ui.showCalculatorView();
 
     // Calculadora visível ao abrir PWA: ativa apenas o monitor passivo para o ponto no DEG
@@ -1560,6 +1668,8 @@ export class Talk2TMApp {
       roomId: '',
       talk2tmId: identity.talk2tmId,
       phoneMasked: identity.phoneMasked,
+      recoveryEmail: identity.recoveryEmail,
+      pendingRecoveryEmail: identity.pendingRecoveryEmail,
     };
 
     this.currentSession = session;
@@ -1584,11 +1694,26 @@ export class Talk2TMApp {
 
       // Aguarda eventual troca de conta no Firebase Auth para multi-conta no mesmo aparelho
       const authRes = await authPromise;
-      if (authRes?.displayName && authRes.displayName !== session.displayName) {
-        session.displayName = authRes.displayName;
-        saveSession(session);
+      if (authRes) {
+        let changed = false;
+        if (authRes.displayName && authRes.displayName !== session.displayName) {
+          session.displayName = authRes.displayName;
+          changed = true;
+        }
+        if (authRes.identity.recoveryEmail !== session.recoveryEmail) {
+          session.recoveryEmail = authRes.identity.recoveryEmail;
+          changed = true;
+        }
+        if (authRes.identity.pendingRecoveryEmail !== session.pendingRecoveryEmail) {
+          session.pendingRecoveryEmail = authRes.identity.pendingRecoveryEmail;
+          changed = true;
+        }
+        if (changed) {
+          saveSession(session);
+        }
       }
       if (this.currentSession && this.currentSession.userId === identity.uid) {
+        this.attachOwnProfileSuspensionGuard(identity.talk2tmId);
         await this.connectToConversation(lastConvId);
       }
     } else {
@@ -1602,11 +1727,26 @@ export class Talk2TMApp {
       this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
       void this.preloadLocalHubConversations(session.userId);
       const authRes = await authPromise;
-      if (authRes?.displayName && authRes.displayName !== session.displayName) {
-        session.displayName = authRes.displayName;
-        saveSession(session);
+      if (authRes) {
+        let changed = false;
+        if (authRes.displayName && authRes.displayName !== session.displayName) {
+          session.displayName = authRes.displayName;
+          changed = true;
+        }
+        if (authRes.identity.recoveryEmail !== session.recoveryEmail) {
+          session.recoveryEmail = authRes.identity.recoveryEmail;
+          changed = true;
+        }
+        if (authRes.identity.pendingRecoveryEmail !== session.pendingRecoveryEmail) {
+          session.pendingRecoveryEmail = authRes.identity.pendingRecoveryEmail;
+          changed = true;
+        }
+        if (changed) {
+          saveSession(session);
+        }
       }
       if (this.currentSession && this.currentSession.userId === identity.uid) {
+        this.attachOwnProfileSuspensionGuard(identity.talk2tmId);
         await this.openBilateralHub(session);
       }
     }
@@ -1615,7 +1755,7 @@ export class Talk2TMApp {
   }
 
   /**
-   * Cadastro Zero Custos (4 campos + Chave Pessoal de Recuperação escolhida ou gerada):
+   * Cadastro Zero Custos (4 campos + Chave Pessoal de Recuperação escolhida ou gerada + e-mail opcional):
    * Cria identidade e prepara sessão para entrar imediatamente.
    */
   public async handleCreateIdentity(params: {
@@ -1623,6 +1763,7 @@ export class Talk2TMApp {
     phone: string;
     pin: string;
     recoveryCode?: string;
+    recoveryEmail?: string;
   }): Promise<{ talk2tmId: string; recoveryCode: string; e164Phone: string }> {
     const result = await registerPhoneIdentity(params);
 
@@ -1632,6 +1773,8 @@ export class Talk2TMApp {
       roomId: '',
       talk2tmId: result.identity.talk2tmId,
       phoneMasked: result.identity.phoneMasked,
+      recoveryEmail: result.identity.recoveryEmail,
+      pendingRecoveryEmail: result.identity.pendingRecoveryEmail,
     };
 
     return {
@@ -1664,11 +1807,21 @@ export class Talk2TMApp {
   }
 
   public async handleRecoverIdentity(params: {
-    phone: string;
+    phone?: string;
+    recoveryEmail?: string;
     recoveryCode: string;
     newPin: string;
   }): Promise<void> {
     const identity = await recoverPhoneIdentity(params);
+    await this.unlockWithLocalIdentity(identity, params.newPin.trim());
+  }
+
+  public async handleCompleteInAppPasswordReset(params: {
+    oobCode: string;
+    recoveryCode: string;
+    newPin: string;
+  }): Promise<void> {
+    const identity = await completePasswordResetInApp(params);
     await this.unlockWithLocalIdentity(identity, params.newPin.trim());
   }
 
@@ -1679,6 +1832,25 @@ export class Talk2TMApp {
     const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
     const res = await regenerateRecoveryCodeWithPin(uid, currentPin, customRecoveryCode);
     return res.recoveryCode;
+  }
+
+  public async handleAssociateRecoveryEmail(
+    currentPin: string,
+    email: string
+  ): Promise<{ status: 'already_active' | 'verification_sent'; email: string }> {
+    if (!this.currentSession) {
+      throw new Error('Sessão ativa necessária.');
+    }
+    const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    const res = await associateRecoveryEmailWithPin(uid, currentPin, email);
+    if (res.status === 'already_active') {
+      this.currentSession.recoveryEmail = res.email;
+      this.currentSession.pendingRecoveryEmail = undefined;
+    } else {
+      this.currentSession.pendingRecoveryEmail = res.email;
+    }
+    saveSession(this.currentSession);
+    return res;
   }
 
   public async handleChangeLocalPin(currentPin: string, newPin: string): Promise<void> {
@@ -1782,6 +1954,9 @@ export class Talk2TMApp {
       await waitForAuthCompletion(3000);
     }
 
+    if (this.currentSession?.talk2tmId) {
+      this.attachOwnProfileSuspensionGuard(this.currentSession.talk2tmId);
+    }
     this.attachConnectHubListeners(hubSession);
   }
 
@@ -1793,6 +1968,9 @@ export class Talk2TMApp {
       if (auth) {
         this.unsubscribeHubAuthWait = onAuthStateChanged(auth, (resolved) => {
           if (resolved && !resolved.isAnonymous && this.ui.isConnectViewActive()) {
+            if (session.talk2tmId) {
+              this.attachOwnProfileSuspensionGuard(session.talk2tmId);
+            }
             this.attachConnectHubListeners({ ...session, userId: resolved.uid });
           }
         });
@@ -1942,6 +2120,10 @@ export class Talk2TMApp {
     // Garante consolidação do Firebase Auth antes de consultar metadados/listeners na conversa
     if (!isAuthValidAndNonAnonymous()) {
       await waitForAuthCompletion(3000);
+    }
+
+    if (this.currentSession?.talk2tmId && isAuthValidAndNonAnonymous()) {
+      this.attachOwnProfileSuspensionGuard(this.currentSession.talk2tmId);
     }
 
     // Carrega metadados da conversa bilateral para resolver nomes de participantA/participantB e lastRead

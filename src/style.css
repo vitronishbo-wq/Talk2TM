@@ -1258,4 +1258,223 @@ html, body {
   align-items: center;
 }
 
+.ttm-pm-username {
+  color: var(--text-muted);
+  border-style: dashed;
+  font-size: 13px;
+  opacity: 0.85;
+  cursor: default;
+}
+
+/* =========================================================
+   9. PAINEL ADMINISTRATIVO ULTRAMINIMALISTA (COLUNA ÚNICA DENSA)
+   ========================================================= */
+.ttm-admin-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-dark);
+  z-index: 90;
+  overflow: hidden;
+}
+
+.ttm-admin-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: max(10px, env(safe-area-inset-top)) 12px 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+}
+
+.ttm-admin-title-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ttm-admin-title-wrap strong {
+  font-size: 13px;
+  color: var(--text-main);
+}
+
+.ttm-admin-summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ttm-admin-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ttm-admin-login-card {
+  width: 100%;
+  max-width: 340px;
+  margin: auto;
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.ttm-admin-divider {
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: -2px 0;
+}
+
+.ttm-admin-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 10px max(12px, env(safe-area-inset-bottom)) 10px;
+  gap: 8px;
+}
+
+.ttm-admin-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ttm-admin-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ttm-admin-search-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ttm-admin-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: 4px;
+  outline: none;
+}
+
+.ttm-admin-search-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.ttm-admin-feedback {
+  font-size: 11px;
+  min-height: 14px;
+  color: var(--success-color);
+}
+
+.ttm-admin-feedback.is-error {
+  color: var(--error-color);
+}
+
+.ttm-admin-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ttm-admin-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.ttm-admin-cell.is-inactive {
+  border-color: rgba(248, 81, 73, 0.45);
+  opacity: 0.9;
+}
+
+.ttm-admin-cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ttm-admin-cell-name {
+  font-size: 12.5px;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ttm-admin-cell-meta {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.ttm-admin-toggle {
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ttm-admin-toggle.is-on {
+  border-color: rgba(63, 185, 80, 0.55);
+  color: var(--success-color);
+  background-color: rgba(63, 185, 80, 0.08);
+}
+
+.ttm-admin-toggle.is-off {
+  border-color: rgba(248, 81, 73, 0.6);
+  color: var(--error-color);
+  background-color: rgba(248, 81, 73, 0.1);
+}
+
+.ttm-admin-toggle:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.ttm-admin-empty {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding: 16px 8px;
+  text-align: center;
+}
+
+.ttm-admin-more-btn {
+  height: 36px;
+  font-size: 12px;
+}
 
