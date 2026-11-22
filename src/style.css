@@ -1478,3 +1478,221 @@ html, body {
   font-size: 12px;
 }
 
+/* =========================================================
+   10. ENTRADA DIRETA TALK2TM (SÍMBOLO OFICIAL + TECLADO PIN)
+   ========================================================= */
+.ttm-lock-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(18px, env(safe-area-inset-bottom)) 20px;
+  background-color: var(--bg-dark);
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ttm-lock-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: auto;
+  gap: 8px;
+}
+
+.ttm-lock-logo-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ttm-lock-logo {
+  display: block;
+  width: clamp(54px, 14vw, 68px);
+  height: clamp(54px, 14vw, 68px);
+}
+
+.ttm-lock-unread-dot {
+  display: none;
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: var(--error-color);
+  border: 2px solid var(--bg-dark);
+}
+
+.ttm-lock-logo-wrap.is-unread .ttm-lock-unread-dot {
+  display: block;
+}
+
+.ttm-lock-title {
+  font-family: var(--font-sans);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-main);
+  letter-spacing: 0.2px;
+  line-height: 1.2;
+}
+
+.ttm-lock-subtitle {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.35;
+}
+
+.ttm-pin-visor {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+  max-width: 300px;
+  min-height: 44px;
+  padding: 4px 48px;
+}
+
+.ttm-pin-dots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 20px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.ttm-pin-placeholder {
+  font-size: 14px;
+  letter-spacing: 4px;
+  color: #484f58;
+  user-select: none;
+}
+
+.ttm-pin-dot.is-filled {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: var(--text-main);
+  flex-shrink: 0;
+}
+
+.ttm-pin-backspace {
+  position: absolute;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.ttm-pin-backspace:hover:not(:disabled) {
+  color: var(--text-main);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.ttm-pin-backspace:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+.ttm-lock-feedback {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--error-color);
+  text-align: center;
+  line-height: 1.3;
+}
+
+.ttm-pin-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  width: 100%;
+  max-width: 300px;
+}
+
+.ttm-pin-key {
+  height: clamp(52px, 13vw, 64px);
+  min-height: 48px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background-color: var(--bg-surface);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: clamp(20px, 5.5vw, 26px);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease;
+}
+
+.ttm-pin-key:hover {
+  background-color: #1c212c;
+}
+
+.ttm-pin-key:active {
+  transform: scale(0.96);
+  background-color: #242b38;
+}
+
+.ttm-pin-key-sym {
+  color: var(--text-muted);
+  font-size: clamp(18px, 5vw, 22px);
+}
+
+.ttm-lock-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: auto;
+}
+
+.ttm-lock-link {
+  background: transparent;
+  border: none;
+  color: var(--accent-blue);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  min-height: 44px;
+  padding: 0 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ttm-lock-link:hover {
+  text-decoration: underline;
+}
+
+.ttm-lock-sep {
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ttm-pin-key,
+  .ttm-pin-backspace {
+    transition: none;
+  }
+}

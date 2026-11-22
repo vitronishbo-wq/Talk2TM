@@ -4,7 +4,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser, loadSettings, saveSettings } from '../src/config';
+import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser, loadSettings, saveSettings, normalizeAppearanceMode } from '../src/config';
+import { getTalk2TMIconSvg } from '../src/ui/lockscreen';
 import {
   sanitizeMessageText,
   sanitizeName,
@@ -1568,6 +1569,49 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     );
     assert(!convBlock.includes('isAdmin()'), 'conversations e messages nunca podem ser lidos pelo Admin');
     assert(convBlock.includes('isCallerActive()'), 'conversations e messages devem exigir isCallerActive()');
+  });
+
+  // 63. Identidade Visual Talk2TM + Ícone Oficial SVG (< 2 KB) + Entrada Direta e Modo Discreto Local (Nível A)
+  check('Identidade Talk2TM: ícone SVG < 2 KB, entrada padrão Talk2TM, alternância local Talk2TM/Calculadora e atalhos preservados', () => {
+    assert(DEFAULT_SETTINGS.appearance === 'talk2tm', 'Aparência padrão deve ser talk2tm');
+    assert(normalizeAppearanceMode(undefined) === 'talk2tm', 'Valor indefinido deve normalizar para talk2tm');
+    assert(normalizeAppearanceMode('notas') === 'talk2tm', 'Modo inválido ou notas não suportado deve normalizar para talk2tm');
+    assert(normalizeAppearanceMode('calculator') === 'calculator', 'Modo calculator deve ser preservado');
+
+    const svgFilePath = path.resolve(process.cwd(), 'public/icon-talk2tm.svg');
+    assert(fs.existsSync(svgFilePath), 'public/icon-talk2tm.svg deve existir');
+    const svgBuffer = fs.readFileSync(svgFilePath);
+    assert(svgBuffer.length > 0 && svgBuffer.length < 2048, `Ícone oficial deve ter < 2 KB (atual: ${svgBuffer.length} bytes)`);
+    const svgSrc = svgBuffer.toString('utf8');
+    assert(svgSrc.includes('#2563EB') && !svgSrc.includes('<text'), 'Ícone deve ter círculo azul vibrante sem texto');
+
+    const inlineSvg = getTalk2TMIconSvg(64);
+    assert(inlineSvg.includes('viewBox="0 0 512 512"') && inlineSvg.includes('#2563EB'), 'Helper inline SVG deve refletir símbolo oficial');
+
+    const manifestJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'public/manifest.json'), 'utf8'));
+    assert(manifestJson.short_name === 'Talk2TM' && manifestJson.name === 'Talk2TM', 'manifest.json deve usar nome Talk2TM');
+    assert(manifestJson.icons?.[0]?.src === '/icon-talk2tm.svg', 'manifest.json deve apontar para /icon-talk2tm.svg');
+
+    const indexHtml = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf8');
+    assert(indexHtml.includes('href="/icon-talk2tm.svg"') && indexHtml.includes('content="Talk2TM"'), 'index.html deve usar título e ícone oficial Talk2TM');
+
+    const lockSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/lockscreen.ts'), 'utf8');
+    assert(
+      lockSrc.includes('isAdminRouteSequence') &&
+      lockSrc.includes('852456') &&
+      lockSrc.includes('135790') &&
+      lockSrc.includes("'*'") &&
+      lockSrc.includes("'#'"),
+      'Tela padrão Talk2TM deve manter atalhos legados (852456/135790) e atalho admin (*123456789*#)'
+    );
+
+    const domSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/dom.ts'), 'utf8');
+    assert(
+      domSrc.includes("val: 'talk2tm'") &&
+      domSrc.includes("val: 'calculator'") &&
+      !domSrc.includes('Modo Notas'),
+      'Definições locais devem alternar apenas entre Talk2TM e Calculadora'
+    );
   });
 
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);

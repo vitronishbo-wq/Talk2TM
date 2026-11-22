@@ -1,9 +1,9 @@
 {
-  "short_name": "Calculadora",
-  "name": "Calculadora",
+  "short_name": "Talk2TM",
+  "name": "Talk2TM",
   "icons": [
     {
-      "src": "/icon-calc.svg",
+      "src": "/icon-talk2tm.svg",
       "sizes": "512x512",
       "type": "image/svg+xml",
       "purpose": "any maskable"

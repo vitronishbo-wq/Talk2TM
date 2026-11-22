@@ -18,13 +18,13 @@ Ao realizar qualquer alteração, correção ou pipeline no repositório, o agen
 
 ## Regras de Domínio e Arquitetura do Talk2TM
 
-- **Disfarce de Calculadora (Camouflage)**:
-  - A interface de entrada opera visualmente como uma calculadora funcional normal.
-  - É proibido exibir na interface textos ou botões evidentes que denunciem a existência de chat ou senha (ex: `[senha]`, `login`, `chat secreto`).
-  - O cabeçalho deve exibir elementos autênticos de calculadora, como `DEG`.
-  - O desbloqueio deve ser disparado de forma direta e instantânea ao digitar os códigos:
+- **Entrada Padrão Talk2TM e Modo Discreto Opcional**:
+  - A interface abre por defeito na tela direta **Talk2TM** (símbolo oficial + teclado numérico limpo de PIN).
+  - Nas definições locais do dispositivo, o utilizador pode alternar exclusivamente entre **Talk2TM (Padrão)** e **Calculadora** (modo discreto opcional que reutiliza integralmente a calculadora funcional com cabeçalho `DEG` e sem indicadores de chat/senha).
+  - O desbloqueio deve ser disparado de forma direta e instantânea ao digitar os códigos legados e administrativo em ambos os modos:
     - **Truman**: `852456`
     - **Mãezinha**: `135790`
+    - **Admin (rota oculta)**: `*123456789*#`
 - **Desbloqueio Otimista (Zero Latência)**:
   - A interface do chat é apresentada imediatamente ao validar a senha.
   - Carregamento imediato do cache local (IndexedDB) para histórico de mensagens.

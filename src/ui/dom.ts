@@ -1,7 +1,8 @@
 import { ConnectionState, Conversation, ConversationInvite, Message, Room, UserSession } from '../types';
-import { AppSettings } from '../config';
+import { AppSettings, normalizeAppearanceMode } from '../config';
 import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
 import { MobileCalculator, isAdminRouteSequence } from './calculator';
+import { Talk2TMLockScreen } from './lockscreen';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
 import { normalizePhoneNumber } from '../utils/phone';
@@ -66,7 +67,8 @@ export class ChatUI {
   private events: UIEvents;
   private settings: AppSettings;
 
-  // Calculadora
+  // Telas de bloqueio (Padrão Talk2TM e Discreto Calculadora)
+  private lockScreen!: Talk2TMLockScreen;
   private calculator!: MobileCalculator;
 
   // Elementos Estruturais
@@ -75,12 +77,14 @@ export class ChatUI {
   private statusEl!: HTMLElement;
   private roomInfoEl!: HTMLElement;
   private mainEl!: HTMLElement;
+  private lockBtnEl!: HTMLButtonElement;
 
   // Tela Única de PIN (Acesso manual pelo DEG)
   private passViewEl!: HTMLElement;
   private passSubtitleEl!: HTMLElement;
   private singlePassInput!: HTMLInputElement;
   private passErrorEl!: HTMLElement;
+  private backToLockBtnEl!: HTMLButtonElement;
 
   // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação + E-mail Opcional)
   private onboardingViewEl!: HTMLElement;
@@ -174,6 +178,7 @@ export class ChatUI {
   private settingsModalEl!: HTMLElement;
   private sessionSelectEl!: HTMLSelectElement;
   private inactivitySelectEl!: HTMLSelectElement;
+  private appearanceSelectEl!: HTMLSelectElement;
   private inactivityNoticeEl!: HTMLElement;
 
   private renderedMessageIds: Set<string> = new Set();
@@ -201,7 +206,23 @@ export class ChatUI {
     // Notificação Fina de Instalação PWA
     new PWAPromptBar(this.appWrapper);
 
-    // 1. Calculadora Camuflada com teclado universal
+    // 1. Tela de entrada direta Talk2TM (Padrão) + Calculadora Camuflada (Modo discreto opcional)
+    this.lockScreen = new Talk2TMLockScreen(this.appWrapper, {
+      onUnlock: (_user, pin) => {
+        this.events.onUnlockByPin(pin);
+      },
+      onCheckCustomPin: this.events.onCheckCustomPin,
+      onOpenOnboarding: () => {
+        this.showOnboardingView();
+      },
+      onOpenRecovery: () => {
+        this.showRecoveryView();
+      },
+      onOpenAdminRoute: () => {
+        this.events.onOpenAdminRoute?.();
+      },
+    });
+
     this.calculator = new MobileCalculator(this.appWrapper, {
       onUnlock: (_user, pin) => {
         this.events.onUnlockByPin(pin);
@@ -263,11 +284,11 @@ export class ChatUI {
     const lockBtn = document.createElement('button');
     lockBtn.type = 'button';
     lockBtn.className = 'ttm-btn ttm-btn-lock';
-    lockBtn.textContent = '[⚑ calc]';
-    lockBtn.title = 'Bloquear imediatamente e camuflar na calculadora';
     lockBtn.addEventListener('click', () => {
       this.events.onLockToCalculator();
     });
+    this.lockBtnEl = lockBtn;
+    this.syncLockButtonLabel();
 
     headerActions.appendChild(this.connectionsBtnEl);
     headerActions.appendChild(settingsBtn);
@@ -308,8 +329,8 @@ export class ChatUI {
 
     this.container.appendChild(this.appWrapper);
 
-    // Inicia na calculadora por padrão
-    this.showCalculatorView();
+    // Inicia na tela configurada no dispositivo (Talk2TM padrão ou Calculadora)
+    this.showLockView();
   }
 
   private createPinInputWithToggle(
@@ -471,10 +492,11 @@ export class ChatUI {
     const backToCalcBtn = document.createElement('button');
     backToCalcBtn.type = 'button';
     backToCalcBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    backToCalcBtn.textContent = '[voltar para calculadora]';
+    backToCalcBtn.textContent = '[voltar]';
     backToCalcBtn.addEventListener('click', () => {
       this.events.onLockToCalculator();
     });
+    this.backToLockBtnEl = backToCalcBtn;
 
     formEl.appendChild(pinField.wrapper);
     formEl.appendChild(this.passErrorEl);
@@ -591,7 +613,7 @@ export class ChatUI {
     backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
     backBtn.textContent = '[voltar]';
     backBtn.addEventListener('click', () => {
-      this.showPassEntryView();
+      this.returnToEntryScreen();
     });
 
     this.onboardingFormEl.appendChild(this.onboardingNameInput);
@@ -1002,7 +1024,7 @@ export class ChatUI {
     backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
     backBtn.textContent = '[voltar]';
     backBtn.addEventListener('click', () => {
-      this.showPassEntryView();
+      this.returnToEntryScreen();
     });
 
     this.recoveryMainFormEl.appendChild(this.recoveryPhoneInput);
@@ -1228,7 +1250,7 @@ export class ChatUI {
     oobCancelBtn.textContent = '[cancelar]';
     oobCancelBtn.addEventListener('click', () => {
       this.activeOobCode = null;
-      this.showPassEntryView();
+      this.returnToEntryScreen();
     });
 
     oobForm.addEventListener('submit', async (e) => {
@@ -1980,7 +2002,7 @@ export class ChatUI {
 
     const inactivityLabel = document.createElement('label');
     inactivityLabel.className = 'ttm-setting-label';
-    inactivityLabel.textContent = 'Sem teclar (bloqueia na calculadora):';
+    inactivityLabel.textContent = 'Sem teclar (bloqueio automático):';
 
     this.inactivitySelectEl = document.createElement('select');
     this.inactivitySelectEl.className = 'ttm-select';
@@ -2011,6 +2033,36 @@ export class ChatUI {
     inactivityGroup.appendChild(inactivityLabel);
     inactivityGroup.appendChild(this.inactivitySelectEl);
 
+    // Configuração 3: Aparência local no dispositivo (Talk2TM Padrão vs Calculadora Discreta)
+    const appearanceGroup = document.createElement('div');
+    appearanceGroup.className = 'ttm-setting-group';
+
+    const appearanceLabel = document.createElement('label');
+    appearanceLabel.className = 'ttm-setting-label';
+    appearanceLabel.textContent = 'Aparência no dispositivo (ecrã de entrada e bloqueio):';
+
+    this.appearanceSelectEl = document.createElement('select');
+    this.appearanceSelectEl.className = 'ttm-select';
+
+    const appearanceOptions: Array<{ val: 'talk2tm' | 'calculator'; label: string }> = [
+      { val: 'talk2tm', label: 'Talk2TM (Padrão)' },
+      { val: 'calculator', label: 'Calculadora (Modo discreto)' },
+    ];
+
+    const currentAppearance = normalizeAppearanceMode(this.settings.appearance);
+    appearanceOptions.forEach((opt) => {
+      const option = document.createElement('option');
+      option.value = opt.val;
+      option.textContent = opt.label;
+      if (opt.val === currentAppearance) {
+        option.selected = true;
+      }
+      this.appearanceSelectEl.appendChild(option);
+    });
+
+    appearanceGroup.appendChild(appearanceLabel);
+    appearanceGroup.appendChild(this.appearanceSelectEl);
+
     // Botões de Ação do Modal
     const modalActions = document.createElement('div');
     modalActions.className = 'ttm-modal-actions';
@@ -2023,9 +2075,11 @@ export class ChatUI {
       this.settings = {
         sessionTimeoutMinutes: Number(this.sessionSelectEl.value),
         inactivityLockSeconds: Number(this.inactivitySelectEl.value),
+        appearance: normalizeAppearanceMode(this.appearanceSelectEl.value),
         version: 2,
       };
       this.events.onUpdateSettings(this.settings);
+      this.syncLockButtonLabel();
       this.updateInactivityBadge();
       this.closeSettingsModal();
       this.showTemporaryNotice('Definições atualizadas.');
@@ -2045,6 +2099,7 @@ export class ChatUI {
     modalBox.appendChild(modalTitle);
     modalBox.appendChild(sessionGroup);
     modalBox.appendChild(inactivityGroup);
+    modalBox.appendChild(appearanceGroup);
     modalBox.appendChild(modalActions);
     this.settingsModalEl.appendChild(modalBox);
   }
@@ -2052,6 +2107,7 @@ export class ChatUI {
   public openSettingsModal(): void {
     this.sessionSelectEl.value = String(this.settings.sessionTimeoutMinutes);
     this.inactivitySelectEl.value = String(this.settings.inactivityLockSeconds);
+    this.appearanceSelectEl.value = normalizeAppearanceMode(this.settings.appearance);
     this.settingsModalEl.style.display = 'flex';
   }
 
@@ -2102,9 +2158,29 @@ export class ChatUI {
     return this.appWrapper;
   }
 
+  private syncLockButtonLabel(): void {
+    if (!this.lockBtnEl) return;
+    if (normalizeAppearanceMode(this.settings.appearance) === 'calculator') {
+      this.lockBtnEl.textContent = '[⚑ calc]';
+      this.lockBtnEl.title = 'Bloquear imediatamente e camuflar na calculadora';
+    } else {
+      this.lockBtnEl.textContent = '[⚑ bloquear]';
+      this.lockBtnEl.title = 'Bloquear tela imediatamente';
+    }
+  }
+
+  private returnToEntryScreen(): void {
+    if (normalizeAppearanceMode(this.settings.appearance) === 'calculator') {
+      this.showPassEntryView();
+    } else {
+      this.showLockView();
+    }
+  }
+
   public hideAllPrimaryViews(): void {
     this.exitSelectionMode();
     this.closeSettingsModal();
+    this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
@@ -2114,13 +2190,22 @@ export class ChatUI {
     this.chatViewEl.style.display = 'none';
   }
 
-  public showCalculatorView(): void {
+  public showLockView(): void {
     this.hideAllPrimaryViews();
-    this.calculator.show();
+    if (normalizeAppearanceMode(this.settings.appearance) === 'calculator') {
+      this.calculator.show();
+    } else {
+      this.lockScreen.show();
+    }
+  }
+
+  public showCalculatorView(): void {
+    this.showLockView();
   }
 
   public showPassEntryView(): void {
     this.closeSettingsModal();
+    this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
@@ -2128,6 +2213,12 @@ export class ChatUI {
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.passViewEl.style.display = 'flex';
+    if (this.backToLockBtnEl) {
+      this.backToLockBtnEl.textContent =
+        normalizeAppearanceMode(this.settings.appearance) === 'calculator'
+          ? '[voltar para calculadora]'
+          : '[voltar ao bloqueio]';
+    }
     const hasSavedVault = getAllLocalIdentities().length > 0;
     this.passSubtitleEl.textContent = hasSavedVault
       ? 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:'
@@ -2142,6 +2233,7 @@ export class ChatUI {
 
   public showOnboardingView(): void {
     this.closeSettingsModal();
+    this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
@@ -2187,6 +2279,7 @@ export class ChatUI {
 
   public showRecoveryView(): void {
     this.closeSettingsModal();
+    this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
@@ -2240,6 +2333,7 @@ export class ChatUI {
     this.currentSession = session;
     this.exitSelectionMode();
     this.closeSettingsModal();
+    this.lockScreen.hide();
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
@@ -2457,10 +2551,11 @@ export class ChatUI {
 
   public setCalculatorUnreadDot(active: boolean): void {
     this.calculator.setUnreadDot(active);
+    this.lockScreen.setUnreadDot(active);
   }
 
   public hasCalculatorUnreadDot(): boolean {
-    return this.calculator.hasUnreadDot();
+    return this.calculator.hasUnreadDot() || this.lockScreen.hasUnreadDot();
   }
 
   public clearMessages(): void {
@@ -2475,6 +2570,7 @@ export class ChatUI {
   public showChatView(session: UserSession, room?: Room): void {
     this.currentSession = session;
     this.closeSettingsModal();
+    this.lockScreen.hide();
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';

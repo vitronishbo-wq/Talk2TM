@@ -1,9 +1,10 @@
 // Talk2TM Minimalist Shell Service Worker
-const CACHE_NAME = 'talk2tm-shell-v6';
+const CACHE_NAME = 'talk2tm-shell-v7';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
-  '/manifest.json'
+  '/manifest.json',
+  '/icon-talk2tm.svg'
 ];
 
 self.addEventListener('install', (event) => {
