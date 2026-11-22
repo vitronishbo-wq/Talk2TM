@@ -1523,8 +1523,10 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(
       adminFirebaseSrc.includes('GoogleAuthProvider') &&
       adminFirebaseSrc.includes('signInWithPopup') &&
+      adminFirebaseSrc.includes('browserPopupRedirectResolver') &&
+      adminFirebaseSrc.includes('popupRedirectResolver') &&
       adminFirebaseSrc.includes('signInAdminWithGoogle'),
-      'Módulo admin deve oferecer Google Sign-In isolado em RAM'
+      'Módulo admin deve oferecer Google Sign-In isolado em RAM com browserPopupRedirectResolver'
     );
     assert(adminUiSrc.includes('signInAdminWithGoogle') && adminUiSrc.includes('[entrar com Google]'), 'UI admin deve exibir botão Google Sign-In junto ao formulário');
     assert(adminFirebaseSrc.includes('Base Orgânico'), 'Plano fallback deve ser Base Orgânico');

@@ -13,6 +13,7 @@ import {
   Auth,
   GoogleAuthProvider,
   User,
+  browserPopupRedirectResolver,
   initializeAuth,
   inMemoryPersistence,
   signInWithEmailAndPassword,
@@ -74,6 +75,7 @@ async function ensureIsolatedAdminClient(): Promise<{ auth: Auth; db: Firestore 
   try {
     adminAuth = initializeAuth(adminApp, {
       persistence: inMemoryPersistence,
+      popupRedirectResolver: browserPopupRedirectResolver,
     });
   } catch {
     // Se já inicializado nesta instância nomeada, obtém via getAuth dinâmico não necessário porque guardamos adminAuth;
@@ -151,7 +153,7 @@ export async function signInAdminWithGoogle(): Promise<AdminUsersPageResult> {
   provider.setCustomParameters({ prompt: 'select_account' });
 
   try {
-    await signInWithPopup(auth, provider);
+    await signInWithPopup(auth, provider, browserPopupRedirectResolver);
   } catch (err: any) {
     const code = typeof err?.code === 'string' ? err.code : '';
     let message = 'Não foi possível autenticar via Google.';
