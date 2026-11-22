@@ -1043,6 +1043,7 @@ html, body {
   display: flex;
   gap: 8px;
   align-items: center;
+  min-width: 0;
 }
 
 .ttm-connect-input {
@@ -1242,6 +1243,212 @@ html, body {
 .ttm-connect-input-phone {
   text-transform: none;
   letter-spacing: 0.3px;
+  font-size: 14px;
+}
+
+/* Seletor Universal de País (Bandeira + Indicativo) + Telefone */
+.ttm-phone-group {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.ttm-phone-group.is-compact {
+  flex: 1;
+  gap: 6px;
+}
+
+.ttm-country-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  height: 50px;
+  min-width: 96px;
+  padding: 0 10px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-main);
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ttm-phone-group.is-compact .ttm-country-picker {
+  height: 40px;
+  min-width: 82px;
+  padding: 0 8px;
+  border-radius: 6px;
+}
+
+.ttm-country-picker:hover {
+  border-color: #444d5c;
+}
+
+.ttm-country-picker:focus-visible {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 1px var(--accent-blue);
+}
+
+.ttm-country-badge {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ttm-phone-group.is-compact .ttm-country-badge {
+  font-size: 13px;
+}
+
+.ttm-country-caret {
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.ttm-phone-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ttm-country-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)) 12px;
+  z-index: 200;
+}
+
+.ttm-country-modal {
+  width: 100%;
+  max-width: 440px;
+  height: min(78dvh, 560px);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.72);
+}
+
+.ttm-country-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ttm-country-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.ttm-country-search {
+  height: 44px;
+  font-size: 14px;
+  padding: 0 12px;
+  letter-spacing: 0.2px;
+}
+
+.ttm-country-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.ttm-country-section-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  padding: 6px 4px 2px 4px;
+}
+
+.ttm-country-item {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--bg-input);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ttm-country-item:hover {
+  border-color: var(--border-color);
+  background-color: #202533;
+}
+
+.ttm-country-item.is-selected {
+  border-color: var(--accent-blue);
+  background-color: rgba(88, 166, 255, 0.12);
+}
+
+.ttm-country-item-flag {
+  font-size: 17px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.ttm-country-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ttm-country-item-iso {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ttm-country-item-code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-blue);
+  flex-shrink: 0;
+  min-width: 44px;
+  text-align: right;
+}
+
+.ttm-country-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 24px 12px;
 }
 
 .ttm-inline-security-panel {

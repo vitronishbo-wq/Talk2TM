@@ -5,7 +5,8 @@ import { MobileCalculator, isAdminRouteSequence } from './calculator';
 import { Talk2TMLockScreen } from './lockscreen';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
-import { normalizePhoneNumber } from '../utils/phone';
+import { PhoneCountry, PhoneNormalizationResult } from '../utils/phone';
+import { createPhoneInputField, PhoneInputField } from './phone-input';
 import {
   generateRecoveryCode,
   getAllLocalIdentities,
@@ -90,7 +91,7 @@ export class ChatUI {
   private onboardingViewEl!: HTMLElement;
   private onboardingFormEl!: HTMLFormElement;
   private onboardingNameInput!: HTMLInputElement;
-  private onboardingPhoneInput!: HTMLInputElement;
+  private onboardingPhoneField!: PhoneInputField;
   private onboardingPhonePreviewEl!: HTMLElement;
   private onboardingPinInput!: HTMLInputElement;
   private onboardingPinConfirmInput!: HTMLInputElement;
@@ -113,7 +114,7 @@ export class ChatUI {
   // Tela de Entrada em Outro Aparelho / Recuperação (Zero Custos)
   private recoveryViewEl!: HTMLElement;
   private recoveryMainFormEl!: HTMLFormElement;
-  private recoveryPhoneInput!: HTMLInputElement;
+  private recoveryPhoneField!: PhoneInputField;
   private recoveryPhonePreviewEl!: HTMLElement;
   private recoveryEmailInput!: HTMLInputElement;
   private recoveryCodeInput!: HTMLInputElement;
@@ -146,7 +147,7 @@ export class ChatUI {
   private connectEmailStatusEl!: HTMLElement;
   private connectEmailInput!: HTMLInputElement;
   private connectPinPanelEl!: HTMLElement;
-  private connectTargetInput!: HTMLInputElement;
+  private connectTargetField!: PhoneInputField;
   private connectTargetPreviewEl!: HTMLElement;
   private connectInviteBtn!: HTMLButtonElement;
   private connectFeedbackEl!: HTMLElement;
@@ -407,16 +408,30 @@ export class ChatUI {
     return { wrapper, input, toggleBtn };
   }
 
-  private updatePhonePreview(raw: string, previewEl: HTMLElement): void {
+  private updatePhonePreview(
+    raw: string,
+    res: PhoneNormalizationResult,
+    country: PhoneCountry,
+    previewEl: HTMLElement,
+    mode: 'onboarding' | 'recovery' | 'connect' = 'onboarding'
+  ): void {
     const trimmed = raw.trim();
     if (!trimmed) {
-      previewEl.textContent = 'Número declarado (não verificado por SMS). Angola: 9 dígitos ou +indicativo.';
+      if (mode === 'recovery') {
+        previewEl.textContent = `Use o mesmo número do cadastro (${country.flag} ${country.name} ${country.dialCode}).`;
+      } else if (mode === 'connect') {
+        previewEl.textContent = `Pesquisa exata por número (${country.flag} ${country.name} ${country.dialCode}).`;
+      } else {
+        previewEl.textContent = `País: ${country.flag} ${country.name} (${country.dialCode}). Toque na bandeira para mudar.`;
+      }
       previewEl.classList.remove('is-valid', 'is-invalid');
       return;
     }
-    const res = normalizePhoneNumber(trimmed);
     if (res.valid && res.e164) {
-      previewEl.textContent = `Formato internacional: ${res.e164} (declarado)`;
+      previewEl.textContent =
+        mode === 'connect'
+          ? `Procurar: ${res.e164}`
+          : `Formato internacional: ${res.e164} (declarado)`;
       previewEl.classList.add('is-valid');
       previewEl.classList.remove('is-invalid');
     } else {
@@ -565,23 +580,24 @@ export class ChatUI {
     this.onboardingNameInput.maxLength = 30;
     this.onboardingNameInput.autocomplete = 'name';
 
-    this.onboardingPhoneInput = document.createElement('input');
-    this.onboardingPhoneInput.type = 'tel';
-    this.onboardingPhoneInput.id = 'ttm-onboarding-phone';
-    this.onboardingPhoneInput.className = 'ttm-input ttm-input-left';
-    this.onboardingPhoneInput.placeholder = '2. Telefone (+244 9XX... ou 9XXXXXXXX)';
-    this.onboardingPhoneInput.inputMode = 'tel';
-    this.onboardingPhoneInput.maxLength = 24;
-    this.onboardingPhoneInput.autocomplete = 'tel';
-
     this.onboardingPhonePreviewEl = document.createElement('div');
     this.onboardingPhonePreviewEl.className = 'ttm-field-hint';
-    this.onboardingPhonePreviewEl.textContent =
-      'Número declarado (não verificado por SMS). Angola: 9 dígitos ou +indicativo.';
 
-    this.onboardingPhoneInput.addEventListener('input', () => {
-      this.updatePhonePreview(this.onboardingPhoneInput.value, this.onboardingPhonePreviewEl);
+    this.onboardingPhoneField = createPhoneInputField({
+      id: 'ttm-onboarding-phone',
+      placeholder: '2. Número de telefone',
+      autocomplete: 'tel',
+      onChange: (raw, res, country) => {
+        this.updatePhonePreview(raw, res, country, this.onboardingPhonePreviewEl, 'onboarding');
+      },
     });
+    this.updatePhonePreview(
+      '',
+      { valid: false },
+      this.onboardingPhoneField.getCountry(),
+      this.onboardingPhonePreviewEl,
+      'onboarding'
+    );
 
     const pin1 = this.createPinInputWithToggle(
       'ttm-onboarding-pin',
@@ -617,7 +633,7 @@ export class ChatUI {
     });
 
     this.onboardingFormEl.appendChild(this.onboardingNameInput);
-    this.onboardingFormEl.appendChild(this.onboardingPhoneInput);
+    this.onboardingFormEl.appendChild(this.onboardingPhoneField.wrapper);
     this.onboardingFormEl.appendChild(this.onboardingPhonePreviewEl);
     this.onboardingFormEl.appendChild(pin1.wrapper);
     this.onboardingFormEl.appendChild(pin2.wrapper);
@@ -809,7 +825,6 @@ export class ChatUI {
       this.onboardingErrorEl.textContent = '';
 
       const displayName = this.onboardingNameInput.value.trim();
-      const phone = this.onboardingPhoneInput.value.trim();
       const pin = this.onboardingPinInput.value.trim();
       const pinConfirm = this.onboardingPinConfirmInput.value.trim();
 
@@ -817,7 +832,7 @@ export class ChatUI {
         this.onboardingErrorEl.textContent = 'Informe seu nome ou utilizador.';
         return;
       }
-      const phoneCheck = normalizePhoneNumber(phone);
+      const phoneCheck = this.onboardingPhoneField.validate();
       if (!phoneCheck.valid || !phoneCheck.e164) {
         this.onboardingErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
         return;
@@ -836,7 +851,12 @@ export class ChatUI {
         return;
       }
 
-      this.pendingOnboardingDraft = { displayName, phone, e164Phone: phoneCheck.e164, pin };
+      this.pendingOnboardingDraft = {
+        displayName,
+        phone: phoneCheck.e164,
+        e164Phone: phoneCheck.e164,
+        pin,
+      };
       this.onboardingPmUsernameInput.value = phoneCheck.e164;
       this.onboardingFormEl.style.display = 'none';
       this.recoveryStepBoxEl.style.display = 'flex';
@@ -932,23 +952,25 @@ export class ChatUI {
     this.recoveryMainFormEl = document.createElement('form');
     this.recoveryMainFormEl.className = 'ttm-form';
 
-    this.recoveryPhoneInput = document.createElement('input');
-    this.recoveryPhoneInput.type = 'tel';
-    this.recoveryPhoneInput.id = 'ttm-recovery-phone';
-    this.recoveryPhoneInput.name = 'username';
-    this.recoveryPhoneInput.className = 'ttm-input ttm-input-left';
-    this.recoveryPhoneInput.placeholder = '1. Telefone (+244 9XX... ou 9XXXXXXXX)';
-    this.recoveryPhoneInput.inputMode = 'tel';
-    this.recoveryPhoneInput.maxLength = 24;
-    this.recoveryPhoneInput.autocomplete = 'username';
-
     this.recoveryPhonePreviewEl = document.createElement('div');
     this.recoveryPhonePreviewEl.className = 'ttm-field-hint';
-    this.recoveryPhonePreviewEl.textContent = 'Use o mesmo número declarado no cadastro.';
 
-    this.recoveryPhoneInput.addEventListener('input', () => {
-      this.updatePhonePreview(this.recoveryPhoneInput.value, this.recoveryPhonePreviewEl);
+    this.recoveryPhoneField = createPhoneInputField({
+      id: 'ttm-recovery-phone',
+      name: 'username',
+      placeholder: '1. Número de telefone',
+      autocomplete: 'username',
+      onChange: (raw, res, country) => {
+        this.updatePhonePreview(raw, res, country, this.recoveryPhonePreviewEl, 'recovery');
+      },
     });
+    this.updatePhonePreview(
+      '',
+      { valid: false },
+      this.recoveryPhoneField.getCountry(),
+      this.recoveryPhonePreviewEl,
+      'recovery'
+    );
 
     this.recoveryEmailInput = document.createElement('input');
     this.recoveryEmailInput.type = 'email';
@@ -1027,7 +1049,7 @@ export class ChatUI {
       this.returnToEntryScreen();
     });
 
-    this.recoveryMainFormEl.appendChild(this.recoveryPhoneInput);
+    this.recoveryMainFormEl.appendChild(this.recoveryPhoneField.wrapper);
     this.recoveryMainFormEl.appendChild(this.recoveryPhonePreviewEl);
     this.recoveryMainFormEl.appendChild(this.recoveryEmailInput);
     this.recoveryMainFormEl.appendChild(recoveryEmailHint);
@@ -1044,22 +1066,24 @@ export class ChatUI {
       e.preventDefault();
       this.recoveryErrorEl.textContent = '';
 
-      const phone = this.recoveryPhoneInput.value.trim();
+      const rawPhone = this.recoveryPhoneField.getValue();
       const recoveryEmail = this.recoveryEmailInput.value.trim();
       const recoveryCode = this.recoveryCodeInput.value.trim();
       const newPin = this.recoveryPinInput.value.trim();
       const confirmPin = this.recoveryPinConfirmInput.value.trim();
 
-      if (!phone && !recoveryEmail) {
+      if (!rawPhone && !recoveryEmail) {
         this.recoveryErrorEl.textContent = 'Informe o número de telefone cadastrado (ou o e-mail de recuperação).';
         return;
       }
-      if (phone) {
-        const phoneCheck = normalizePhoneNumber(phone);
-        if (!phoneCheck.valid) {
+      let normalizedPhone: string | undefined;
+      if (rawPhone) {
+        const phoneCheck = this.recoveryPhoneField.validate();
+        if (!phoneCheck.valid || !phoneCheck.e164) {
           this.recoveryErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
           return;
         }
+        normalizedPhone = phoneCheck.e164;
       }
       const emailCheck = validateOptionalRecoveryEmail(recoveryEmail);
       if (!emailCheck.valid) {
@@ -1084,7 +1108,7 @@ export class ChatUI {
         this.recoverySubmitBtn.textContent = '[entrando...]';
         try {
           await this.events.onRecoverIdentity({
-            phone: phone || undefined,
+            phone: normalizedPhone,
             recoveryEmail: emailCheck.email,
             recoveryCode,
             newPin,
@@ -1657,36 +1681,24 @@ export class ChatUI {
     const inviteForm = document.createElement('form');
     inviteForm.className = 'ttm-connect-form';
 
-    this.connectTargetInput = document.createElement('input');
-    this.connectTargetInput.type = 'tel';
-    this.connectTargetInput.inputMode = 'tel';
-    this.connectTargetInput.className = 'ttm-connect-input ttm-connect-input-phone';
-    this.connectTargetInput.placeholder = '+244 9XX XXX XXX ou 9XXXXXXXX';
-    this.connectTargetInput.maxLength = 24;
-    this.connectTargetInput.autocomplete = 'tel';
-
     this.connectTargetPreviewEl = document.createElement('div');
     this.connectTargetPreviewEl.className = 'ttm-field-hint';
-    this.connectTargetPreviewEl.textContent = 'Pesquisa exata por número declarado.';
 
-    this.connectTargetInput.addEventListener('input', () => {
-      const raw = this.connectTargetInput.value.trim();
-      if (!raw) {
-        this.connectTargetPreviewEl.textContent = 'Pesquisa exata por número declarado.';
-        this.connectTargetPreviewEl.classList.remove('is-valid', 'is-invalid');
-        return;
-      }
-      const res = normalizePhoneNumber(raw);
-      if (res.valid && res.e164) {
-        this.connectTargetPreviewEl.textContent = `Procurar: ${res.e164}`;
-        this.connectTargetPreviewEl.classList.add('is-valid');
-        this.connectTargetPreviewEl.classList.remove('is-invalid');
-      } else {
-        this.connectTargetPreviewEl.textContent = res.error || 'Número inválido.';
-        this.connectTargetPreviewEl.classList.add('is-invalid');
-        this.connectTargetPreviewEl.classList.remove('is-valid');
-      }
+    this.connectTargetField = createPhoneInputField({
+      variant: 'compact',
+      placeholder: 'Número do contacto',
+      autocomplete: 'tel',
+      onChange: (raw, res, country) => {
+        this.updatePhonePreview(raw, res, country, this.connectTargetPreviewEl, 'connect');
+      },
     });
+    this.updatePhonePreview(
+      '',
+      { valid: false },
+      this.connectTargetField.getCountry(),
+      this.connectTargetPreviewEl,
+      'connect'
+    );
 
     this.connectInviteBtn = document.createElement('button');
     this.connectInviteBtn.type = 'submit';
@@ -1698,9 +1710,14 @@ export class ChatUI {
 
     inviteForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const targetPhone = this.connectTargetInput.value.trim();
-      if (!targetPhone) {
+      const rawPhone = this.connectTargetField.getValue();
+      if (!rawPhone) {
         this.showConnectFeedback('Informe o número de telefone do contacto.', true);
+        return;
+      }
+      const phoneCheck = this.connectTargetField.validate();
+      if (!phoneCheck.valid || !phoneCheck.e164) {
+        this.showConnectFeedback(phoneCheck.error || 'Número de telefone inválido.', true);
         return;
       }
       if (!this.events.onSendInvite) return;
@@ -1708,10 +1725,8 @@ export class ChatUI {
       this.connectInviteBtn.textContent = '[enviando...]';
       this.showConnectFeedback('');
       try {
-        await this.events.onSendInvite(targetPhone);
-        this.connectTargetInput.value = '';
-        this.connectTargetPreviewEl.textContent = 'Pesquisa exata por número declarado.';
-        this.connectTargetPreviewEl.classList.remove('is-valid', 'is-invalid');
+        await this.events.onSendInvite(phoneCheck.e164);
+        this.connectTargetField.reset();
       } catch (err: any) {
         this.showConnectFeedback(this.extractReadableError(err), true);
       } finally {
@@ -1720,7 +1735,7 @@ export class ChatUI {
       }
     });
 
-    inviteForm.appendChild(this.connectTargetInput);
+    inviteForm.appendChild(this.connectTargetField.wrapper);
     inviteForm.appendChild(this.connectInviteBtn);
     inviteCard.appendChild(inviteTitle);
     inviteCard.appendChild(inviteForm);
@@ -2245,7 +2260,7 @@ export class ChatUI {
     this.recoveryStepBoxEl.style.display = 'none';
     this.pendingOnboardingDraft = null;
     this.onboardingNameInput.value = '';
-    this.onboardingPhoneInput.value = '';
+    this.onboardingPhoneField.reset();
     this.onboardingPinInput.value = '';
     this.onboardingPinConfirmInput.value = '';
     this.onboardingPinInput.type = 'password';
@@ -2267,7 +2282,6 @@ export class ChatUI {
     this.recoveryStepCodeEl.textContent = '';
     this.recoveryStepCodeEl.style.display = 'none';
     this.onboardingCopyCodeBtn.style.display = 'none';
-    this.updatePhonePreview('', this.onboardingPhonePreviewEl);
     this.onboardingSubmitBtn.disabled = false;
     this.onboardingSubmitBtn.textContent = '[continuar]';
     this.onboardingStep2SubmitBtn.disabled = false;
@@ -2291,7 +2305,7 @@ export class ChatUI {
     this.recoveryResetBoxEl.style.display = 'none';
     this.recoveryOobBoxEl.style.display = 'none';
     this.activeOobCode = null;
-    this.recoveryPhoneInput.value = '';
+    this.recoveryPhoneField.reset();
     this.recoveryEmailInput.value = '';
     this.recoveryCodeInput.value = '';
     this.recoveryCodeInput.type = 'password';
@@ -2300,12 +2314,10 @@ export class ChatUI {
     this.recoveryPinInput.type = 'password';
     this.recoveryPinConfirmInput.type = 'password';
     this.recoveryErrorEl.textContent = '';
-    this.recoveryPhonePreviewEl.textContent = 'Use o mesmo número declarado no cadastro.';
-    this.recoveryPhonePreviewEl.classList.remove('is-valid', 'is-invalid');
     this.recoverySubmitBtn.disabled = false;
     this.recoverySubmitBtn.textContent = '[entrar na conta]';
     setTimeout(() => {
-      this.recoveryPhoneInput.focus();
+      this.recoveryPhoneField.input.focus();
     }, 100);
   }
 

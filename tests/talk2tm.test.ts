@@ -99,10 +99,16 @@ import {
   LocalIdentity,
 } from '../src/identity';
 import {
+  DEFAULT_COUNTRY_ISO,
+  PHONE_COUNTRIES,
+  detectSuggestedCountry,
+  findCountryByE164,
+  getCountriesByDialCode,
   normalizePhoneNumber,
   maskPhoneNumber,
   hashPhoneNumber,
   phoneHashToInternalEmail,
+  searchPhoneCountries,
 } from '../src/utils/phone';
 import { testIdentityAcceptanceFlow } from '../src/firebase/diagnostic';
 import { normalizeCalculatorSequence, isAdminRouteSequence } from '../src/ui/calculator';
@@ -1611,6 +1617,109 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       domSrc.includes("val: 'calculator'") &&
       !domSrc.includes('Modo Notas'),
       'Definições locais devem alternar apenas entre Talk2TM e Calculadora'
+    );
+  });
+
+  // 64. Telefone Universal (E.164, Namíbia/Internacional, Sugestão Inicial Silenciosa e Sem Remover Zeros Indiscriminadamente)
+  check('Telefone Universal: deteção inicial silenciosa, Namíbia (+264), preservação seletiva de zeros e componente único', () => {
+    assert(PHONE_COUNTRIES.length >= 100, 'Lista internacional compacta deve cobrir pelo menos 100 países');
+    assert(DEFAULT_COUNTRY_ISO === 'AO', 'País de recurso padrão deve continuar sendo Angola (AO)');
+
+    // 1. Sugestão inicial silenciosa por fuso / idioma -> fallback Angola
+    const sugNaTz = detectSuggestedCountry({ timeZone: 'Africa/Windhoek', locale: 'en-US' });
+    assert(sugNaTz.iso === 'NA' && sugNaTz.dialCode === '+264' && sugNaTz.flag === '🇳🇦', 'Fuso Africa/Windhoek deve sugerir Namíbia (+264)');
+
+    const sugAoTz = detectSuggestedCountry({ timeZone: 'Africa/Luanda', locale: 'pt-PT' });
+    assert(sugAoTz.iso === 'AO' && sugAoTz.dialCode === '+244', 'Fuso Africa/Luanda deve sugerir Angola (+244)');
+
+    const sugPtTz = detectSuggestedCountry({ timeZone: 'Europe/Lisbon' });
+    assert(sugPtTz.iso === 'PT' && sugPtTz.dialCode === '+351', 'Fuso Europe/Lisbon deve sugerir Portugal (+351)');
+
+    const sugBrTz = detectSuggestedCountry({ timeZone: 'America/Sao_Paulo' });
+    assert(sugBrTz.iso === 'BR' && sugBrTz.dialCode === '+55', 'Fuso America/Sao_Paulo deve sugerir Brasil (+55)');
+
+    const sugLocale = detectSuggestedCountry({ timeZone: 'Etc/Unknown', locale: 'en-NA', languages: ['en-NA'] });
+    assert(sugLocale.iso === 'NA' && sugLocale.dialCode === '+264', 'Região en-NA deve sugerir Namíbia quando fuso for desconhecido');
+
+    const sugFallback = detectSuggestedCountry({ timeZone: 'Etc/Unknown', locale: 'xx-ZZ', languages: ['xx'] });
+    assert(sugFallback.iso === 'AO' && sugFallback.dialCode === '+244', 'Desconhecido deve cair em Angola (+244)');
+
+    // 2. Namíbia (+264): formatos locais com e sem tronco '0', ou com indicativo
+    assert(normalizePhoneNumber('081 234 5678', '+264').e164 === '+264812345678', 'Namíbia 081... deve normalizar para +264812345678');
+    assert(normalizePhoneNumber('81 234 5678', '+264').e164 === '+264812345678', 'Namíbia 81... deve normalizar para +264812345678');
+    assert(normalizePhoneNumber('264812345678', '+264').e164 === '+264812345678', 'Namíbia 26481... sem + deve normalizar para +264812345678');
+    assert(normalizePhoneNumber('+264 81 234 5678', '+244').e164 === '+264812345678', 'Número explícito +264 deve funcionar mesmo com país padrão +244');
+
+    // 3. Não remover zeros indiscriminadamente
+    assert(normalizePhoneNumber('0923456789', '+244').valid === false, 'Angola (+244) não usa tronco 0 e não deve remover zero inicial arbitrariamente');
+    assert(normalizePhoneNumber('0612345678', '+39').e164 === '+390612345678', 'Itália (+39) deve preservar o 0 inicial obrigatório');
+    assert(normalizePhoneNumber('061234567', '+242').e164 === '+242061234567', 'República do Congo (+242) deve preservar o 0 inicial');
+    assert(normalizePhoneNumber('0712345678', '+225').e164 === '+2250712345678', 'Costa do Marfim (+225) deve preservar o 0 inicial');
+    assert(normalizePhoneNumber('000812345678', '+264').valid === false, 'Múltiplos zeros iniciais (000...) não devem ser removidos às cegas');
+
+    // 4. Preservação total do comportamento Angola (+244) e mascaramento internacional
+    assert(normalizePhoneNumber('923456789').e164 === '+244923456789', 'Angola 9 dígitos deve permanecer idêntico para phoneLookup');
+    assert(findCountryByE164('+264812345678')?.iso === 'NA', 'findCountryByE164 deve identificar Namíbia pelo prefixo +264');
+    assert(maskPhoneNumber('+264812345678') === '+264 ••• 678', 'Mascaramento deve respeitar indicativo de 3 dígitos (+264)');
+    assert(maskPhoneNumber('+5511987654321') === '+55 ••• 321', 'Mascaramento deve respeitar indicativo de 2 dígitos (+55)');
+    assert(maskPhoneNumber('+244923456789') === '+244 ••• 789', 'Mascaramento legado +244 deve permanecer intacto');
+
+    // 5. Componente único reutilizado no registo, recuperação e convites
+    const domSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/dom.ts'), 'utf8');
+    const occurrences = domSrc.match(/createPhoneInputField\(/g)?.length ?? 0;
+    assert(occurrences === 3, `createPhoneInputField deve ser reutilizado exatamente 3 vezes (registo, recuperação e convites; encontradas: ${occurrences})`);
+    assert(
+      domSrc.includes("id: 'ttm-onboarding-phone'") &&
+      domSrc.includes("id: 'ttm-recovery-phone'") &&
+      domSrc.includes("name: 'username'") &&
+      domSrc.includes("autocomplete: 'username'"),
+      'Campos unificados devem preservar IDs e compatibilidade com Gestor de Senhas na recuperação'
+    );
+  });
+
+  // 65. Cobertura Mundial Google libphonenumber (245 territórios, indicativos partilhados, pesquisa e regras de tronco)
+  check('Cobertura Mundial: 245 territórios, indicativos partilhados (+1/+7/+39/+44/+358), pesquisa e regras nacionais', () => {
+    assert(PHONE_COUNTRIES.length >= 240, `Deve cobrir todos os países e territórios reconhecidos (atual: ${PHONE_COUNTRIES.length})`);
+
+    // 1. Territórios que partilham indicativos
+    const nanp = getCountriesByDialCode('+1');
+    assert(nanp.length >= 24 && nanp.some((c) => c.iso === 'US') && nanp.some((c) => c.iso === 'CA') && nanp.some((c) => c.iso === 'PR'), '+1 deve incluir EUA, Canadá, Porto Rico e territórios NANP');
+    assert(findCountryByE164('+17872345678')?.iso === 'PR', '+1 787... deve resolver para Porto Rico');
+    assert(findCountryByE164('+18092345678')?.iso === 'DO', '+1 809... deve resolver para República Dominicana');
+    assert(findCountryByE164('+14165551234', 'CA')?.iso === 'CA', '+1 416... com Canadá selecionado deve preservar CA');
+    assert(findCountryByE164('+77710009998')?.iso === 'KZ', '+7 771... deve resolver para Cazaquistão');
+    assert(findCountryByE164('+79123456789')?.iso === 'RU', '+7 912... deve resolver para Rússia');
+    assert(findCountryByE164('+390669812345')?.iso === 'VA', '+39 06698... deve resolver para Cidade do Vaticano');
+    assert(findCountryByE164('+3581812345')?.iso === 'AX', '+358 18... deve resolver para Ilhas Åland');
+    assert(findCountryByE164('+2908999')?.iso === 'TA', '+290 8999 deve resolver para Tristão da Cunha');
+
+    // 2. Regras nacionais de prefixos/troncos e comprimentos válidos
+    assert(normalizePhoneNumber('011987654321', 'BR').e164 === '+5511987654321', 'Brasil 0 + DDD + número deve normalizar para +5511987654321');
+    assert(normalizePhoneNumber('01511987654321', 'BR').e164 === '+5511987654321', 'Brasil com código de operadora 015 deve normalizar para +5511987654321');
+    assert(normalizePhoneNumber('55991234567', 'BR').e164 === '+5555991234567', 'Brasil DDD 55 não deve ser confundido com indicativo +55');
+    assert(normalizePhoneNumber('0111512345678', 'AR').e164 === '+5491112345678', 'Argentina móvel 011 15... deve converter para +5491112345678');
+    assert(normalizePhoneNumber('01143215678', 'AR').e164 === '+541143215678', 'Argentina fixo 011... deve preservar sem inserir 9');
+    assert(normalizePhoneNumber('89123456789', 'RU').e164 === '+79123456789', 'Rússia com tronco 8 deve converter para +79123456789');
+    assert(normalizePhoneNumber('256789', 'GG').e164 === '+441481256789', 'Guernsey 6 dígitos locais deve converter para +441481256789');
+    assert(normalizePhoneNumber('4123', 'NU').e164 === '+6834123', 'Niue 4 dígitos (+683) deve ser estruturalmente válido');
+    assert(normalizePhoneNumber('1234567', 'AO').valid === false, 'Angola com 7 dígitos deve falhar validação de comprimento');
+    assert(normalizePhoneNumber('+24412345').valid === false, 'Número +244 inválido pelo plano nacional deve ser rejeitado');
+
+    // 3. Pesquisa de país por nome (sem acentos), ISO ou indicativo
+    const byName = searchPhoneCountries('mocambique');
+    assert(byName.some((c) => c.iso === 'MZ' && c.dialCode === '+258'), 'Pesquisa sem acentos deve encontrar Moçambique');
+    const byCode = searchPhoneCountries('+264');
+    assert(byCode.length === 1 && byCode[0].iso === 'NA', 'Pesquisa +264 deve encontrar Namíbia');
+    const bySharedCode = searchPhoneCountries('1');
+    assert(bySharedCode[0].iso === 'US' && bySharedCode.some((c) => c.iso === 'PR'), 'Pesquisa por indicativo 1 deve priorizar +1 (EUA e territórios partilhados)');
+
+    // 4. UI pesquisável ligada ao componente único
+    const phoneInputSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/phone-input.ts'), 'utf8');
+    assert(
+      phoneInputSrc.includes('searchPhoneCountries') &&
+      phoneInputSrc.includes('ttm-country-modal') &&
+      phoneInputSrc.includes('selectedCountry.iso'),
+      'Componente único deve oferecer modal pesquisável e passar ISO exato para normalização'
     );
   });
 

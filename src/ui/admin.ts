@@ -183,7 +183,7 @@ export function mountAdminOverlay(
   searchInput.type = 'tel';
   searchInput.autocomplete = 'off';
   searchInput.className = 'ttm-admin-search-input';
-  searchInput.placeholder = 'Buscar por tel. exato (+244...)';
+  searchInput.placeholder = 'Buscar por tel. exato (+244, +264...)';
 
   const searchBtn = document.createElement('button');
   searchBtn.type = 'submit';
