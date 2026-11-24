@@ -7,6 +7,7 @@ import * as Sentry from '@sentry/react';
 import { isValidSentryDsn, initObservability, captureException } from './observability';
 import './style.css';
 import { startApp } from './app';
+import { t } from './i18n';
 import { testRealtimeSyncAtoB, testIdentityAcceptanceFlow } from './firebase/diagnostic';
 
 // Inicialização do Sentry no topo do arquivo antes de qualquer renderização
@@ -95,7 +96,7 @@ try {
         null,
         React.createElement(
           Sentry.ErrorBoundary,
-          { fallback: React.createElement('p', null, 'Ocorreu um erro inesperado.') },
+          { fallback: React.createElement('p', null, t('app.unexpectedError')) },
           React.createElement(App)
         )
       )

@@ -1,12 +1,13 @@
 import { ConnectionState, Conversation, ConversationInvite, Message, Room, UserSession } from '../types';
-import { AppSettings, normalizeAppearanceMode } from '../config';
+import { AppSettings, normalizeAppearanceMode, normalizeSettingsLanguage } from '../config';
 import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
 import { MobileCalculator, isAdminRouteSequence } from './calculator';
 import { Talk2TMLockScreen } from './lockscreen';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
-import { PhoneCountry, PhoneNormalizationResult } from '../utils/phone';
+import { getCountryDisplayName, PhoneCountry, PhoneNormalizationResult } from '../utils/phone';
 import { createPhoneInputField, PhoneInputField } from './phone-input';
+import { LOCALE_REGISTRY, SUPPORTED_LOCALES, t } from '../i18n';
 import {
   generateRecoveryCode,
   getAllLocalIdentities,
@@ -71,6 +72,8 @@ export class ChatUI {
   // Telas de bloqueio (Padrão Talk2TM e Discreto Calculadora)
   private lockScreen!: Talk2TMLockScreen;
   private calculator!: MobileCalculator;
+  private pwaPromptBar!: PWAPromptBar;
+  private lastConnectionState: ConnectionState = 'conectando';
 
   // Elementos Estruturais
   private appWrapper!: HTMLElement;
@@ -78,88 +81,148 @@ export class ChatUI {
   private statusEl!: HTMLElement;
   private roomInfoEl!: HTMLElement;
   private mainEl!: HTMLElement;
+  private settingsBtnEl!: HTMLButtonElement;
   private lockBtnEl!: HTMLButtonElement;
 
   // Tela Única de PIN (Acesso manual pelo DEG)
   private passViewEl!: HTMLElement;
   private passSubtitleEl!: HTMLElement;
   private singlePassInput!: HTMLInputElement;
+  private passPinToggleBtnEl!: HTMLButtonElement;
   private passErrorEl!: HTMLElement;
+  private passEnterBtnEl!: HTMLButtonElement;
+  private passCreateBtnEl!: HTMLButtonElement;
+  private passRecoverBtnEl!: HTMLButtonElement;
   private backToLockBtnEl!: HTMLButtonElement;
 
   // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação + E-mail Opcional)
   private onboardingViewEl!: HTMLElement;
+  private onboardingTitleEl!: HTMLElement;
+  private onboardingSubtitleEl!: HTMLElement;
   private onboardingFormEl!: HTMLFormElement;
   private onboardingNameInput!: HTMLInputElement;
   private onboardingPhoneField!: PhoneInputField;
   private onboardingPhonePreviewEl!: HTMLElement;
   private onboardingPinInput!: HTMLInputElement;
+  private onboardingPinToggleBtn1El!: HTMLButtonElement;
   private onboardingPinConfirmInput!: HTMLInputElement;
+  private onboardingPinToggleBtn2El!: HTMLButtonElement;
   private onboardingErrorEl!: HTMLElement;
   private onboardingSubmitBtn!: HTMLButtonElement;
+  private onboardingBackBtnEl!: HTMLButtonElement;
   private recoveryStepBoxEl!: HTMLElement;
+  private onboardingStep2TitleEl!: HTMLElement;
+  private onboardingStep2DescEl!: HTMLElement;
   private onboardingStep2FormEl!: HTMLFormElement;
   private onboardingPmUsernameInput!: HTMLInputElement;
   private onboardingSecretInput!: HTMLInputElement;
+  private onboardingSecretToggleBtn1El!: HTMLButtonElement;
   private onboardingSecretConfirmInput!: HTMLInputElement;
+  private onboardingSecretToggleBtn2El!: HTMLButtonElement;
   private onboardingSecretHintEl!: HTMLElement;
   private onboardingEmailInput!: HTMLInputElement;
   private onboardingEmailHintEl!: HTMLElement;
   private onboardingStep2ErrorEl!: HTMLElement;
   private onboardingStep2SubmitBtn!: HTMLButtonElement;
+  private onboardingGenCodeBtnEl!: HTMLButtonElement;
+  private onboardingBackStep1BtnEl!: HTMLButtonElement;
   private recoveryStepCodeEl!: HTMLElement;
   private onboardingCopyCodeBtn!: HTMLButtonElement;
   private pendingOnboardingDraft: { displayName: string; phone: string; e164Phone: string; pin: string } | null = null;
 
   // Tela de Entrada em Outro Aparelho / Recuperação (Zero Custos)
   private recoveryViewEl!: HTMLElement;
+  private recoveryTitleEl!: HTMLElement;
+  private recoverySubtitleEl!: HTMLElement;
   private recoveryMainFormEl!: HTMLFormElement;
   private recoveryPhoneField!: PhoneInputField;
   private recoveryPhonePreviewEl!: HTMLElement;
   private recoveryEmailInput!: HTMLInputElement;
+  private recoveryEmailHintEl!: HTMLElement;
   private recoveryCodeInput!: HTMLInputElement;
+  private recoveryKeyToggleBtnEl!: HTMLButtonElement;
+  private recoveryKeyHintEl!: HTMLElement;
   private recoveryPinInput!: HTMLInputElement;
+  private recoveryPinToggleBtn1El!: HTMLButtonElement;
   private recoveryPinConfirmInput!: HTMLInputElement;
+  private recoveryPinToggleBtn2El!: HTMLButtonElement;
   private recoveryErrorEl!: HTMLElement;
   private recoverySubmitBtn!: HTMLButtonElement;
   private recoveryForgotEmailBtn!: HTMLButtonElement;
+  private recoveryBackBtnEl!: HTMLButtonElement;
   private recoveryResetBoxEl!: HTMLElement;
+  private recoveryResetTitleEl!: HTMLElement;
+  private recoveryResetDescEl!: HTMLElement;
   private recoveryResetEmailInput!: HTMLInputElement;
   private recoveryResetFeedbackEl!: HTMLElement;
   private recoveryResetSubmitBtn!: HTMLButtonElement;
+  private recoveryResetBackBtnEl!: HTMLButtonElement;
   private recoveryOobBoxEl!: HTMLElement;
+  private recoveryOobTitleEl!: HTMLElement;
   private recoveryOobEmailLabelEl!: HTMLElement;
   private recoveryOobSecretInput!: HTMLInputElement;
+  private recoveryOobSecretToggleBtn1El!: HTMLButtonElement;
   private recoveryOobSecretConfirmInput!: HTMLInputElement;
+  private recoveryOobSecretToggleBtn2El!: HTMLButtonElement;
   private recoveryOobPinInput!: HTMLInputElement;
+  private recoveryOobPinToggleBtn1El!: HTMLButtonElement;
   private recoveryOobPinConfirmInput!: HTMLInputElement;
+  private recoveryOobPinToggleBtn2El!: HTMLButtonElement;
   private recoveryOobErrorEl!: HTMLElement;
   private recoveryOobSubmitBtn!: HTMLButtonElement;
+  private recoveryOobCancelBtnEl!: HTMLButtonElement;
   private activeOobCode: string | null = null;
+  private activeOobEmail: string | null = null;
 
   // Hub de Conexões Bilaterais (Descoberta por telefone exato, sem expor TM-XXXX-XXXX)
   private connectionsBtnEl!: HTMLButtonElement;
   private connectViewEl!: HTMLElement;
+  private connectSelfTitleEl!: HTMLElement;
   private connectSelfNameEl!: HTMLElement;
   private connectSelfPhoneEl!: HTMLElement;
+  private connectRotateCodeBtnEl!: HTMLButtonElement;
+  private connectRecoveryEmailBtnEl!: HTMLButtonElement;
+  private connectChangePinBtnEl!: HTMLButtonElement;
   private connectRecoveryPanelEl!: HTMLElement;
+  private connectRotHintEl!: HTMLElement;
+  private connectRotCustomInput!: HTMLInputElement;
+  private connectRotPinInput!: HTMLInputElement;
+  private connectRotSubmitBtnEl!: HTMLButtonElement;
+  private connectRotGenBtnEl!: HTMLButtonElement;
+  private connectRotCopyBtnEl!: HTMLButtonElement;
   private connectEmailPanelEl!: HTMLElement;
   private connectEmailStatusEl!: HTMLElement;
   private connectEmailInput!: HTMLInputElement;
+  private connectEmailPinInput!: HTMLInputElement;
+  private connectSaveEmailBtnEl!: HTMLButtonElement;
   private connectPinPanelEl!: HTMLElement;
+  private connectCurPinInput!: HTMLInputElement;
+  private connectNextPinInput!: HTMLInputElement;
+  private connectNextPinConfInput!: HTMLInputElement;
+  private connectSavePinBtnEl!: HTMLButtonElement;
+  private connectInviteTitleEl!: HTMLElement;
   private connectTargetField!: PhoneInputField;
   private connectTargetPreviewEl!: HTMLElement;
   private connectInviteBtn!: HTMLButtonElement;
   private connectFeedbackEl!: HTMLElement;
+  private connectIncomingTitleEl!: HTMLElement;
   private incomingInvitesListEl!: HTMLElement;
+  private connectOutgoingTitleEl!: HTMLElement;
   private outgoingInvitesListEl!: HTMLElement;
+  private connectConvTitleEl!: HTMLElement;
   private conversationsListEl!: HTMLElement;
   private outgoingTargetNameCache: Map<string, string> = new Map();
+  private lastHubData: {
+    incoming: ConversationInvite[];
+    outgoing: ConversationInvite[];
+    conversations: Conversation[];
+  } | null = null;
 
   // Tela de Chat
   private chatViewEl!: HTMLElement;
   private msgListEl!: HTMLElement;
   private msgInputEl!: HTMLInputElement;
+  private sendBtnEl!: HTMLButtonElement;
   private charCountEl!: HTMLElement;
   private loadOlderBtn!: HTMLButtonElement;
   private sendFormEl!: HTMLFormElement;
@@ -177,9 +240,17 @@ export class ChatUI {
 
   // Modal de Definições Mínimas
   private settingsModalEl!: HTMLElement;
+  private settingsModalTitleEl!: HTMLElement;
+  private settingsSessionLabelEl!: HTMLElement;
+  private settingsInactivityLabelEl!: HTMLElement;
+  private settingsAppearanceLabelEl!: HTMLElement;
+  private settingsLanguageLabelEl!: HTMLElement;
+  private settingsSaveBtnEl!: HTMLButtonElement;
+  private settingsCancelBtnEl!: HTMLButtonElement;
   private sessionSelectEl!: HTMLSelectElement;
   private inactivitySelectEl!: HTMLSelectElement;
   private appearanceSelectEl!: HTMLSelectElement;
+  private languageSelectEl!: HTMLSelectElement;
   private inactivityNoticeEl!: HTMLElement;
 
   private renderedMessageIds: Set<string> = new Set();
@@ -205,7 +276,7 @@ export class ChatUI {
     this.appWrapper.className = 'talk2tm-shell';
 
     // Notificação Fina de Instalação PWA
-    new PWAPromptBar(this.appWrapper);
+    this.pwaPromptBar = new PWAPromptBar(this.appWrapper);
 
     // 1. Tela de entrada direta Talk2TM (Padrão) + Calculadora Camuflada (Modo discreto opcional)
     this.lockScreen = new Talk2TMLockScreen(this.appWrapper, {
@@ -248,26 +319,27 @@ export class ChatUI {
     const brandTitle = document.createElement('strong');
     brandTitle.textContent = 'Talk2TM';
     const brandDesc = document.createElement('span');
-    brandDesc.textContent = ' [2P]';
+    brandDesc.textContent = '1:1';
     brandEl.appendChild(brandTitle);
     brandEl.appendChild(brandDesc);
 
     this.statusEl = document.createElement('div');
     this.statusEl.className = 'ttm-status';
     this.statusEl.setAttribute('data-state', 'conectando');
-    this.statusEl.setAttribute('title', 'Rede: conectando');
-    this.statusEl.setAttribute('aria-label', 'Rede: conectando');
+    const initialNetTitle = t('chat.networkTitle', { state: t('chat.netState.connecting') });
+    this.statusEl.setAttribute('title', initialNetTitle);
+    this.statusEl.setAttribute('aria-label', initialNetTitle);
     this.statusEl.innerHTML = this.getNetworkIconSvg();
 
-    // Ações do cabeçalho
+    // Ações do cabeçalho sistematizadas
     const headerActions = document.createElement('div');
     headerActions.className = 'ttm-header-actions';
 
     this.connectionsBtnEl = document.createElement('button');
     this.connectionsBtnEl.type = 'button';
     this.connectionsBtnEl.className = 'ttm-btn ttm-btn-def';
-    this.connectionsBtnEl.textContent = '[⇄ conexões]';
-    this.connectionsBtnEl.title = 'Gerir convites e conversas bilaterais';
+    this.connectionsBtnEl.textContent = t('chat.connectionsBtn');
+    this.connectionsBtnEl.title = t('chat.connectionsTitle');
     this.connectionsBtnEl.style.display = 'none';
     this.connectionsBtnEl.addEventListener('click', () => {
       this.events.onShowConnectHub?.();
@@ -275,12 +347,14 @@ export class ChatUI {
 
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
-    settingsBtn.className = 'ttm-btn ttm-btn-def';
-    settingsBtn.textContent = '[☼ def]';
-    settingsBtn.title = 'Definições mínimas (tempo de sessão e inatividade)';
+    settingsBtn.className = 'ttm-btn ttm-btn-def ttm-btn-icon';
+    settingsBtn.innerHTML = this.getSettingsIconSvg();
+    settingsBtn.title = t('chat.settingsTitle');
+    settingsBtn.setAttribute('aria-label', t('chat.settingsBtn'));
     settingsBtn.addEventListener('click', () => {
       this.openSettingsModal();
     });
+    this.settingsBtnEl = settingsBtn;
 
     const lockBtn = document.createElement('button');
     lockBtn.type = 'button';
@@ -356,12 +430,12 @@ export class ChatUI {
     const toggleBtn = document.createElement('button');
     toggleBtn.type = 'button';
     toggleBtn.className = 'ttm-toggle-vis-btn';
-    toggleBtn.textContent = 'ver';
-    toggleBtn.setAttribute('aria-label', 'Mostrar ou ocultar PIN');
+    toggleBtn.textContent = t('common.show');
+    toggleBtn.setAttribute('aria-label', t('pass.pinVisToggleAria'));
     toggleBtn.addEventListener('click', () => {
       const showing = input.type === 'text';
       input.type = showing ? 'password' : 'text';
-      toggleBtn.textContent = showing ? 'ver' : 'ocultar';
+      toggleBtn.textContent = showing ? t('common.show') : t('common.hide');
     });
 
     wrapper.appendChild(input);
@@ -395,12 +469,12 @@ export class ChatUI {
     const toggleBtn = document.createElement('button');
     toggleBtn.type = 'button';
     toggleBtn.className = 'ttm-toggle-vis-btn';
-    toggleBtn.textContent = startVisible ? 'ocultar' : 'ver';
-    toggleBtn.setAttribute('aria-label', 'Mostrar ou ocultar chave');
+    toggleBtn.textContent = startVisible ? t('common.hide') : t('common.show');
+    toggleBtn.setAttribute('aria-label', t('pass.secretVisToggleAria'));
     toggleBtn.addEventListener('click', () => {
       const showing = input.type === 'text';
       input.type = showing ? 'password' : 'text';
-      toggleBtn.textContent = showing ? 'ver' : 'ocultar';
+      toggleBtn.textContent = showing ? t('common.show') : t('common.hide');
     });
 
     wrapper.appendChild(input);
@@ -416,13 +490,26 @@ export class ChatUI {
     mode: 'onboarding' | 'recovery' | 'connect' = 'onboarding'
   ): void {
     const trimmed = raw.trim();
+    const countryName = getCountryDisplayName(country);
     if (!trimmed) {
       if (mode === 'recovery') {
-        previewEl.textContent = `Use o mesmo número do cadastro (${country.flag} ${country.name} ${country.dialCode}).`;
+        previewEl.textContent = t('phone.previewRecovery', {
+          flag: country.flag,
+          country: countryName,
+          dialCode: country.dialCode,
+        });
       } else if (mode === 'connect') {
-        previewEl.textContent = `Pesquisa exata por número (${country.flag} ${country.name} ${country.dialCode}).`;
+        previewEl.textContent = t('phone.previewConnect', {
+          flag: country.flag,
+          country: countryName,
+          dialCode: country.dialCode,
+        });
       } else {
-        previewEl.textContent = `País: ${country.flag} ${country.name} (${country.dialCode}). Toque na bandeira para mudar.`;
+        previewEl.textContent = t('phone.previewOnboarding', {
+          flag: country.flag,
+          country: countryName,
+          dialCode: country.dialCode,
+        });
       }
       previewEl.classList.remove('is-valid', 'is-invalid');
       return;
@@ -430,12 +517,12 @@ export class ChatUI {
     if (res.valid && res.e164) {
       previewEl.textContent =
         mode === 'connect'
-          ? `Procurar: ${res.e164}`
-          : `Formato internacional: ${res.e164} (declarado)`;
+          ? t('phone.previewValidConnect', { e164: res.e164 })
+          : t('phone.previewValidStandard', { e164: res.e164 });
       previewEl.classList.add('is-valid');
       previewEl.classList.remove('is-invalid');
     } else {
-      previewEl.textContent = res.error || 'Formato inválido.';
+      previewEl.textContent = res.error || t('phone.invalidFormat');
       previewEl.classList.add('is-invalid');
       previewEl.classList.remove('is-valid');
     }
@@ -456,18 +543,19 @@ export class ChatUI {
 
     this.passSubtitleEl = document.createElement('p');
     this.passSubtitleEl.className = 'ttm-subtitle';
-    this.passSubtitleEl.textContent = 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:';
+    this.passSubtitleEl.textContent = t('pass.subtitleWithVault');
 
     const formEl = document.createElement('form');
     formEl.className = 'ttm-form';
 
     const pinField = this.createPinInputWithToggle(
       'ttm-single-pass',
-      'PIN numérico (4 a 8 dígitos)',
+      t('pass.pinPlaceholder'),
       16,
       'off'
     );
     this.singlePassInput = pinField.input;
+    this.passPinToggleBtnEl = pinField.toggleBtn;
     this.singlePassInput.maxLength = 32;
     this.singlePassInput.inputMode = 'text';
     this.singlePassInput.removeAttribute('pattern');
@@ -486,28 +574,31 @@ export class ChatUI {
     const enterBtn = document.createElement('button');
     enterBtn.type = 'submit';
     enterBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    enterBtn.textContent = '[entrar]';
+    enterBtn.textContent = t('pass.signInBtn');
+    this.passEnterBtnEl = enterBtn;
 
     const createAccountBtn = document.createElement('button');
     createAccountBtn.type = 'button';
     createAccountBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    createAccountBtn.textContent = '[criar conta]';
+    createAccountBtn.textContent = t('pass.createBtn');
     createAccountBtn.addEventListener('click', () => {
       this.showOnboardingView();
     });
+    this.passCreateBtnEl = createAccountBtn;
 
     const recoverAccountBtn = document.createElement('button');
     recoverAccountBtn.type = 'button';
     recoverAccountBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    recoverAccountBtn.textContent = '[entrar noutro aparelho / recuperar]';
+    recoverAccountBtn.textContent = t('pass.recoverBtn');
     recoverAccountBtn.addEventListener('click', () => {
       this.showRecoveryView();
     });
+    this.passRecoverBtnEl = recoverAccountBtn;
 
     const backToCalcBtn = document.createElement('button');
     backToCalcBtn.type = 'button';
     backToCalcBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    backToCalcBtn.textContent = '[voltar]';
+    backToCalcBtn.textContent = t('common.back');
     backToCalcBtn.addEventListener('click', () => {
       this.events.onLockToCalculator();
     });
@@ -526,7 +617,7 @@ export class ChatUI {
       const pin = this.singlePassInput.value.trim();
 
       if (!pin) {
-        this.passErrorEl.textContent = 'Digite o PIN de acesso.';
+        this.passErrorEl.textContent = t('lock.enterPinPrompt');
         return;
       }
 
@@ -563,11 +654,13 @@ export class ChatUI {
 
     const titleEl = document.createElement('h1');
     titleEl.className = 'ttm-title';
-    titleEl.textContent = 'Criar Conta';
+    titleEl.textContent = t('onboarding.title');
+    this.onboardingTitleEl = titleEl;
 
     const subtitleEl = document.createElement('p');
     subtitleEl.className = 'ttm-subtitle';
-    subtitleEl.textContent = 'Cadastro simples, gratuito e sem e-mail ou SMS.';
+    subtitleEl.textContent = t('onboarding.subtitle');
+    this.onboardingSubtitleEl = subtitleEl;
 
     this.onboardingFormEl = document.createElement('form');
     this.onboardingFormEl.className = 'ttm-form';
@@ -576,7 +669,7 @@ export class ChatUI {
     this.onboardingNameInput.type = 'text';
     this.onboardingNameInput.id = 'ttm-onboarding-name';
     this.onboardingNameInput.className = 'ttm-input ttm-input-left';
-    this.onboardingNameInput.placeholder = '1. Nome / Utilizador';
+    this.onboardingNameInput.placeholder = t('onboarding.namePlaceholder');
     this.onboardingNameInput.maxLength = 30;
     this.onboardingNameInput.autocomplete = 'name';
 
@@ -585,7 +678,7 @@ export class ChatUI {
 
     this.onboardingPhoneField = createPhoneInputField({
       id: 'ttm-onboarding-phone',
-      placeholder: '2. Número de telefone',
+      placeholder: t('onboarding.phonePlaceholder'),
       autocomplete: 'tel',
       onChange: (raw, res, country) => {
         this.updatePhonePreview(raw, res, country, this.onboardingPhonePreviewEl, 'onboarding');
@@ -601,19 +694,21 @@ export class ChatUI {
 
     const pin1 = this.createPinInputWithToggle(
       'ttm-onboarding-pin',
-      '3. PIN da calculadora (4 a 8 dígitos)',
+      t('onboarding.pinPlaceholder'),
       8,
       'off'
     );
     this.onboardingPinInput = pin1.input;
+    this.onboardingPinToggleBtn1El = pin1.toggleBtn;
 
     const pin2 = this.createPinInputWithToggle(
       'ttm-onboarding-pin-confirm',
-      '4. Confirmar PIN',
+      t('onboarding.pinConfirmPlaceholder'),
       8,
       'off'
     );
     this.onboardingPinConfirmInput = pin2.input;
+    this.onboardingPinToggleBtn2El = pin2.toggleBtn;
 
     this.onboardingErrorEl = document.createElement('div');
     this.onboardingErrorEl.className = 'ttm-error';
@@ -622,15 +717,16 @@ export class ChatUI {
     this.onboardingSubmitBtn = document.createElement('button');
     this.onboardingSubmitBtn.type = 'submit';
     this.onboardingSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.onboardingSubmitBtn.textContent = '[continuar]';
+    this.onboardingSubmitBtn.textContent = t('onboarding.continueBtn');
 
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
     backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    backBtn.textContent = '[voltar]';
+    backBtn.textContent = t('common.back');
     backBtn.addEventListener('click', () => {
       this.returnToEntryScreen();
     });
+    this.onboardingBackBtnEl = backBtn;
 
     this.onboardingFormEl.appendChild(this.onboardingNameInput);
     this.onboardingFormEl.appendChild(this.onboardingPhoneField.wrapper);
@@ -648,12 +744,13 @@ export class ChatUI {
 
     const recTitle = document.createElement('div');
     recTitle.className = 'ttm-recovery-title';
-    recTitle.textContent = 'Passo 2: Chave Pessoal (Outro Aparelho)';
+    recTitle.textContent = t('onboarding.step2Title');
+    this.onboardingStep2TitleEl = recTitle;
 
     const recDesc = document.createElement('p');
     recDesc.className = 'ttm-onboarding-tip';
-    recDesc.textContent =
-      'Para entrar noutro aparelho ou no modo anónimo, defina uma chave pessoal fácil que já tenha em mente (ex.: nomedamae1985). O navegador pode guardá-la por si.';
+    recDesc.textContent = t('onboarding.step2Desc');
+    this.onboardingStep2DescEl = recDesc;
 
     this.onboardingStep2FormEl = document.createElement('form');
     this.onboardingStep2FormEl.className = 'ttm-form';
@@ -667,63 +764,66 @@ export class ChatUI {
     this.onboardingPmUsernameInput.readOnly = true;
     this.onboardingPmUsernameInput.tabIndex = -1;
     this.onboardingPmUsernameInput.className = 'ttm-input ttm-input-left ttm-pm-username';
-    this.onboardingPmUsernameInput.setAttribute('aria-label', 'Telefone da conta');
+    this.onboardingPmUsernameInput.setAttribute('aria-label', t('onboarding.pmPhoneAria'));
 
     const sec1 = this.createSecretInputWithToggle(
       'ttm-onboarding-secret',
-      'Chave pessoal (mín. 6 letras/números)',
+      t('onboarding.secretPlaceholder'),
       40,
       false,
       'new-password',
       'password'
     );
     this.onboardingSecretInput = sec1.input;
+    this.onboardingSecretToggleBtn1El = sec1.toggleBtn;
 
     this.onboardingSecretHintEl = document.createElement('div');
     this.onboardingSecretHintEl.className = 'ttm-field-hint';
-    this.onboardingSecretHintEl.textContent =
-      'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
+    this.onboardingSecretHintEl.textContent = '';
+    this.onboardingSecretHintEl.style.display = 'none';
 
     const sec2 = this.createSecretInputWithToggle(
       'ttm-onboarding-secret-confirm',
-      'Confirmar chave pessoal',
+      t('onboarding.secretConfirmPlaceholder'),
       40,
       false,
       'new-password'
     );
     this.onboardingSecretConfirmInput = sec2.input;
+    this.onboardingSecretToggleBtn2El = sec2.toggleBtn;
 
     this.onboardingEmailInput = document.createElement('input');
     this.onboardingEmailInput.type = 'email';
     this.onboardingEmailInput.id = 'ttm-onboarding-email';
     this.onboardingEmailInput.name = 'recovery-email';
     this.onboardingEmailInput.className = 'ttm-input ttm-input-left';
-    this.onboardingEmailInput.placeholder = 'E-mail de recuperação (opcional)';
+    this.onboardingEmailInput.placeholder = t('onboarding.emailPlaceholder');
     this.onboardingEmailInput.maxLength = 120;
     this.onboardingEmailInput.autocomplete = 'email';
     this.onboardingEmailInput.inputMode = 'email';
 
     this.onboardingEmailHintEl = document.createElement('div');
     this.onboardingEmailHintEl.className = 'ttm-field-hint';
-    this.onboardingEmailHintEl.textContent =
-      'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+    this.onboardingEmailHintEl.textContent = '';
+    this.onboardingEmailHintEl.style.display = 'none';
 
     this.onboardingEmailInput.addEventListener('input', () => {
       const raw = this.onboardingEmailInput.value.trim();
       if (!raw) {
-        this.onboardingEmailHintEl.textContent =
-          'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+        this.onboardingEmailHintEl.textContent = '';
+        this.onboardingEmailHintEl.style.display = 'none';
         this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
         return;
       }
       const check = validateOptionalRecoveryEmail(raw);
       if (check.valid && check.email) {
-        this.onboardingEmailHintEl.textContent =
-          'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+        this.onboardingEmailHintEl.textContent = '';
+        this.onboardingEmailHintEl.style.display = 'none';
         this.onboardingEmailHintEl.classList.add('is-valid');
         this.onboardingEmailHintEl.classList.remove('is-invalid');
       } else {
-        this.onboardingEmailHintEl.textContent = check.error || 'E-mail inválido.';
+        this.onboardingEmailHintEl.textContent = check.error || t('onboarding.emailInvalid');
+        this.onboardingEmailHintEl.style.display = 'block';
         this.onboardingEmailHintEl.classList.add('is-invalid');
         this.onboardingEmailHintEl.classList.remove('is-valid');
       }
@@ -736,13 +836,14 @@ export class ChatUI {
     this.onboardingCopyCodeBtn = document.createElement('button');
     this.onboardingCopyCodeBtn.type = 'button';
     this.onboardingCopyCodeBtn.className = 'ttm-btn ttm-btn-secondary';
-    this.onboardingCopyCodeBtn.textContent = '[copiar código gerado]';
+    this.onboardingCopyCodeBtn.textContent = t('onboarding.copyCodeBtn');
     this.onboardingCopyCodeBtn.style.display = 'none';
     this.onboardingCopyCodeBtn.addEventListener('click', async () => {
       const code = this.recoveryStepCodeEl.textContent || '';
       if (!code) return;
       await navigator.clipboard?.writeText(code).catch(() => {});
-      this.onboardingSecretHintEl.textContent = 'Código copiado! Guarde num local seguro fora deste aparelho.';
+      this.onboardingSecretHintEl.textContent = t('onboarding.codeCopied');
+      this.onboardingSecretHintEl.style.display = 'block';
       this.onboardingSecretHintEl.classList.add('is-valid');
       this.onboardingSecretHintEl.classList.remove('is-invalid');
     });
@@ -750,18 +851,21 @@ export class ChatUI {
     this.onboardingSecretInput.addEventListener('input', () => {
       const raw = this.onboardingSecretInput.value;
       if (!raw.trim()) {
-        this.onboardingSecretHintEl.textContent =
-          'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
+        this.onboardingSecretHintEl.textContent = '';
+        this.onboardingSecretHintEl.style.display = 'none';
         this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
         return;
       }
       const check = validateRecoverySecret(raw, this.pendingOnboardingDraft?.pin);
+      this.onboardingSecretHintEl.style.display = 'block';
       if (check.valid) {
-        this.onboardingSecretHintEl.textContent = `Chave válida (${check.normalized.length} caracteres). Fácil de replicar de memória.`;
+        this.onboardingSecretHintEl.textContent = t('onboarding.secretValid', {
+          count: check.normalized.length,
+        });
         this.onboardingSecretHintEl.classList.add('is-valid');
         this.onboardingSecretHintEl.classList.remove('is-invalid');
       } else {
-        this.onboardingSecretHintEl.textContent = check.error || 'Chave inválida.';
+        this.onboardingSecretHintEl.textContent = check.error || t('onboarding.secretInvalid');
         this.onboardingSecretHintEl.classList.add('is-invalid');
         this.onboardingSecretHintEl.classList.remove('is-valid');
       }
@@ -774,12 +878,12 @@ export class ChatUI {
     this.onboardingStep2SubmitBtn = document.createElement('button');
     this.onboardingStep2SubmitBtn.type = 'submit';
     this.onboardingStep2SubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.onboardingStep2SubmitBtn.textContent = '[criar conta e entrar]';
+    this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
 
     const genRandomBtn = document.createElement('button');
     genRandomBtn.type = 'button';
-    genRandomBtn.className = 'ttm-btn ttm-btn-secondary';
-    genRandomBtn.textContent = '[ou gerar código automático]';
+    genRandomBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-step2-sub';
+    genRandomBtn.textContent = t('onboarding.genCodeBtn');
     genRandomBtn.addEventListener('click', () => {
       const generated = generateRecoveryCode();
       this.onboardingSecretInput.value = generated;
@@ -787,21 +891,30 @@ export class ChatUI {
       this.recoveryStepCodeEl.textContent = generated;
       this.recoveryStepCodeEl.style.display = 'block';
       this.onboardingCopyCodeBtn.style.display = 'inline-block';
-      this.onboardingSecretHintEl.textContent = 'Código automático preenchido. Copie ou anote se preferir usá-lo.';
+      this.onboardingSecretHintEl.textContent = t('onboarding.genCodeApplied');
+      this.onboardingSecretHintEl.style.display = 'block';
       this.onboardingSecretHintEl.classList.add('is-valid');
       this.onboardingSecretHintEl.classList.remove('is-invalid');
       this.onboardingStep2ErrorEl.textContent = '';
     });
+    this.onboardingGenCodeBtnEl = genRandomBtn;
 
     const backStep1Btn = document.createElement('button');
     backStep1Btn.type = 'button';
-    backStep1Btn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    backStep1Btn.textContent = '[voltar aos dados]';
+    backStep1Btn.className = 'ttm-btn ttm-btn-secondary ttm-btn-step2-sub';
+    backStep1Btn.textContent = t('onboarding.backStep1Btn');
     backStep1Btn.addEventListener('click', () => {
       this.recoveryStepBoxEl.style.display = 'none';
       this.onboardingFormEl.style.display = 'flex';
+      this.onboardingSubtitleEl.style.display = '';
       this.onboardingStep2ErrorEl.textContent = '';
     });
+    this.onboardingBackStep1BtnEl = backStep1Btn;
+
+    const step2ActionsRow = document.createElement('div');
+    step2ActionsRow.className = 'ttm-step2-actions';
+    step2ActionsRow.appendChild(backStep1Btn);
+    step2ActionsRow.appendChild(genRandomBtn);
 
     this.onboardingStep2FormEl.appendChild(this.onboardingPmUsernameInput);
     this.onboardingStep2FormEl.appendChild(sec1.wrapper);
@@ -813,8 +926,7 @@ export class ChatUI {
     this.onboardingStep2FormEl.appendChild(this.onboardingCopyCodeBtn);
     this.onboardingStep2FormEl.appendChild(this.onboardingStep2ErrorEl);
     this.onboardingStep2FormEl.appendChild(this.onboardingStep2SubmitBtn);
-    this.onboardingStep2FormEl.appendChild(genRandomBtn);
-    this.onboardingStep2FormEl.appendChild(backStep1Btn);
+    this.onboardingStep2FormEl.appendChild(step2ActionsRow);
 
     this.recoveryStepBoxEl.appendChild(recTitle);
     this.recoveryStepBoxEl.appendChild(recDesc);
@@ -829,25 +941,25 @@ export class ChatUI {
       const pinConfirm = this.onboardingPinConfirmInput.value.trim();
 
       if (!displayName) {
-        this.onboardingErrorEl.textContent = 'Informe seu nome ou utilizador.';
+        this.onboardingErrorEl.textContent = t('onboarding.errNameRequired');
         return;
       }
       const phoneCheck = this.onboardingPhoneField.validate();
       if (!phoneCheck.valid || !phoneCheck.e164) {
-        this.onboardingErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
+        this.onboardingErrorEl.textContent = phoneCheck.error || t('onboarding.errPhoneInvalid');
         return;
       }
       if (!/^\d{4,8}$/.test(pin)) {
-        this.onboardingErrorEl.textContent = 'O PIN deve ter entre 4 e 8 dígitos numéricos.';
+        this.onboardingErrorEl.textContent = t('onboarding.errPinFormat');
         return;
       }
       if (pin !== pinConfirm) {
-        this.onboardingErrorEl.textContent = 'Os dois PINs não coincidem.';
+        this.onboardingErrorEl.textContent = t('onboarding.errPinMismatch');
         return;
       }
       const pinValid = await validateLocalPin(pin, true);
       if (!pinValid.valid) {
-        this.onboardingErrorEl.textContent = pinValid.error || 'PIN inválido.';
+        this.onboardingErrorEl.textContent = pinValid.error || t('onboarding.errPinInvalid');
         return;
       }
 
@@ -859,6 +971,7 @@ export class ChatUI {
       };
       this.onboardingPmUsernameInput.value = phoneCheck.e164;
       this.onboardingFormEl.style.display = 'none';
+      this.onboardingSubtitleEl.style.display = 'none';
       this.recoveryStepBoxEl.style.display = 'flex';
       this.onboardingStep2ErrorEl.textContent = '';
       setTimeout(() => {
@@ -874,6 +987,7 @@ export class ChatUI {
       if (!draft) {
         this.recoveryStepBoxEl.style.display = 'none';
         this.onboardingFormEl.style.display = 'flex';
+        this.onboardingSubtitleEl.style.display = '';
         return;
       }
 
@@ -883,22 +997,22 @@ export class ChatUI {
 
       const check = validateRecoverySecret(secret, draft.pin);
       if (!check.valid) {
-        this.onboardingStep2ErrorEl.textContent = check.error || 'Chave pessoal inválida.';
+        this.onboardingStep2ErrorEl.textContent = check.error || t('onboarding.errSecretInvalid');
         return;
       }
       if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
-        this.onboardingStep2ErrorEl.textContent = 'As duas chaves pessoais não coincidem.';
+        this.onboardingStep2ErrorEl.textContent = t('onboarding.errSecretMismatch');
         return;
       }
       const emailCheck = validateOptionalRecoveryEmail(recoveryEmailRaw);
       if (!emailCheck.valid) {
-        this.onboardingStep2ErrorEl.textContent = emailCheck.error || 'E-mail de recuperação inválido.';
+        this.onboardingStep2ErrorEl.textContent = emailCheck.error || t('onboarding.errEmailInvalid');
         return;
       }
 
       if (this.events.onCreateIdentity) {
         this.onboardingStep2SubmitBtn.disabled = true;
-        this.onboardingStep2SubmitBtn.textContent = '[criando conta...]';
+        this.onboardingStep2SubmitBtn.textContent = t('onboarding.creatingBtn');
         try {
           await this.events.onCreateIdentity({
             displayName: draft.displayName,
@@ -913,7 +1027,7 @@ export class ChatUI {
           this.onboardingStep2ErrorEl.textContent = this.extractReadableError(err);
         } finally {
           this.onboardingStep2SubmitBtn.disabled = false;
-          this.onboardingStep2SubmitBtn.textContent = '[criar conta e entrar]';
+          this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
         }
       }
     });
@@ -942,12 +1056,13 @@ export class ChatUI {
 
     const titleEl = document.createElement('h1');
     titleEl.className = 'ttm-title';
-    titleEl.textContent = 'Entrar / Recuperar Conta';
+    titleEl.textContent = t('recovery.title');
+    this.recoveryTitleEl = titleEl;
 
     const subtitleEl = document.createElement('p');
     subtitleEl.className = 'ttm-subtitle';
-    subtitleEl.textContent =
-      'Para entrar no modo anónimo ou noutro aparelho, informe seus dados e defina o PIN da calculadora neste aparelho.';
+    subtitleEl.textContent = t('recovery.subtitle');
+    this.recoverySubtitleEl = subtitleEl;
 
     this.recoveryMainFormEl = document.createElement('form');
     this.recoveryMainFormEl.className = 'ttm-form';
@@ -958,7 +1073,7 @@ export class ChatUI {
     this.recoveryPhoneField = createPhoneInputField({
       id: 'ttm-recovery-phone',
       name: 'username',
-      placeholder: '1. Número de telefone',
+      placeholder: t('recovery.phonePlaceholder'),
       autocomplete: 'username',
       onChange: (raw, res, country) => {
         this.updatePhonePreview(raw, res, country, this.recoveryPhonePreviewEl, 'recovery');
@@ -977,44 +1092,49 @@ export class ChatUI {
     this.recoveryEmailInput.id = 'ttm-recovery-email';
     this.recoveryEmailInput.name = 'recovery-email';
     this.recoveryEmailInput.className = 'ttm-input ttm-input-left';
-    this.recoveryEmailInput.placeholder = '2. E-mail de recuperação (só se associou)';
+    this.recoveryEmailInput.placeholder = t('recovery.emailPlaceholder');
     this.recoveryEmailInput.maxLength = 120;
     this.recoveryEmailInput.autocomplete = 'email';
     this.recoveryEmailInput.inputMode = 'email';
 
     const recoveryEmailHint = document.createElement('div');
     recoveryEmailHint.className = 'ttm-field-hint';
-    recoveryEmailHint.textContent = 'Deixe vazio se não associou e-mail na sua conta.';
+    recoveryEmailHint.textContent = t('recovery.emailHint');
+    this.recoveryEmailHintEl = recoveryEmailHint;
 
     const recKeyField = this.createSecretInputWithToggle(
       'ttm-recovery-code',
-      '3. Chave pessoal (mín. 6 caracteres) ou código',
+      t('recovery.keyPlaceholder'),
       40,
       false,
       'current-password',
       'password'
     );
     this.recoveryCodeInput = recKeyField.input;
+    this.recoveryKeyToggleBtnEl = recKeyField.toggleBtn;
 
     const recKeyHintEl = document.createElement('div');
     recKeyHintEl.className = 'ttm-field-hint';
-    recKeyHintEl.textContent = 'A chave pessoal que definiu ao criar a conta (maiúsculas e espaços são ignorados).';
+    recKeyHintEl.textContent = t('recovery.keyHint');
+    this.recoveryKeyHintEl = recKeyHintEl;
 
     const newPin1 = this.createPinInputWithToggle(
       'ttm-recovery-pin',
-      '4. PIN da calculadora neste aparelho (4 a 8 dígitos)',
+      t('recovery.pinPlaceholder'),
       8,
       'off'
     );
     this.recoveryPinInput = newPin1.input;
+    this.recoveryPinToggleBtn1El = newPin1.toggleBtn;
 
     const newPin2 = this.createPinInputWithToggle(
       'ttm-recovery-pin-confirm',
-      '5. Confirmar PIN',
+      t('recovery.pinConfirmPlaceholder'),
       8,
       'off'
     );
     this.recoveryPinConfirmInput = newPin2.input;
+    this.recoveryPinToggleBtn2El = newPin2.toggleBtn;
 
     this.recoveryErrorEl = document.createElement('div');
     this.recoveryErrorEl.className = 'ttm-error';
@@ -1023,12 +1143,12 @@ export class ChatUI {
     this.recoverySubmitBtn = document.createElement('button');
     this.recoverySubmitBtn.type = 'submit';
     this.recoverySubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.recoverySubmitBtn.textContent = '[entrar na conta]';
+    this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
 
     this.recoveryForgotEmailBtn = document.createElement('button');
     this.recoveryForgotEmailBtn.type = 'button';
     this.recoveryForgotEmailBtn.className = 'ttm-btn ttm-btn-secondary';
-    this.recoveryForgotEmailBtn.textContent = '[esqueci a chave — recuperar por e-mail]';
+    this.recoveryForgotEmailBtn.textContent = t('recovery.forgotKeyBtn');
     this.recoveryForgotEmailBtn.addEventListener('click', () => {
       this.recoveryMainFormEl.style.display = 'none';
       this.recoveryOobBoxEl.style.display = 'none';
@@ -1044,10 +1164,11 @@ export class ChatUI {
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
     backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    backBtn.textContent = '[voltar]';
+    backBtn.textContent = t('common.back');
     backBtn.addEventListener('click', () => {
       this.returnToEntryScreen();
     });
+    this.recoveryBackBtnEl = backBtn;
 
     this.recoveryMainFormEl.appendChild(this.recoveryPhoneField.wrapper);
     this.recoveryMainFormEl.appendChild(this.recoveryPhonePreviewEl);
@@ -1073,39 +1194,39 @@ export class ChatUI {
       const confirmPin = this.recoveryPinConfirmInput.value.trim();
 
       if (!rawPhone && !recoveryEmail) {
-        this.recoveryErrorEl.textContent = 'Informe o número de telefone cadastrado (ou o e-mail de recuperação).';
+        this.recoveryErrorEl.textContent = t('recovery.errMissingPhoneOrEmail');
         return;
       }
       let normalizedPhone: string | undefined;
       if (rawPhone) {
         const phoneCheck = this.recoveryPhoneField.validate();
         if (!phoneCheck.valid || !phoneCheck.e164) {
-          this.recoveryErrorEl.textContent = phoneCheck.error || 'Número de telefone inválido.';
+          this.recoveryErrorEl.textContent = phoneCheck.error || t('onboarding.errPhoneInvalid');
           return;
         }
         normalizedPhone = phoneCheck.e164;
       }
       const emailCheck = validateOptionalRecoveryEmail(recoveryEmail);
       if (!emailCheck.valid) {
-        this.recoveryErrorEl.textContent = emailCheck.error || 'E-mail de recuperação inválido.';
+        this.recoveryErrorEl.textContent = emailCheck.error || t('onboarding.errEmailInvalid');
         return;
       }
       if (normalizeRecoveryCode(recoveryCode).length < 6 && recoveryCode.length < 6) {
-        this.recoveryErrorEl.textContent = 'Informe sua chave pessoal (mínimo 6 caracteres) ou senha redefinida.';
+        this.recoveryErrorEl.textContent = t('recovery.errSecretMissing');
         return;
       }
       if (!/^\d{4,8}$/.test(newPin)) {
-        this.recoveryErrorEl.textContent = 'O PIN deve ter entre 4 e 8 dígitos numéricos.';
+        this.recoveryErrorEl.textContent = t('onboarding.errPinFormat');
         return;
       }
       if (newPin !== confirmPin) {
-        this.recoveryErrorEl.textContent = 'Os dois PINs não coincidem.';
+        this.recoveryErrorEl.textContent = t('onboarding.errPinMismatch');
         return;
       }
 
       if (this.events.onRecoverIdentity) {
         this.recoverySubmitBtn.disabled = true;
-        this.recoverySubmitBtn.textContent = '[entrando...]';
+        this.recoverySubmitBtn.textContent = t('recovery.submittingBtn');
         try {
           await this.events.onRecoverIdentity({
             phone: normalizedPhone,
@@ -1117,7 +1238,7 @@ export class ChatUI {
           this.recoveryErrorEl.textContent = this.extractReadableError(err);
         } finally {
           this.recoverySubmitBtn.disabled = false;
-          this.recoverySubmitBtn.textContent = '[entrar na conta]';
+          this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
         }
       }
     });
@@ -1129,12 +1250,13 @@ export class ChatUI {
 
     const resetBoxTitle = document.createElement('div');
     resetBoxTitle.className = 'ttm-recovery-title';
-    resetBoxTitle.textContent = 'Redefinir por E-mail';
+    resetBoxTitle.textContent = t('recovery.resetTitle');
+    this.recoveryResetTitleEl = resetBoxTitle;
 
     const resetBoxDesc = document.createElement('p');
     resetBoxDesc.className = 'ttm-onboarding-tip';
-    resetBoxDesc.textContent =
-      'Informe o e-mail que associou à sua conta para receber o link gratuito do Firebase. Ao abrir o link, digite a sua nova Chave Pessoal (mín. 6 caracteres) e depois volte aqui para entrar.';
+    resetBoxDesc.textContent = t('recovery.resetDesc');
+    this.recoveryResetDescEl = resetBoxDesc;
 
     const resetForm = document.createElement('form');
     resetForm.className = 'ttm-form';
@@ -1142,7 +1264,7 @@ export class ChatUI {
     this.recoveryResetEmailInput = document.createElement('input');
     this.recoveryResetEmailInput.type = 'email';
     this.recoveryResetEmailInput.className = 'ttm-input ttm-input-left';
-    this.recoveryResetEmailInput.placeholder = 'Seu e-mail de recuperação';
+    this.recoveryResetEmailInput.placeholder = t('recovery.resetEmailPlaceholder');
     this.recoveryResetEmailInput.maxLength = 120;
     this.recoveryResetEmailInput.autocomplete = 'email';
     this.recoveryResetEmailInput.inputMode = 'email';
@@ -1154,12 +1276,12 @@ export class ChatUI {
     this.recoveryResetSubmitBtn = document.createElement('button');
     this.recoveryResetSubmitBtn.type = 'submit';
     this.recoveryResetSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.recoveryResetSubmitBtn.textContent = '[enviar link de redefinição]';
+    this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendBtn');
 
     const resetBackBtn = document.createElement('button');
     resetBackBtn.type = 'button';
     resetBackBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    resetBackBtn.textContent = '[já redefini no link — voltar e entrar]';
+    resetBackBtn.textContent = t('recovery.resetDoneBackBtn');
     resetBackBtn.addEventListener('click', () => {
       const typedEmail = this.recoveryResetEmailInput.value.trim();
       if (typedEmail) {
@@ -1168,6 +1290,7 @@ export class ChatUI {
       this.recoveryResetBoxEl.style.display = 'none';
       this.recoveryMainFormEl.style.display = 'flex';
     });
+    this.recoveryResetBackBtnEl = resetBackBtn;
 
     resetForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1177,26 +1300,25 @@ export class ChatUI {
       const rawEmail = this.recoveryResetEmailInput.value.trim();
       const emailCheck = validateOptionalRecoveryEmail(rawEmail);
       if (!emailCheck.valid || !emailCheck.email) {
-        this.recoveryResetFeedbackEl.textContent = emailCheck.error || 'Informe um e-mail válido.';
+        this.recoveryResetFeedbackEl.textContent = emailCheck.error || t('recovery.resetValidEmail');
         this.recoveryResetFeedbackEl.classList.add('is-invalid');
         return;
       }
 
       if (!this.events.onSendPasswordResetEmail) return;
       this.recoveryResetSubmitBtn.disabled = true;
-      this.recoveryResetSubmitBtn.textContent = '[enviando link...]';
+      this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendingBtn');
       try {
         const res = await this.events.onSendPasswordResetEmail(emailCheck.email);
         this.recoveryEmailInput.value = res.email;
-        this.recoveryResetFeedbackEl.textContent =
-          `Se ${res.email} estiver associado a uma conta, enviámos o link de redefinição (confira a caixa de entrada e Spam). No link, defina sua nova Chave Pessoal e volte aqui para entrar.`;
+        this.recoveryResetFeedbackEl.textContent = t('recovery.resetSent', { email: res.email });
         this.recoveryResetFeedbackEl.classList.add('is-valid');
       } catch (err: any) {
         this.recoveryResetFeedbackEl.textContent = this.extractReadableError(err);
         this.recoveryResetFeedbackEl.classList.add('is-invalid');
       } finally {
         this.recoveryResetSubmitBtn.disabled = false;
-        this.recoveryResetSubmitBtn.textContent = '[enviar link de redefinição]';
+        this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendBtn');
       }
     });
 
@@ -1215,49 +1337,54 @@ export class ChatUI {
 
     const oobTitle = document.createElement('div');
     oobTitle.className = 'ttm-recovery-title';
-    oobTitle.textContent = 'Definir Nova Chave Pessoal';
+    oobTitle.textContent = t('recovery.oobTitle');
+    this.recoveryOobTitleEl = oobTitle;
 
     this.recoveryOobEmailLabelEl = document.createElement('p');
     this.recoveryOobEmailLabelEl.className = 'ttm-onboarding-tip';
-    this.recoveryOobEmailLabelEl.textContent = 'Defina a nova Chave Pessoal e o PIN da calculadora para este aparelho.';
+    this.recoveryOobEmailLabelEl.textContent = t('recovery.oobDefaultDesc');
 
     const oobForm = document.createElement('form');
     oobForm.className = 'ttm-form';
 
     const oobSec1 = this.createSecretInputWithToggle(
       'ttm-oob-secret',
-      'Nova chave pessoal (mín. 6 caracteres)',
+      t('recovery.oobSecretPlaceholder'),
       40,
       false,
       'new-password',
       'password'
     );
     this.recoveryOobSecretInput = oobSec1.input;
+    this.recoveryOobSecretToggleBtn1El = oobSec1.toggleBtn;
 
     const oobSec2 = this.createSecretInputWithToggle(
       'ttm-oob-secret-confirm',
-      'Confirmar nova chave pessoal',
+      t('recovery.oobSecretConfirmPlaceholder'),
       40,
       false,
       'new-password'
     );
     this.recoveryOobSecretConfirmInput = oobSec2.input;
+    this.recoveryOobSecretToggleBtn2El = oobSec2.toggleBtn;
 
     const oobPin1 = this.createPinInputWithToggle(
       'ttm-oob-pin',
-      'PIN da calculadora neste aparelho (4 a 8 dígitos)',
+      t('recovery.pinPlaceholder'),
       8,
       'off'
     );
     this.recoveryOobPinInput = oobPin1.input;
+    this.recoveryOobPinToggleBtn1El = oobPin1.toggleBtn;
 
     const oobPin2 = this.createPinInputWithToggle(
       'ttm-oob-pin-confirm',
-      'Confirmar PIN',
+      t('recovery.pinConfirmPlaceholder'),
       8,
       'off'
     );
     this.recoveryOobPinConfirmInput = oobPin2.input;
+    this.recoveryOobPinToggleBtn2El = oobPin2.toggleBtn;
 
     this.recoveryOobErrorEl = document.createElement('div');
     this.recoveryOobErrorEl.className = 'ttm-error';
@@ -1266,16 +1393,18 @@ export class ChatUI {
     this.recoveryOobSubmitBtn = document.createElement('button');
     this.recoveryOobSubmitBtn.type = 'submit';
     this.recoveryOobSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.recoveryOobSubmitBtn.textContent = '[salvar nova chave e entrar]';
+    this.recoveryOobSubmitBtn.textContent = t('recovery.oobSaveBtn');
 
     const oobCancelBtn = document.createElement('button');
     oobCancelBtn.type = 'button';
     oobCancelBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    oobCancelBtn.textContent = '[cancelar]';
+    oobCancelBtn.textContent = t('common.cancel');
     oobCancelBtn.addEventListener('click', () => {
       this.activeOobCode = null;
+      this.activeOobEmail = null;
       this.returnToEntryScreen();
     });
+    this.recoveryOobCancelBtnEl = oobCancelBtn;
 
     oobForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1288,26 +1417,26 @@ export class ChatUI {
       const confirmPin = this.recoveryOobPinConfirmInput.value.trim();
 
       if (!/^\d{4,8}$/.test(newPin)) {
-        this.recoveryOobErrorEl.textContent = 'O PIN deve ter entre 4 e 8 dígitos numéricos.';
+        this.recoveryOobErrorEl.textContent = t('onboarding.errPinFormat');
         return;
       }
       if (newPin !== confirmPin) {
-        this.recoveryOobErrorEl.textContent = 'Os dois PINs não coincidem.';
+        this.recoveryOobErrorEl.textContent = t('onboarding.errPinMismatch');
         return;
       }
       const secCheck = validateRecoverySecret(secret, newPin);
       if (!secCheck.valid) {
-        this.recoveryOobErrorEl.textContent = secCheck.error || 'Nova chave pessoal inválida.';
+        this.recoveryOobErrorEl.textContent = secCheck.error || t('onboarding.errSecretInvalid');
         return;
       }
       if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
-        this.recoveryOobErrorEl.textContent = 'As duas chaves pessoais não coincidem.';
+        this.recoveryOobErrorEl.textContent = t('onboarding.errSecretMismatch');
         return;
       }
 
       if (!this.events.onCompleteInAppPasswordReset) return;
       this.recoveryOobSubmitBtn.disabled = true;
-      this.recoveryOobSubmitBtn.textContent = '[salvando...]';
+      this.recoveryOobSubmitBtn.textContent = t('recovery.oobSavingBtn');
       try {
         await this.events.onCompleteInAppPasswordReset({
           oobCode: this.activeOobCode,
@@ -1315,11 +1444,12 @@ export class ChatUI {
           newPin,
         });
         this.activeOobCode = null;
+        this.activeOobEmail = null;
       } catch (err: any) {
         this.recoveryOobErrorEl.textContent = this.extractReadableError(err);
       } finally {
         this.recoveryOobSubmitBtn.disabled = false;
-        this.recoveryOobSubmitBtn.textContent = '[salvar nova chave e entrar]';
+        this.recoveryOobSubmitBtn.textContent = t('recovery.oobSaveBtn');
       }
     });
 
@@ -1358,7 +1488,8 @@ export class ChatUI {
 
     const selfTitle = document.createElement('div');
     selfTitle.className = 'ttm-connect-section-title';
-    selfTitle.textContent = 'Minha conta';
+    selfTitle.textContent = t('connect.myAccount');
+    this.connectSelfTitleEl = selfTitle;
 
     const selfRow = document.createElement('div');
     selfRow.className = 'ttm-connect-self-row';
@@ -1383,19 +1514,22 @@ export class ChatUI {
     const rotateCodeBtn = document.createElement('button');
     rotateCodeBtn.type = 'button';
     rotateCodeBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    rotateCodeBtn.textContent = '[chave de recuperação]';
-    rotateCodeBtn.title = 'Definir chave pessoal fácil ou gerar novo código';
+    rotateCodeBtn.textContent = t('connect.recoveryKeyBtn');
+    rotateCodeBtn.title = t('connect.recoveryKeyTitle');
+    this.connectRotateCodeBtnEl = rotateCodeBtn;
 
     const recoveryEmailBtn = document.createElement('button');
     recoveryEmailBtn.type = 'button';
     recoveryEmailBtn.className = 'ttm-btn-mini';
-    recoveryEmailBtn.textContent = '[e-mail recuperação]';
-    recoveryEmailBtn.title = 'Opcional: associar e-mail para recuperação gratuita';
+    recoveryEmailBtn.textContent = t('connect.recoveryEmailBtn');
+    recoveryEmailBtn.title = t('connect.recoveryEmailTitle');
+    this.connectRecoveryEmailBtnEl = recoveryEmailBtn;
 
     const changePinBtn = document.createElement('button');
     changePinBtn.type = 'button';
     changePinBtn.className = 'ttm-btn-mini';
-    changePinBtn.textContent = '[alterar PIN]';
+    changePinBtn.textContent = t('connect.changePinBtn');
+    this.connectChangePinBtnEl = changePinBtn;
 
     selfActions.appendChild(rotateCodeBtn);
     selfActions.appendChild(recoveryEmailBtn);
@@ -1413,25 +1547,33 @@ export class ChatUI {
     const rotCustomInput = document.createElement('input');
     rotCustomInput.type = 'text';
     rotCustomInput.maxLength = 40;
-    rotCustomInput.placeholder = 'Chave pessoal (mín. 6 caracteres, opcional p/ gerar)';
+    rotCustomInput.placeholder = t('connect.rotPlaceholder');
     rotCustomInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectRotCustomInput = rotCustomInput;
+
     const rotPinInput = document.createElement('input');
     rotPinInput.type = 'password';
     rotPinInput.inputMode = 'numeric';
     rotPinInput.maxLength = 8;
     rotPinInput.autocomplete = 'off';
-    rotPinInput.placeholder = 'Confirme seu PIN atual';
+    rotPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
     rotPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectRotPinInput = rotPinInput;
+
     const rotBtnRow = document.createElement('div');
     rotBtnRow.className = 'ttm-inline-form';
     const rotSubmitBtn = document.createElement('button');
     rotSubmitBtn.type = 'submit';
     rotSubmitBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    rotSubmitBtn.textContent = '[salvar chave]';
+    rotSubmitBtn.textContent = t('connect.saveKeyBtn');
+    this.connectRotSubmitBtnEl = rotSubmitBtn;
+
     const rotGenBtn = document.createElement('button');
     rotGenBtn.type = 'button';
     rotGenBtn.className = 'ttm-btn-mini';
-    rotGenBtn.textContent = '[gerar automático]';
+    rotGenBtn.textContent = t('connect.genAutoBtn');
+    this.connectRotGenBtnEl = rotGenBtn;
+
     rotBtnRow.appendChild(rotSubmitBtn);
     rotBtnRow.appendChild(rotGenBtn);
 
@@ -1440,20 +1582,22 @@ export class ChatUI {
     rotResultEl.style.display = 'none';
     const rotHintEl = document.createElement('div');
     rotHintEl.className = 'ttm-field-hint';
-    rotHintEl.textContent =
-      'Defina uma chave pessoal fácil (mín. 6 caracteres, diferente do PIN) para entrar noutro aparelho.';
+    rotHintEl.textContent = t('connect.rotHint');
+    this.connectRotHintEl = rotHintEl;
+
     const rotCopyBtn = document.createElement('button');
     rotCopyBtn.type = 'button';
     rotCopyBtn.className = 'ttm-btn-mini';
-    rotCopyBtn.textContent = '[copiar chave]';
+    rotCopyBtn.textContent = t('connect.copyKeyBtn');
     rotCopyBtn.style.display = 'none';
     rotCopyBtn.addEventListener('click', async () => {
       const code = rotResultEl.textContent || '';
       if (code) {
         await navigator.clipboard?.writeText(code).catch(() => {});
-        this.showConnectFeedback('Chave de recuperação copiada.');
+        this.showConnectFeedback(t('connect.keyCopied'));
       }
     });
+    this.connectRotCopyBtnEl = rotCopyBtn;
 
     rotGenBtn.addEventListener('click', () => {
       rotCustomInput.value = generateRecoveryCode();
@@ -1464,13 +1608,13 @@ export class ChatUI {
       const pin = rotPinInput.value.trim();
       const customKey = rotCustomInput.value.trim();
       if (!/^\d{4,8}$/.test(pin)) {
-        this.showConnectFeedback('Digite seu PIN atual (4 a 8 dígitos).', true);
+        this.showConnectFeedback(t('connect.enterCurrentPin'), true);
         return;
       }
       if (customKey) {
         const keyCheck = validateRecoverySecret(customKey, pin);
         if (!keyCheck.valid) {
-          this.showConnectFeedback(keyCheck.error || 'Chave pessoal inválida.', true);
+          this.showConnectFeedback(keyCheck.error || t('onboarding.errSecretInvalid'), true);
           return;
         }
       }
@@ -1483,8 +1627,8 @@ export class ChatUI {
         rotResultEl.textContent = savedCode;
         rotResultEl.style.display = 'block';
         rotCopyBtn.style.display = 'inline-block';
-        rotHintEl.textContent = 'Chave de recuperação atualizada! Já pode usá-la no modo anónimo ou noutro aparelho.';
-        this.showConnectFeedback('Chave de recuperação atualizada.');
+        rotHintEl.textContent = t('connect.keyUpdatedHint');
+        this.showConnectFeedback(t('connect.keyUpdated'));
       } catch (err) {
         this.showConnectFeedback(this.extractReadableError(err), true);
       } finally {
@@ -1507,8 +1651,7 @@ export class ChatUI {
 
     this.connectEmailStatusEl = document.createElement('div');
     this.connectEmailStatusEl.className = 'ttm-field-hint';
-    this.connectEmailStatusEl.textContent =
-      'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+    this.connectEmailStatusEl.textContent = t('onboarding.emailHint');
 
     const emailForm = document.createElement('form');
     emailForm.className = 'ttm-form';
@@ -1518,7 +1661,7 @@ export class ChatUI {
     this.connectEmailInput.maxLength = 120;
     this.connectEmailInput.autocomplete = 'email';
     this.connectEmailInput.inputMode = 'email';
-    this.connectEmailInput.placeholder = 'E-mail de recuperação (opcional)';
+    this.connectEmailInput.placeholder = t('onboarding.emailPlaceholder');
     this.connectEmailInput.className = 'ttm-connect-input ttm-connect-input-phone';
 
     const emailPinInput = document.createElement('input');
@@ -1526,13 +1669,15 @@ export class ChatUI {
     emailPinInput.inputMode = 'numeric';
     emailPinInput.maxLength = 8;
     emailPinInput.autocomplete = 'off';
-    emailPinInput.placeholder = 'Confirme seu PIN atual';
+    emailPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
     emailPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectEmailPinInput = emailPinInput;
 
     const saveEmailBtn = document.createElement('button');
     saveEmailBtn.type = 'submit';
     saveEmailBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    saveEmailBtn.textContent = '[associar e-mail]';
+    saveEmailBtn.textContent = t('connect.emailSaveBtn');
+    this.connectSaveEmailBtnEl = saveEmailBtn;
 
     emailForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1540,11 +1685,11 @@ export class ChatUI {
       const pin = emailPinInput.value.trim();
       const check = validateOptionalRecoveryEmail(rawEmail);
       if (!check.valid || !check.email) {
-        this.showConnectFeedback(check.error || 'Informe um endereço de e-mail válido.', true);
+        this.showConnectFeedback(check.error || t('connect.emailValidRequired'), true);
         return;
       }
       if (!/^\d{4,8}$/.test(pin)) {
-        this.showConnectFeedback('Digite seu PIN atual (4 a 8 dígitos).', true);
+        this.showConnectFeedback(t('connect.enterCurrentPin'), true);
         return;
       }
       if (!this.events.onAssociateRecoveryEmail) return;
@@ -1553,12 +1698,11 @@ export class ChatUI {
         const res = await this.events.onAssociateRecoveryEmail(pin, check.email);
         emailPinInput.value = '';
         if (res.status === 'already_active') {
-          this.connectEmailStatusEl.textContent = `E-mail ativo: ${res.email}`;
-          this.showConnectFeedback('Este e-mail já está ativo para recuperação.');
+          this.connectEmailStatusEl.textContent = t('connect.emailActive', { email: res.email });
+          this.showConnectFeedback(t('connect.emailAlreadyActive'));
         } else {
-          this.connectEmailStatusEl.textContent =
-            `Confirmação enviada para ${res.email}. Abra o link no seu e-mail para ativar.`;
-          this.showConnectFeedback(`Link de confirmação enviado para ${res.email}.`);
+          this.connectEmailStatusEl.textContent = t('connect.emailConfirmSentHint', { email: res.email });
+          this.showConnectFeedback(t('connect.emailConfirmSentNotice', { email: res.email }));
         }
       } catch (err) {
         this.showConnectFeedback(this.extractReadableError(err), true);
@@ -1585,26 +1729,33 @@ export class ChatUI {
     curPinInp.inputMode = 'numeric';
     curPinInp.maxLength = 8;
     curPinInp.autocomplete = 'off';
-    curPinInp.placeholder = 'PIN atual';
+    curPinInp.placeholder = t('connect.currentPinPlaceholder');
     curPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectCurPinInput = curPinInp;
+
     const nextPinInp = document.createElement('input');
     nextPinInp.type = 'password';
     nextPinInp.inputMode = 'numeric';
     nextPinInp.maxLength = 8;
     nextPinInp.autocomplete = 'off';
-    nextPinInp.placeholder = 'Novo PIN (4 a 8 dígitos)';
+    nextPinInp.placeholder = t('connect.newPinPlaceholder');
     nextPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectNextPinInput = nextPinInp;
+
     const nextPinConfInp = document.createElement('input');
     nextPinConfInp.type = 'password';
     nextPinConfInp.inputMode = 'numeric';
     nextPinConfInp.maxLength = 8;
     nextPinConfInp.autocomplete = 'off';
-    nextPinConfInp.placeholder = 'Confirmar novo PIN';
+    nextPinConfInp.placeholder = t('connect.confirmNewPinPlaceholder');
     nextPinConfInp.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectNextPinConfInput = nextPinConfInp;
+
     const savePinBtn = document.createElement('button');
     savePinBtn.type = 'submit';
     savePinBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    savePinBtn.textContent = '[salvar novo PIN]';
+    savePinBtn.textContent = t('connect.savePinBtn');
+    this.connectSavePinBtnEl = savePinBtn;
 
     pinForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1612,11 +1763,11 @@ export class ChatUI {
       const next = nextPinInp.value.trim();
       const conf = nextPinConfInp.value.trim();
       if (!/^\d{4,8}$/.test(cur) || !/^\d{4,8}$/.test(next)) {
-        this.showConnectFeedback('Os PINs devem ter entre 4 e 8 dígitos numéricos.', true);
+        this.showConnectFeedback(t('onboarding.errPinFormat'), true);
         return;
       }
       if (next !== conf) {
-        this.showConnectFeedback('O novo PIN e a confirmação não coincidem.', true);
+        this.showConnectFeedback(t('connect.errPinMismatch'), true);
         return;
       }
       if (!this.events.onChangeLocalPin) return;
@@ -1627,7 +1778,7 @@ export class ChatUI {
         nextPinInp.value = '';
         nextPinConfInp.value = '';
         this.connectPinPanelEl.style.display = 'none';
-        this.showConnectFeedback('PIN da calculadora alterado com sucesso neste aparelho.');
+        this.showConnectFeedback(t('connect.pinChanged'));
       } catch (err) {
         this.showConnectFeedback(this.extractReadableError(err), true);
       } finally {
@@ -1676,7 +1827,8 @@ export class ChatUI {
 
     const inviteTitle = document.createElement('div');
     inviteTitle.className = 'ttm-connect-section-title';
-    inviteTitle.textContent = 'Convidar por número de telefone';
+    inviteTitle.textContent = t('connect.inviteTitle');
+    this.connectInviteTitleEl = inviteTitle;
 
     const inviteForm = document.createElement('form');
     inviteForm.className = 'ttm-connect-form';
@@ -1686,7 +1838,7 @@ export class ChatUI {
 
     this.connectTargetField = createPhoneInputField({
       variant: 'compact',
-      placeholder: 'Número do contacto',
+      placeholder: t('connect.inviteTargetPlaceholder'),
       autocomplete: 'tel',
       onChange: (raw, res, country) => {
         this.updatePhonePreview(raw, res, country, this.connectTargetPreviewEl, 'connect');
@@ -1703,7 +1855,7 @@ export class ChatUI {
     this.connectInviteBtn = document.createElement('button');
     this.connectInviteBtn.type = 'submit';
     this.connectInviteBtn.className = 'ttm-btn ttm-btn-primary';
-    this.connectInviteBtn.textContent = '[convidar]';
+    this.connectInviteBtn.textContent = t('connect.inviteBtn');
 
     this.connectFeedbackEl = document.createElement('div');
     this.connectFeedbackEl.className = 'ttm-connect-feedback';
@@ -1712,17 +1864,17 @@ export class ChatUI {
       e.preventDefault();
       const rawPhone = this.connectTargetField.getValue();
       if (!rawPhone) {
-        this.showConnectFeedback('Informe o número de telefone do contacto.', true);
+        this.showConnectFeedback(t('connect.inviteEnterPhone'), true);
         return;
       }
       const phoneCheck = this.connectTargetField.validate();
       if (!phoneCheck.valid || !phoneCheck.e164) {
-        this.showConnectFeedback(phoneCheck.error || 'Número de telefone inválido.', true);
+        this.showConnectFeedback(phoneCheck.error || t('onboarding.errPhoneInvalid'), true);
         return;
       }
       if (!this.events.onSendInvite) return;
       this.connectInviteBtn.disabled = true;
-      this.connectInviteBtn.textContent = '[enviando...]';
+      this.connectInviteBtn.textContent = t('connect.invitingBtn');
       this.showConnectFeedback('');
       try {
         await this.events.onSendInvite(phoneCheck.e164);
@@ -1731,7 +1883,7 @@ export class ChatUI {
         this.showConnectFeedback(this.extractReadableError(err), true);
       } finally {
         this.connectInviteBtn.disabled = false;
-        this.connectInviteBtn.textContent = '[convidar]';
+        this.connectInviteBtn.textContent = t('connect.inviteBtn');
       }
     });
 
@@ -1747,7 +1899,8 @@ export class ChatUI {
     incomingCard.className = 'ttm-connect-card';
     const incomingTitle = document.createElement('div');
     incomingTitle.className = 'ttm-connect-section-title';
-    incomingTitle.textContent = 'Convites recebidos';
+    incomingTitle.textContent = t('connect.incomingTitle');
+    this.connectIncomingTitleEl = incomingTitle;
     this.incomingInvitesListEl = document.createElement('div');
     this.incomingInvitesListEl.className = 'ttm-connect-list';
     incomingCard.appendChild(incomingTitle);
@@ -1758,7 +1911,8 @@ export class ChatUI {
     outgoingCard.className = 'ttm-connect-card';
     const outgoingTitle = document.createElement('div');
     outgoingTitle.className = 'ttm-connect-section-title';
-    outgoingTitle.textContent = 'Convites enviados';
+    outgoingTitle.textContent = t('connect.outgoingTitle');
+    this.connectOutgoingTitleEl = outgoingTitle;
     this.outgoingInvitesListEl = document.createElement('div');
     this.outgoingInvitesListEl.className = 'ttm-connect-list';
     outgoingCard.appendChild(outgoingTitle);
@@ -1769,7 +1923,8 @@ export class ChatUI {
     convCard.className = 'ttm-connect-card';
     const convTitle = document.createElement('div');
     convTitle.className = 'ttm-connect-section-title';
-    convTitle.textContent = 'Conversas';
+    convTitle.textContent = t('connect.conversationsTitle');
+    this.connectConvTitleEl = convTitle;
     this.conversationsListEl = document.createElement('div');
     this.conversationsListEl.className = 'ttm-connect-list';
     convCard.appendChild(convTitle);
@@ -1783,7 +1938,7 @@ export class ChatUI {
   }
 
   private extractReadableError(err: unknown): string {
-    let msg = err instanceof Error ? err.message : String(err || 'Erro inesperado.');
+    let msg = err instanceof Error ? err.message : String(err || t('app.unexpectedError'));
     try {
       const parsed = JSON.parse(msg);
       if (parsed && typeof parsed.error === 'string') {
@@ -1793,7 +1948,7 @@ export class ChatUI {
       // mantém texto original
     }
     if (msg.includes('Missing or insufficient permissions')) {
-      return 'Permissão negada ao processar operação no Firestore.';
+      return t('app.permissionDenied');
     }
     return msg;
   }
@@ -1807,25 +1962,30 @@ export class ChatUI {
     this.chatViewEl.className = 'ttm-chat-box';
     this.chatViewEl.style.display = 'none';
 
-    // Topbar interna do chat
+    // Faixa utilitária compacta do chat
     const topBar = document.createElement('div');
     topBar.className = 'ttm-topbar';
 
+    const topBarActions = document.createElement('div');
+    topBarActions.className = 'ttm-topbar-actions';
+
     this.loadOlderBtn = document.createElement('button');
-    this.loadOlderBtn.className = 'ttm-btn ttm-btn-secondary';
-    this.loadOlderBtn.textContent = '[anteriores]';
+    this.loadOlderBtn.type = 'button';
+    this.loadOlderBtn.className = 'ttm-topbar-link';
+    this.loadOlderBtn.textContent = t('chat.loadOlder');
     this.loadOlderBtn.style.display = 'none';
     this.loadOlderBtn.addEventListener('click', () => {
       this.events.onLoadOlder();
     });
 
     this.selectModeBtn = document.createElement('button');
-    this.selectModeBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-sel-top';
-    this.selectModeBtn.textContent = '[selecionar tudo]';
-    this.selectModeBtn.title = 'Selecionar todas as mensagens da conversa';
+    this.selectModeBtn.type = 'button';
+    this.selectModeBtn.className = 'ttm-topbar-link ttm-btn-sel-top';
+    this.selectModeBtn.textContent = t('chat.selectAll');
+    this.selectModeBtn.title = t('chat.selectAllTitle');
     this.selectModeBtn.addEventListener('click', () => {
       if (this.renderedMessageIds.size === 0) {
-        this.showTemporaryNotice('Nenhuma mensagem na conversa.');
+        this.showTemporaryNotice(t('chat.noMessages'));
         return;
       }
       if (this.isSelectionMode) {
@@ -1835,12 +1995,14 @@ export class ChatUI {
       }
     });
 
+    topBarActions.appendChild(this.loadOlderBtn);
+    topBarActions.appendChild(this.selectModeBtn);
+
     this.inactivityNoticeEl = document.createElement('span');
     this.inactivityNoticeEl.className = 'ttm-lock-badge';
     this.updateInactivityBadge();
 
-    topBar.appendChild(this.loadOlderBtn);
-    topBar.appendChild(this.selectModeBtn);
+    topBar.appendChild(topBarActions);
     topBar.appendChild(this.inactivityNoticeEl);
     this.chatViewEl.appendChild(topBar);
 
@@ -1876,7 +2038,7 @@ export class ChatUI {
     this.msgInputEl.id = 'ttm-input-msg';
     this.msgInputEl.className = 'ttm-input ttm-input-msg';
     this.msgInputEl.maxLength = 2000;
-    this.msgInputEl.placeholder = 'Mensagem de texto puro...';
+    this.msgInputEl.placeholder = t('chat.msgPlaceholder');
     this.msgInputEl.autocomplete = 'off';
     this.msgInputEl.autocapitalize = 'sentences';
 
@@ -1891,7 +2053,8 @@ export class ChatUI {
     const sendBtn = document.createElement('button');
     sendBtn.type = 'submit';
     sendBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-send';
-    sendBtn.textContent = '[enviar]';
+    sendBtn.textContent = t('chat.sendBtn');
+    this.sendBtnEl = sendBtn;
 
     const inputRow = document.createElement('div');
     inputRow.className = 'ttm-input-row';
@@ -1922,8 +2085,8 @@ export class ChatUI {
     this.selectAllBtnEl = document.createElement('button');
     this.selectAllBtnEl.type = 'button';
     this.selectAllBtnEl.className = 'ttm-btn ttm-btn-sel-all';
-    this.selectAllBtnEl.textContent = '[selecionar tudo]';
-    this.selectAllBtnEl.title = 'Alternar seleção de todas as mensagens';
+    this.selectAllBtnEl.textContent = t('chat.selectAll');
+    this.selectAllBtnEl.title = t('chat.toggleSelectAllTitle');
     this.selectAllBtnEl.addEventListener('click', (e) => {
       e.stopPropagation();
       this.toggleSelectAll();
@@ -1932,8 +2095,8 @@ export class ChatUI {
     this.cancelSelectionBtnEl = document.createElement('button');
     this.cancelSelectionBtnEl.type = 'button';
     this.cancelSelectionBtnEl.className = 'ttm-btn ttm-btn-sel-cancel';
-    this.cancelSelectionBtnEl.textContent = '[cancelar]';
-    this.cancelSelectionBtnEl.title = 'Cancelar modo de seleção';
+    this.cancelSelectionBtnEl.textContent = t('common.cancel');
+    this.cancelSelectionBtnEl.title = t('chat.cancelSelectionTitle');
     this.cancelSelectionBtnEl.addEventListener('click', (e) => {
       e.stopPropagation();
       this.exitSelectionMode();
@@ -1945,8 +2108,8 @@ export class ChatUI {
     this.deleteBtnEl = document.createElement('button');
     this.deleteBtnEl.type = 'button';
     this.deleteBtnEl.className = 'ttm-btn ttm-btn-compact-del';
-    this.deleteBtnEl.textContent = 'Apagar';
-    this.deleteBtnEl.title = 'Toque para confirmar a exclusão deste dispositivo';
+    this.deleteBtnEl.textContent = t('chat.delete');
+    this.deleteBtnEl.title = t('chat.deleteTitle');
     this.deleteBtnEl.addEventListener('click', (e) => {
       e.stopPropagation();
       this.handleDeleteBtnClick();
@@ -1976,7 +2139,8 @@ export class ChatUI {
 
     const modalTitle = document.createElement('h2');
     modalTitle.className = 'ttm-modal-title';
-    modalTitle.textContent = 'Definições Mínimas';
+    modalTitle.textContent = t('settings.title');
+    this.settingsModalTitleEl = modalTitle;
 
     // Configuração 1: Tempo de Sessão
     const sessionGroup = document.createElement('div');
@@ -1984,29 +2148,11 @@ export class ChatUI {
 
     const sessionLabel = document.createElement('label');
     sessionLabel.className = 'ttm-setting-label';
-    sessionLabel.textContent = 'Tempo de Sessão (desconecta ao expirar):';
+    sessionLabel.textContent = t('settings.sessionLabel');
+    this.settingsSessionLabelEl = sessionLabel;
 
     this.sessionSelectEl = document.createElement('select');
     this.sessionSelectEl.className = 'ttm-select';
-
-    const sessionOptions = [
-      { val: 1, label: '1 minuto' },
-      { val: 5, label: '5 minutos (padrão)' },
-      { val: 15, label: '15 minutos' },
-      { val: 30, label: '30 minutos' },
-      { val: 60, label: '60 minutos' },
-      { val: 0, label: 'Desativado' },
-    ];
-
-    sessionOptions.forEach((opt) => {
-      const option = document.createElement('option');
-      option.value = String(opt.val);
-      option.textContent = opt.label;
-      if (opt.val === this.settings.sessionTimeoutMinutes) {
-        option.selected = true;
-      }
-      this.sessionSelectEl.appendChild(option);
-    });
 
     sessionGroup.appendChild(sessionLabel);
     sessionGroup.appendChild(this.sessionSelectEl);
@@ -2017,33 +2163,11 @@ export class ChatUI {
 
     const inactivityLabel = document.createElement('label');
     inactivityLabel.className = 'ttm-setting-label';
-    inactivityLabel.textContent = 'Sem teclar (bloqueio automático):';
+    inactivityLabel.textContent = t('settings.inactivityLabel');
+    this.settingsInactivityLabelEl = inactivityLabel;
 
     this.inactivitySelectEl = document.createElement('select');
     this.inactivitySelectEl.className = 'ttm-select';
-
-    const inactivityOptions = [
-      { val: 5, label: '5 segundos' },
-      { val: 10, label: '10 segundos' },
-      { val: 15, label: '15 segundos' },
-      { val: 30, label: '30 segundos' },
-      { val: 60, label: '1 minuto' },
-      { val: 120, label: '2 minutos' },
-      { val: 300, label: '5 minutos (padrão)' },
-      { val: 600, label: '10 minutos' },
-      { val: 900, label: '15 minutos' },
-      { val: 0, label: 'Desativado' },
-    ];
-
-    inactivityOptions.forEach((opt) => {
-      const option = document.createElement('option');
-      option.value = String(opt.val);
-      option.textContent = opt.label;
-      if (opt.val === this.settings.inactivityLockSeconds) {
-        option.selected = true;
-      }
-      this.inactivitySelectEl.appendChild(option);
-    });
 
     inactivityGroup.appendChild(inactivityLabel);
     inactivityGroup.appendChild(this.inactivitySelectEl);
@@ -2054,17 +2178,125 @@ export class ChatUI {
 
     const appearanceLabel = document.createElement('label');
     appearanceLabel.className = 'ttm-setting-label';
-    appearanceLabel.textContent = 'Aparência no dispositivo (ecrã de entrada e bloqueio):';
+    appearanceLabel.textContent = t('settings.appearanceLabel');
+    this.settingsAppearanceLabelEl = appearanceLabel;
 
     this.appearanceSelectEl = document.createElement('select');
     this.appearanceSelectEl.className = 'ttm-select';
 
-    const appearanceOptions: Array<{ val: 'talk2tm' | 'calculator'; label: string }> = [
-      { val: 'talk2tm', label: 'Talk2TM (Padrão)' },
-      { val: 'calculator', label: 'Calculadora (Modo discreto)' },
-    ];
+    appearanceGroup.appendChild(appearanceLabel);
+    appearanceGroup.appendChild(this.appearanceSelectEl);
 
+    // Configuração 4: Idioma local neste dispositivo (Automático / pt / en / fr / es)
+    const languageGroup = document.createElement('div');
+    languageGroup.className = 'ttm-setting-group';
+
+    const languageLabel = document.createElement('label');
+    languageLabel.className = 'ttm-setting-label';
+    languageLabel.textContent = t('settings.languageLabel');
+    this.settingsLanguageLabelEl = languageLabel;
+
+    this.languageSelectEl = document.createElement('select');
+    this.languageSelectEl.className = 'ttm-select';
+
+    languageGroup.appendChild(languageLabel);
+    languageGroup.appendChild(this.languageSelectEl);
+
+    this.populateSettingsSelects();
+
+    // Botões de Ação do Modal
+    const modalActions = document.createElement('div');
+    modalActions.className = 'ttm-modal-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'ttm-btn ttm-btn-primary';
+    saveBtn.textContent = t('settings.saveBtn');
+    saveBtn.addEventListener('click', () => {
+      this.settings = {
+        sessionTimeoutMinutes: Number(this.sessionSelectEl.value),
+        inactivityLockSeconds: Number(this.inactivitySelectEl.value),
+        appearance: normalizeAppearanceMode(this.appearanceSelectEl.value),
+        language: normalizeSettingsLanguage(this.languageSelectEl.value),
+        version: 2,
+      };
+      this.events.onUpdateSettings(this.settings);
+      this.syncLockButtonLabel();
+      this.updateInactivityBadge();
+      this.closeSettingsModal();
+    });
+    this.settingsSaveBtnEl = saveBtn;
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ttm-btn ttm-btn-secondary';
+    cancelBtn.textContent = t('common.close');
+    cancelBtn.addEventListener('click', () => {
+      this.closeSettingsModal();
+    });
+    this.settingsCancelBtnEl = cancelBtn;
+
+    modalActions.appendChild(saveBtn);
+    modalActions.appendChild(cancelBtn);
+
+    modalBox.appendChild(modalTitle);
+    modalBox.appendChild(sessionGroup);
+    modalBox.appendChild(inactivityGroup);
+    modalBox.appendChild(appearanceGroup);
+    modalBox.appendChild(languageGroup);
+    modalBox.appendChild(modalActions);
+    this.settingsModalEl.appendChild(modalBox);
+  }
+
+  private populateSettingsSelects(): void {
+    const sessionOptions = [
+      { val: 1, label: t('settings.opt.min1') },
+      { val: 5, label: t('settings.opt.min5Default') },
+      { val: 15, label: t('settings.opt.min15') },
+      { val: 30, label: t('settings.opt.min30') },
+      { val: 60, label: t('settings.opt.min60') },
+      { val: 0, label: t('settings.opt.disabled') },
+    ];
+    this.sessionSelectEl.innerHTML = '';
+    sessionOptions.forEach((opt) => {
+      const option = document.createElement('option');
+      option.value = String(opt.val);
+      option.textContent = opt.label;
+      if (opt.val === this.settings.sessionTimeoutMinutes) {
+        option.selected = true;
+      }
+      this.sessionSelectEl.appendChild(option);
+    });
+
+    const inactivityOptions = [
+      { val: 5, label: t('settings.opt.sec5') },
+      { val: 10, label: t('settings.opt.sec10') },
+      { val: 15, label: t('settings.opt.sec15') },
+      { val: 30, label: t('settings.opt.sec30') },
+      { val: 60, label: t('settings.opt.min1') },
+      { val: 120, label: t('settings.opt.min2') },
+      { val: 300, label: t('settings.opt.min5Default') },
+      { val: 600, label: t('settings.opt.min10') },
+      { val: 900, label: t('settings.opt.min15') },
+      { val: 0, label: t('settings.opt.disabled') },
+    ];
+    this.inactivitySelectEl.innerHTML = '';
+    inactivityOptions.forEach((opt) => {
+      const option = document.createElement('option');
+      option.value = String(opt.val);
+      option.textContent = opt.label;
+      if (opt.val === this.settings.inactivityLockSeconds) {
+        option.selected = true;
+      }
+      this.inactivitySelectEl.appendChild(option);
+    });
+
+    const appearanceOptions: Array<{ val: 'talk2tm' | 'calculator'; label: string }> = [
+      { val: 'talk2tm', label: t('settings.appearanceTalk2tm') },
+      { val: 'calculator', label: t('settings.appearanceCalc') },
+    ];
     const currentAppearance = normalizeAppearanceMode(this.settings.appearance);
+    this.appearanceSelectEl.innerHTML = '';
     appearanceOptions.forEach((opt) => {
       const option = document.createElement('option');
       option.value = opt.val;
@@ -2075,54 +2307,31 @@ export class ChatUI {
       this.appearanceSelectEl.appendChild(option);
     });
 
-    appearanceGroup.appendChild(appearanceLabel);
-    appearanceGroup.appendChild(this.appearanceSelectEl);
-
-    // Botões de Ação do Modal
-    const modalActions = document.createElement('div');
-    modalActions.className = 'ttm-modal-actions';
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.className = 'ttm-btn ttm-btn-primary';
-    saveBtn.textContent = '[salvar definições]';
-    saveBtn.addEventListener('click', () => {
-      this.settings = {
-        sessionTimeoutMinutes: Number(this.sessionSelectEl.value),
-        inactivityLockSeconds: Number(this.inactivitySelectEl.value),
-        appearance: normalizeAppearanceMode(this.appearanceSelectEl.value),
-        version: 2,
-      };
-      this.events.onUpdateSettings(this.settings);
-      this.syncLockButtonLabel();
-      this.updateInactivityBadge();
-      this.closeSettingsModal();
-      this.showTemporaryNotice('Definições atualizadas.');
+    const currentLang = normalizeSettingsLanguage(this.settings.language);
+    const languageOptions: Array<{ val: string; label: string }> = [
+      { val: 'auto', label: t('settings.languageAuto') },
+      ...SUPPORTED_LOCALES.map((code) => ({
+        val: code,
+        label: LOCALE_REGISTRY[code].nativeLabel,
+      })),
+    ];
+    this.languageSelectEl.innerHTML = '';
+    languageOptions.forEach((opt) => {
+      const option = document.createElement('option');
+      option.value = opt.val;
+      option.textContent = opt.label;
+      if (opt.val === currentLang) {
+        option.selected = true;
+      }
+      this.languageSelectEl.appendChild(option);
     });
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.className = 'ttm-btn ttm-btn-secondary';
-    cancelBtn.textContent = '[fechar]';
-    cancelBtn.addEventListener('click', () => {
-      this.closeSettingsModal();
-    });
-
-    modalActions.appendChild(saveBtn);
-    modalActions.appendChild(cancelBtn);
-
-    modalBox.appendChild(modalTitle);
-    modalBox.appendChild(sessionGroup);
-    modalBox.appendChild(inactivityGroup);
-    modalBox.appendChild(appearanceGroup);
-    modalBox.appendChild(modalActions);
-    this.settingsModalEl.appendChild(modalBox);
   }
 
   public openSettingsModal(): void {
     this.sessionSelectEl.value = String(this.settings.sessionTimeoutMinutes);
     this.inactivitySelectEl.value = String(this.settings.inactivityLockSeconds);
     this.appearanceSelectEl.value = normalizeAppearanceMode(this.settings.appearance);
+    this.languageSelectEl.value = normalizeSettingsLanguage(this.settings.language);
     this.settingsModalEl.style.display = 'flex';
   }
 
@@ -2135,10 +2344,12 @@ export class ChatUI {
       const label = this.settings.inactivityLockSeconds >= 60
         ? `${Math.round(this.settings.inactivityLockSeconds / 60)}m`
         : `${this.settings.inactivityLockSeconds}s`;
-      this.inactivityNoticeEl.textContent = `[auto-lock: ${label}]`;
-      this.inactivityNoticeEl.style.display = 'inline-block';
+      this.inactivityNoticeEl.textContent = t('chat.autoLockBadge', { label });
+      this.inactivityNoticeEl.title = t('chat.autoLockTitle', { label });
+      this.inactivityNoticeEl.style.display = 'inline-flex';
     } else {
       this.inactivityNoticeEl.textContent = '';
+      this.inactivityNoticeEl.removeAttribute('title');
       this.inactivityNoticeEl.style.display = 'none';
     }
   }
@@ -2147,7 +2358,7 @@ export class ChatUI {
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => {
       e.preventDefault();
-      this.showTemporaryNotice('Talk2TM aceita apenas texto puro. Arquivos rejeitados.');
+      this.showTemporaryNotice(t('chat.antiMediaDrop'));
     });
 
     window.addEventListener('paste', (e) => {
@@ -2156,7 +2367,7 @@ export class ChatUI {
       for (let i = 0; i < items.length; i++) {
         if (items[i].kind === 'file' || items[i].type.startsWith('image/')) {
           e.preventDefault();
-          this.showTemporaryNotice('Imagens rejeitadas. Apenas texto puro.');
+          this.showTemporaryNotice(t('chat.antiMediaPaste'));
           return;
         }
       }
@@ -2176,11 +2387,11 @@ export class ChatUI {
   private syncLockButtonLabel(): void {
     if (!this.lockBtnEl) return;
     if (normalizeAppearanceMode(this.settings.appearance) === 'calculator') {
-      this.lockBtnEl.textContent = '[⚑ calc]';
-      this.lockBtnEl.title = 'Bloquear imediatamente e camuflar na calculadora';
+      this.lockBtnEl.textContent = t('chat.lockCalcBtn');
+      this.lockBtnEl.title = t('chat.lockCalcTitle');
     } else {
-      this.lockBtnEl.textContent = '[⚑ bloquear]';
-      this.lockBtnEl.title = 'Bloquear tela imediatamente';
+      this.lockBtnEl.textContent = t('chat.lockDefaultBtn');
+      this.lockBtnEl.title = t('chat.lockDefaultTitle');
     }
   }
 
@@ -2231,15 +2442,16 @@ export class ChatUI {
     if (this.backToLockBtnEl) {
       this.backToLockBtnEl.textContent =
         normalizeAppearanceMode(this.settings.appearance) === 'calculator'
-          ? '[voltar para calculadora]'
-          : '[voltar ao bloqueio]';
+          ? t('pass.backToCalc')
+          : t('pass.backToLock');
     }
     const hasSavedVault = getAllLocalIdentities().length > 0;
     this.passSubtitleEl.textContent = hasSavedVault
-      ? 'Digite seu PIN numérico (4 a 8 dígitos) na calculadora ou abaixo:'
-      : 'Modo anónimo ou aparelho novo? Para entrar numa conta já criada, toque em [entrar noutro aparelho / recuperar].';
+      ? t('pass.subtitleWithVault')
+      : t('pass.subtitleNoVault');
     this.singlePassInput.value = '';
     this.singlePassInput.type = 'password';
+    this.passPinToggleBtnEl.textContent = t('common.show');
     this.passErrorEl.textContent = '';
     setTimeout(() => {
       this.singlePassInput.focus();
@@ -2257,6 +2469,7 @@ export class ChatUI {
     this.chatViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'flex';
     this.onboardingFormEl.style.display = 'flex';
+    this.onboardingSubtitleEl.style.display = '';
     this.recoveryStepBoxEl.style.display = 'none';
     this.pendingOnboardingDraft = null;
     this.onboardingNameInput.value = '';
@@ -2265,27 +2478,31 @@ export class ChatUI {
     this.onboardingPinConfirmInput.value = '';
     this.onboardingPinInput.type = 'password';
     this.onboardingPinConfirmInput.type = 'password';
+    this.onboardingPinToggleBtn1El.textContent = t('common.show');
+    this.onboardingPinToggleBtn2El.textContent = t('common.show');
     this.onboardingErrorEl.textContent = '';
     this.onboardingSecretInput.value = '';
     this.onboardingSecretInput.type = 'password';
     this.onboardingSecretConfirmInput.value = '';
     this.onboardingSecretConfirmInput.type = 'password';
+    this.onboardingSecretToggleBtn1El.textContent = t('common.show');
+    this.onboardingSecretToggleBtn2El.textContent = t('common.show');
     this.onboardingPmUsernameInput.value = '';
     this.onboardingEmailInput.value = '';
-    this.onboardingEmailHintEl.textContent =
-      'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
+    this.onboardingEmailHintEl.textContent = '';
+    this.onboardingEmailHintEl.style.display = 'none';
     this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
-    this.onboardingSecretHintEl.textContent =
-      'Regras: mínimo 6 caracteres, diferente do PIN da calculadora (maiúsculas e espaços são ignorados).';
+    this.onboardingSecretHintEl.textContent = '';
+    this.onboardingSecretHintEl.style.display = 'none';
     this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
     this.onboardingStep2ErrorEl.textContent = '';
     this.recoveryStepCodeEl.textContent = '';
     this.recoveryStepCodeEl.style.display = 'none';
     this.onboardingCopyCodeBtn.style.display = 'none';
     this.onboardingSubmitBtn.disabled = false;
-    this.onboardingSubmitBtn.textContent = '[continuar]';
+    this.onboardingSubmitBtn.textContent = t('onboarding.continueBtn');
     this.onboardingStep2SubmitBtn.disabled = false;
-    this.onboardingStep2SubmitBtn.textContent = '[criar conta e entrar]';
+    this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
     setTimeout(() => {
       this.onboardingNameInput.focus();
     }, 100);
@@ -2305,17 +2522,21 @@ export class ChatUI {
     this.recoveryResetBoxEl.style.display = 'none';
     this.recoveryOobBoxEl.style.display = 'none';
     this.activeOobCode = null;
+    this.activeOobEmail = null;
     this.recoveryPhoneField.reset();
     this.recoveryEmailInput.value = '';
     this.recoveryCodeInput.value = '';
     this.recoveryCodeInput.type = 'password';
+    this.recoveryKeyToggleBtnEl.textContent = t('common.show');
     this.recoveryPinInput.value = '';
     this.recoveryPinConfirmInput.value = '';
     this.recoveryPinInput.type = 'password';
     this.recoveryPinConfirmInput.type = 'password';
+    this.recoveryPinToggleBtn1El.textContent = t('common.show');
+    this.recoveryPinToggleBtn2El.textContent = t('common.show');
     this.recoveryErrorEl.textContent = '';
     this.recoverySubmitBtn.disabled = false;
-    this.recoverySubmitBtn.textContent = '[entrar na conta]';
+    this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
     setTimeout(() => {
       this.recoveryPhoneField.input.focus();
     }, 100);
@@ -2324,21 +2545,48 @@ export class ChatUI {
   public showInAppPasswordResetView(oobCode: string, email: string): void {
     this.showRecoveryView();
     this.activeOobCode = oobCode;
+    this.activeOobEmail = email;
     this.recoveryMainFormEl.style.display = 'none';
     this.recoveryResetBoxEl.style.display = 'none';
     this.recoveryOobBoxEl.style.display = 'flex';
-    this.recoveryOobEmailLabelEl.textContent =
-      `Conta: ${email}. Defina a sua nova Chave Pessoal e o PIN da calculadora neste aparelho.`;
+    this.recoveryOobEmailLabelEl.textContent = t('recovery.oobAccountDesc', { email });
     this.recoveryOobSecretInput.value = '';
     this.recoveryOobSecretInput.type = 'password';
+    this.recoveryOobSecretToggleBtn1El.textContent = t('common.show');
     this.recoveryOobSecretConfirmInput.value = '';
     this.recoveryOobSecretConfirmInput.type = 'password';
+    this.recoveryOobSecretToggleBtn2El.textContent = t('common.show');
     this.recoveryOobPinInput.value = '';
     this.recoveryOobPinConfirmInput.value = '';
+    this.recoveryOobPinInput.type = 'password';
+    this.recoveryOobPinConfirmInput.type = 'password';
+    this.recoveryOobPinToggleBtn1El.textContent = t('common.show');
+    this.recoveryOobPinToggleBtn2El.textContent = t('common.show');
     this.recoveryOobErrorEl.textContent = '';
     setTimeout(() => {
       this.recoveryOobSecretInput.focus();
     }, 100);
+  }
+
+  private applyConnectSessionMeta(session: UserSession): void {
+    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-flex' : 'none';
+    this.connectSelfNameEl.textContent = session.displayName || t('connect.defaultName');
+    this.connectSelfPhoneEl.textContent = session.phoneMasked
+      ? t('connect.discoveryMasked', { phoneMasked: session.phoneMasked })
+      : t('connect.discoveryActive');
+    if (session.pendingRecoveryEmail) {
+      this.connectEmailStatusEl.textContent = t('connect.emailPending', {
+        email: session.pendingRecoveryEmail,
+      });
+    } else if (session.recoveryEmail) {
+      this.connectEmailStatusEl.textContent = t('connect.emailLinkedStatus', {
+        email: session.recoveryEmail,
+      });
+    } else {
+      this.connectEmailStatusEl.textContent = t('onboarding.emailHint');
+    }
+    // No Hub de Conexões o cartão próprio já exibe o nome; evita duplicar no cabeçalho
+    this.roomInfoEl.innerHTML = '';
   }
 
   public showConnectView(session: UserSession): void {
@@ -2356,25 +2604,10 @@ export class ChatUI {
     this.connectRecoveryPanelEl.style.display = 'none';
     this.connectEmailPanelEl.style.display = 'none';
     this.connectPinPanelEl.style.display = 'none';
-    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
-    this.connectSelfNameEl.textContent = session.displayName || 'Minha conta';
-    this.connectSelfPhoneEl.textContent = session.phoneMasked
-      ? `${session.phoneMasked} · descoberta ativa`
-      : 'Descoberta ativa pelo número declarado';
     this.connectEmailInput.value = session.recoveryEmail || session.pendingRecoveryEmail || '';
-    if (session.pendingRecoveryEmail) {
-      this.connectEmailStatusEl.textContent =
-        `Confirmação pendente para ${session.pendingRecoveryEmail}. Abra o link enviado ao seu e-mail para ativar.`;
-    } else if (session.recoveryEmail) {
-      this.connectEmailStatusEl.textContent =
-        `E-mail de recuperação ativo: ${session.recoveryEmail}. Opcional — apenas para efeitos de recuperação de conta.`;
-    } else {
-      this.connectEmailStatusEl.textContent =
-        'Opcional — apenas para efeitos de recuperação de conta (guarde este e-mail).';
-    }
     this.connectFeedbackEl.textContent = '';
     this.connectFeedbackEl.classList.remove('is-error');
-    this.roomInfoEl.textContent = `você: ${session.displayName} | convide por telefone ou aceite um convite`;
+    this.applyConnectSessionMeta(session);
   }
 
   public isConnectViewActive(): boolean {
@@ -2396,6 +2629,7 @@ export class ChatUI {
     outgoing: ConversationInvite[];
     conversations: Conversation[];
   }): void {
+    this.lastHubData = data;
     if (!this.incomingInvitesListEl || !this.outgoingInvitesListEl || !this.conversationsListEl) return;
 
     // 1. Convites recebidos — formato minimalista obrigatório: «[Nome] quer conversar contigo»
@@ -2403,7 +2637,7 @@ export class ChatUI {
     if (data.incoming.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'ttm-connect-empty';
-      empty.textContent = 'Nenhum convite pendente.';
+      empty.textContent = t('connect.incomingEmpty');
       this.incomingInvitesListEl.appendChild(empty);
     } else {
       data.incoming.forEach((inv) => {
@@ -2414,8 +2648,8 @@ export class ChatUI {
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        const senderName = inv.fromDisplayName || 'Contacto';
-        nameEl.textContent = `${senderName} quer conversar contigo`;
+        const senderName = inv.fromDisplayName || t('connect.defaultContact');
+        nameEl.textContent = t('connect.wantsToChat', { name: senderName });
         meta.appendChild(nameEl);
 
         const actions = document.createElement('div');
@@ -2424,7 +2658,7 @@ export class ChatUI {
         const acceptBtn = document.createElement('button');
         acceptBtn.type = 'button';
         acceptBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-        acceptBtn.textContent = '[aceitar]';
+        acceptBtn.textContent = t('connect.acceptBtn');
         acceptBtn.addEventListener('click', async () => {
           acceptBtn.disabled = true;
           try {
@@ -2438,7 +2672,7 @@ export class ChatUI {
         const declineBtn = document.createElement('button');
         declineBtn.type = 'button';
         declineBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
-        declineBtn.textContent = '[recusar]';
+        declineBtn.textContent = t('connect.declineBtn');
         declineBtn.addEventListener('click', async () => {
           declineBtn.disabled = true;
           try {
@@ -2463,7 +2697,7 @@ export class ChatUI {
     if (pendingOutgoing.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'ttm-connect-empty';
-      empty.textContent = 'Nenhum convite aguardando resposta.';
+      empty.textContent = t('connect.outgoingEmpty');
       this.outgoingInvitesListEl.appendChild(empty);
     } else {
       pendingOutgoing.forEach((inv) => {
@@ -2474,10 +2708,10 @@ export class ChatUI {
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = this.outgoingTargetNameCache.get(inv.inviteId) || 'Convite enviado';
+        nameEl.textContent = this.outgoingTargetNameCache.get(inv.inviteId) || t('connect.outgoingFallback');
         const subEl = document.createElement('div');
         subEl.className = 'ttm-connect-item-sub';
-        subEl.textContent = 'Aguardando aceitação...';
+        subEl.textContent = t('connect.awaitingAcceptance');
         meta.appendChild(nameEl);
         meta.appendChild(subEl);
 
@@ -2487,7 +2721,7 @@ export class ChatUI {
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
-        cancelBtn.textContent = '[cancelar]';
+        cancelBtn.textContent = t('common.cancel');
         cancelBtn.addEventListener('click', async () => {
           cancelBtn.disabled = true;
           try {
@@ -2510,7 +2744,7 @@ export class ChatUI {
     if (data.conversations.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'ttm-connect-empty';
-      empty.textContent = 'Nenhuma conversa ativa ainda.';
+      empty.textContent = t('connect.conversationsEmpty');
       this.conversationsListEl.appendChild(empty);
     } else {
       const myUid = this.currentSession?.userId;
@@ -2525,10 +2759,10 @@ export class ChatUI {
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = partnerName || 'Contacto';
+        nameEl.textContent = partnerName || t('connect.defaultContact');
         const subEl = document.createElement('div');
         subEl.className = 'ttm-connect-item-sub';
-        subEl.textContent = 'Conversa privada 1:1';
+        subEl.textContent = t('connect.privateChatSub');
         meta.appendChild(nameEl);
         meta.appendChild(subEl);
 
@@ -2538,7 +2772,7 @@ export class ChatUI {
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
         openBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-        openBtn.textContent = '[abrir]';
+        openBtn.textContent = t('connect.openBtn');
         openBtn.addEventListener('click', async () => {
           openBtn.disabled = true;
           try {
@@ -2589,7 +2823,7 @@ export class ChatUI {
     this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
-    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
+    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-flex' : 'none';
     this.chatViewEl.style.display = 'flex';
     this.clearMessages();
     if (room) {
@@ -2597,7 +2831,11 @@ export class ChatUI {
       this.updateRoomInfo(room, session);
       this.updateReadReceipts(room, session);
     } else if (session.talk2tmId) {
-      this.roomInfoEl.textContent = `você: ${session.displayName} | conversa bilateral`;
+      this.renderRoomInfoStrip(
+        t('chat.bilateralLabel'),
+        t('chat.selfTag', { name: session.displayName }),
+        'waiting'
+      );
     }
     setTimeout(() => {
       this.msgInputEl.focus();
@@ -2605,9 +2843,19 @@ export class ChatUI {
   }
 
   public updateConnectionState(state: ConnectionState): void {
+    this.lastConnectionState = state;
+    const stateKey =
+      state === 'online'
+        ? 'chat.netState.online'
+        : state === 'offline'
+          ? 'chat.netState.offline'
+          : state === 'sincronizando'
+            ? 'chat.netState.syncing'
+            : 'chat.netState.connecting';
+    const netLabel = t('chat.networkTitle', { state: t(stateKey) });
     this.statusEl.setAttribute('data-state', state);
-    this.statusEl.setAttribute('title', `Rede: ${state}`);
-    this.statusEl.setAttribute('aria-label', `Rede: ${state}`);
+    this.statusEl.setAttribute('title', netLabel);
+    this.statusEl.setAttribute('aria-label', netLabel);
     if (state === 'online') {
       this.statusEl.classList.add('is-online');
       this.statusEl.classList.remove('is-offline');
@@ -2623,10 +2871,44 @@ export class ChatUI {
     return `<svg class="ttm-net-icon" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><rect x="2" y="16" width="3.5" height="5" rx="0.8"/><rect x="7.5" y="12" width="3.5" height="9" rx="0.8"/><rect x="13" y="7" width="3.5" height="14" rx="0.8"/><rect x="18.5" y="2" width="3.5" height="19" rx="0.8"/></svg>`;
   }
 
+  private getSettingsIconSvg(): string {
+    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+  }
+
+  private renderRoomInfoStrip(
+    primaryText: string,
+    secondaryText?: string,
+    presenceState: 'connected' | 'waiting' | 'selection' | null = null
+  ): void {
+    this.roomInfoEl.innerHTML = '';
+    if (!primaryText && !secondaryText) return;
+
+    const primaryWrap = document.createElement('span');
+    primaryWrap.className = 'ttm-room-primary';
+    if (presenceState === 'connected' || presenceState === 'waiting') {
+      const dot = document.createElement('span');
+      dot.className = `ttm-room-dot ${presenceState === 'connected' ? 'is-connected' : 'is-waiting'}`;
+      dot.setAttribute('aria-hidden', 'true');
+      primaryWrap.appendChild(dot);
+    }
+    const primaryLabel = document.createElement('span');
+    primaryLabel.className = presenceState === 'selection' ? 'ttm-room-selection-label' : 'ttm-room-partner';
+    primaryLabel.textContent = primaryText;
+    primaryWrap.appendChild(primaryLabel);
+    this.roomInfoEl.appendChild(primaryWrap);
+
+    if (secondaryText) {
+      const secondaryEl = document.createElement('span');
+      secondaryEl.className = 'ttm-room-self';
+      secondaryEl.textContent = secondaryText;
+      this.roomInfoEl.appendChild(secondaryEl);
+    }
+  }
+
   public updateRoomInfo(room: Room, session: UserSession): void {
     this.currentRoom = room;
     this.currentSession = session;
-    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-block' : 'none';
+    this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-flex' : 'none';
 
     let partnerName = '';
     if (session.conversationId) {
@@ -2644,12 +2926,15 @@ export class ChatUI {
       partnerName = isTruman ? 'Mãezinha' : 'Truman';
     }
 
-    let partnerStatus = 'aguardando parceiro...';
-    if (room.participantB && room.participantB !== '') {
-      partnerStatus = `conectado com: ${partnerName || 'parceiro'}`;
-    }
+    const isConnected = Boolean(room.participantB && room.participantB !== '');
+    const primaryText = isConnected
+      ? (partnerName || t('chat.roomDefaultPartner'))
+      : t('chat.roomWaiting');
+    const secondaryText = t('chat.selfTag', { name: session.displayName });
 
-    this.roomInfoEl.textContent = `você: ${session.displayName} | ${partnerStatus}`;
+    if (!this.isSelectionMode) {
+      this.renderRoomInfoStrip(primaryText, secondaryText, isConnected ? 'connected' : 'waiting');
+    }
   }
 
   public setHasOlderMessages(hasOlder: boolean): void {
@@ -2666,15 +2951,15 @@ export class ChatUI {
       return { text: '', dataStatus: 'incoming', title: '' };
     }
     if (msg.status === 'pending') {
-      return { text: '·', dataStatus: 'pending', title: 'Pendente de envio' };
+      return { text: '·', dataStatus: 'pending', title: t('chat.msgStatusPending') };
     }
 
     const partnerReadTime = this.getPartnerLastReadTime();
     if (msg.status === 'read' || (partnerReadTime && partnerReadTime >= msg.createdAt)) {
-      return { text: '✓✓', dataStatus: 'read', title: 'Lida pelo parceiro' };
+      return { text: '✓✓', dataStatus: 'read', title: t('chat.msgStatusRead') };
     }
 
-    return { text: '✓', dataStatus: 'synced', title: 'Enviada' };
+    return { text: '✓', dataStatus: 'synced', title: t('chat.msgStatusSent') };
   }
 
   public updateReadReceipts(room: Room, session: UserSession): void {
@@ -2710,7 +2995,7 @@ export class ChatUI {
             }
             statusSpan.textContent = '✓✓';
             statusSpan.setAttribute('data-status', 'read');
-            statusSpan.setAttribute('title', 'Lida pelo parceiro');
+            statusSpan.setAttribute('title', t('chat.msgStatusRead'));
           }
         }
       }
@@ -2792,8 +3077,8 @@ export class ChatUI {
     deleteBtn.type = 'button';
     deleteBtn.className = 'ttm-msg-del';
     deleteBtn.textContent = '×';
-    deleteBtn.title = 'Apagar mensagem localmente';
-    deleteBtn.setAttribute('aria-label', 'Apagar mensagem');
+    deleteBtn.title = t('chat.deleteSingleTitle');
+    deleteBtn.setAttribute('aria-label', t('chat.deleteSingleAria'));
     deleteBtn.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
       e.preventDefault();
@@ -2897,8 +3182,8 @@ export class ChatUI {
       deleteBtn.type = 'button';
       deleteBtn.className = 'ttm-msg-del';
       deleteBtn.textContent = '×';
-      deleteBtn.title = 'Apagar mensagem localmente';
-      deleteBtn.setAttribute('aria-label', 'Apagar mensagem');
+      deleteBtn.title = t('chat.deleteSingleTitle');
+      deleteBtn.setAttribute('aria-label', t('chat.deleteSingleAria'));
       deleteBtn.addEventListener('click', (e: MouseEvent) => {
         e.stopPropagation();
         e.preventDefault();
@@ -3129,11 +3414,6 @@ export class ChatUI {
       row.classList.add('ttm-msg-selected');
     }
 
-    // Salva texto atual da sala no cabeçalho
-    if (!this.roomInfoEl.hasAttribute('data-original-info')) {
-      this.roomInfoEl.setAttribute('data-original-info', this.roomInfoEl.textContent || '');
-    }
-
     this.sendFormEl.style.display = 'none';
     this.selectionBarEl.style.display = 'flex';
     this.resetDeleteButtonState();
@@ -3159,10 +3439,6 @@ export class ChatUI {
         row.classList.add('ttm-msg-selected');
       }
     });
-
-    if (!this.roomInfoEl.hasAttribute('data-original-info')) {
-      this.roomInfoEl.setAttribute('data-original-info', this.roomInfoEl.textContent || '');
-    }
 
     this.sendFormEl.style.display = 'none';
     this.selectionBarEl.style.display = 'flex';
@@ -3213,19 +3489,30 @@ export class ChatUI {
     const count = this.selectedMessageIds.size;
     const total = this.renderedMessageIds.size;
     const isAll = total > 0 && count === total;
-    const text = isAll ? `Todas selecionadas (${count})` : (count === 1 ? '1 selecionada' : `${count} selecionadas`);
-    this.roomInfoEl.textContent = text;
+    const text = isAll
+      ? t('chat.allSelected', { count })
+      : count === 1
+        ? t('chat.oneSelected')
+        : t('chat.manySelected', { count });
+    this.renderRoomInfoStrip(
+      text,
+      this.currentSession ? t('chat.selfTag', { name: this.currentSession.displayName }) : undefined,
+      'selection'
+    );
 
     if (this.selectAllBtnEl) {
-      this.selectAllBtnEl.textContent = isAll ? '[desmarcar tudo]' : '[selecionar tudo]';
+      this.selectAllBtnEl.textContent = isAll ? t('chat.deselectAll') : t('chat.selectAll');
     }
 
     if (this.selectModeBtn) {
-      this.selectModeBtn.textContent = this.isSelectionMode ? '[sair seleção]' : '[selecionar tudo]';
+      this.selectModeBtn.textContent = this.isSelectionMode
+        ? t('chat.exitSelection')
+        : t('chat.selectAll');
     }
 
     if (!this.isConfirmPending) {
-      this.deleteBtnEl.textContent = count > 1 ? `Apagar (${count})` : 'Apagar';
+      this.deleteBtnEl.textContent =
+        count > 1 ? t('chat.deleteCount', { count }) : t('chat.delete');
     }
   }
 
@@ -3237,7 +3524,8 @@ export class ChatUI {
     this.isConfirmPending = false;
     this.deleteBtnEl.classList.remove('ttm-btn-confirm-state');
     const count = this.selectedMessageIds.size;
-    this.deleteBtnEl.textContent = count > 1 ? `Apagar (${count})` : 'Apagar';
+    this.deleteBtnEl.textContent =
+      count > 1 ? t('chat.deleteCount', { count }) : t('chat.delete');
   }
 
   private handleDeleteBtnClick(): void {
@@ -3251,7 +3539,8 @@ export class ChatUI {
       // Primeiro clique: solicita confirmação discreta sem modal nem botões extras
       this.isConfirmPending = true;
       this.deleteBtnEl.classList.add('ttm-btn-confirm-state');
-      this.deleteBtnEl.textContent = count > 1 ? `Confirmar (${count})?` : 'Confirmar?';
+      this.deleteBtnEl.textContent =
+        count > 1 ? t('chat.confirmCount', { count }) : t('chat.confirm');
 
       // Auto-reverte para 'Apagar' após 3.5 segundos de inatividade
       if (this.confirmTimerId) clearTimeout(this.confirmTimerId);
@@ -3274,7 +3563,9 @@ export class ChatUI {
       }
       this.removeMessages(ids);
       const count = ids.length;
-      this.showTemporaryNotice(count > 1 ? `${count} mensagens apagadas deste dispositivo.` : 'Mensagem apagada deste dispositivo.');
+      this.showTemporaryNotice(
+        count > 1 ? t('chat.deletedMany', { count }) : t('chat.deletedOne')
+      );
     }
     this.exitSelectionMode();
   }
@@ -3294,14 +3585,244 @@ export class ChatUI {
     this.sendFormEl.style.display = 'block';
 
     if (this.selectModeBtn) {
-      this.selectModeBtn.textContent = '[selecionar tudo]';
+      this.selectModeBtn.textContent = t('chat.selectAll');
     }
 
-    const originalText = this.roomInfoEl.getAttribute('data-original-info');
-    if (originalText !== null) {
-      this.roomInfoEl.textContent = originalText;
-      this.roomInfoEl.removeAttribute('data-original-info');
+    if (this.currentSession) {
+      if (this.isConnectViewActive()) {
+        this.roomInfoEl.innerHTML = '';
+      } else if (this.currentRoom) {
+        this.updateRoomInfo(this.currentRoom, this.currentSession);
+      } else if (this.currentSession.talk2tmId) {
+        this.renderRoomInfoStrip(
+          t('chat.bilateralLabel'),
+          t('chat.selfTag', { name: this.currentSession.displayName }),
+          'waiting'
+        );
+      }
     }
+  }
+
+  /**
+   * Atualiza toda a interface visível após alteração de idioma no dispositivo
+   * sem descartar sessão, mensagens renderizadas ou entradas em curso.
+   */
+  public refreshLocale(): void {
+    this.pwaPromptBar?.refreshLocale();
+    this.lockScreen?.refreshLocale();
+    this.calculator?.refreshLocale();
+
+    // Cabeçalho
+    this.connectionsBtnEl.textContent = t('chat.connectionsBtn');
+    this.connectionsBtnEl.title = t('chat.connectionsTitle');
+    this.settingsBtnEl.title = t('chat.settingsTitle');
+    this.settingsBtnEl.setAttribute('aria-label', t('chat.settingsBtn'));
+    this.syncLockButtonLabel();
+    this.updateConnectionState(this.lastConnectionState);
+
+    // Tela manual de PIN
+    const hasSavedVault = getAllLocalIdentities().length > 0;
+    this.passSubtitleEl.textContent = hasSavedVault
+      ? t('pass.subtitleWithVault')
+      : t('pass.subtitleNoVault');
+    this.singlePassInput.placeholder = t('pass.pinPlaceholder');
+    this.passPinToggleBtnEl.textContent =
+      this.singlePassInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.passPinToggleBtnEl.setAttribute('aria-label', t('pass.pinVisToggleAria'));
+    this.passEnterBtnEl.textContent = t('pass.signInBtn');
+    this.passCreateBtnEl.textContent = t('pass.createBtn');
+    this.passRecoverBtnEl.textContent = t('pass.recoverBtn');
+    this.backToLockBtnEl.textContent =
+      normalizeAppearanceMode(this.settings.appearance) === 'calculator'
+        ? t('pass.backToCalc')
+        : t('pass.backToLock');
+
+    // Cadastro
+    this.onboardingTitleEl.textContent = t('onboarding.title');
+    this.onboardingSubtitleEl.textContent = t('onboarding.subtitle');
+    this.onboardingNameInput.placeholder = t('onboarding.namePlaceholder');
+    this.onboardingPhoneField.input.placeholder = t('onboarding.phonePlaceholder');
+    this.onboardingPhoneField.refreshLocale();
+    this.onboardingPinInput.placeholder = t('onboarding.pinPlaceholder');
+    this.onboardingPinConfirmInput.placeholder = t('onboarding.pinConfirmPlaceholder');
+    this.onboardingPinToggleBtn1El.textContent =
+      this.onboardingPinInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.onboardingPinToggleBtn2El.textContent =
+      this.onboardingPinConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.onboardingPinToggleBtn1El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
+    this.onboardingPinToggleBtn2El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
+    this.onboardingSubmitBtn.textContent = t('onboarding.continueBtn');
+    this.onboardingBackBtnEl.textContent = t('common.back');
+    this.onboardingStep2TitleEl.textContent = t('onboarding.step2Title');
+    this.onboardingStep2DescEl.textContent = t('onboarding.step2Desc');
+    this.onboardingPmUsernameInput.setAttribute('aria-label', t('onboarding.pmPhoneAria'));
+    this.onboardingSecretInput.placeholder = t('onboarding.secretPlaceholder');
+    this.onboardingSecretConfirmInput.placeholder = t('onboarding.secretConfirmPlaceholder');
+    this.onboardingSecretToggleBtn1El.textContent =
+      this.onboardingSecretInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.onboardingSecretToggleBtn2El.textContent =
+      this.onboardingSecretConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.onboardingSecretToggleBtn1El.setAttribute('aria-label', t('pass.secretVisToggleAria'));
+    this.onboardingSecretToggleBtn2El.setAttribute('aria-label', t('pass.secretVisToggleAria'));
+    if (!this.onboardingSecretInput.value.trim()) {
+      this.onboardingSecretHintEl.textContent = '';
+      this.onboardingSecretHintEl.style.display = 'none';
+    }
+    this.onboardingEmailInput.placeholder = t('onboarding.emailPlaceholder');
+    if (!this.onboardingEmailInput.value.trim()) {
+      this.onboardingEmailHintEl.textContent = '';
+      this.onboardingEmailHintEl.style.display = 'none';
+    }
+    this.onboardingCopyCodeBtn.textContent = t('onboarding.copyCodeBtn');
+    this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
+    this.onboardingGenCodeBtnEl.textContent = t('onboarding.genCodeBtn');
+    this.onboardingBackStep1BtnEl.textContent = t('onboarding.backStep1Btn');
+
+    // Recuperação
+    this.recoveryTitleEl.textContent = t('recovery.title');
+    this.recoverySubtitleEl.textContent = t('recovery.subtitle');
+    this.recoveryPhoneField.input.placeholder = t('recovery.phonePlaceholder');
+    this.recoveryPhoneField.refreshLocale();
+    this.recoveryEmailInput.placeholder = t('recovery.emailPlaceholder');
+    this.recoveryEmailHintEl.textContent = t('recovery.emailHint');
+    this.recoveryCodeInput.placeholder = t('recovery.keyPlaceholder');
+    this.recoveryKeyHintEl.textContent = t('recovery.keyHint');
+    this.recoveryKeyToggleBtnEl.textContent =
+      this.recoveryCodeInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryKeyToggleBtnEl.setAttribute('aria-label', t('pass.secretVisToggleAria'));
+    this.recoveryPinInput.placeholder = t('recovery.pinPlaceholder');
+    this.recoveryPinConfirmInput.placeholder = t('recovery.pinConfirmPlaceholder');
+    this.recoveryPinToggleBtn1El.textContent =
+      this.recoveryPinInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryPinToggleBtn2El.textContent =
+      this.recoveryPinConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryPinToggleBtn1El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
+    this.recoveryPinToggleBtn2El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
+    this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
+    this.recoveryForgotEmailBtn.textContent = t('recovery.forgotKeyBtn');
+    this.recoveryBackBtnEl.textContent = t('common.back');
+    this.recoveryResetTitleEl.textContent = t('recovery.resetTitle');
+    this.recoveryResetDescEl.textContent = t('recovery.resetDesc');
+    this.recoveryResetEmailInput.placeholder = t('recovery.resetEmailPlaceholder');
+    this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendBtn');
+    this.recoveryResetBackBtnEl.textContent = t('recovery.resetDoneBackBtn');
+    this.recoveryOobTitleEl.textContent = t('recovery.oobTitle');
+    this.recoveryOobEmailLabelEl.textContent = this.activeOobEmail
+      ? t('recovery.oobAccountDesc', { email: this.activeOobEmail })
+      : t('recovery.oobDefaultDesc');
+    this.recoveryOobSecretInput.placeholder = t('recovery.oobSecretPlaceholder');
+    this.recoveryOobSecretConfirmInput.placeholder = t('recovery.oobSecretConfirmPlaceholder');
+    this.recoveryOobPinInput.placeholder = t('recovery.pinPlaceholder');
+    this.recoveryOobPinConfirmInput.placeholder = t('recovery.pinConfirmPlaceholder');
+    this.recoveryOobSecretToggleBtn1El.textContent =
+      this.recoveryOobSecretInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryOobSecretToggleBtn2El.textContent =
+      this.recoveryOobSecretConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryOobPinToggleBtn1El.textContent =
+      this.recoveryOobPinInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryOobPinToggleBtn2El.textContent =
+      this.recoveryOobPinConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
+    this.recoveryOobSubmitBtn.textContent = t('recovery.oobSaveBtn');
+    this.recoveryOobCancelBtnEl.textContent = t('common.cancel');
+
+    // Hub Bilateral
+    this.connectSelfTitleEl.textContent = t('connect.myAccount');
+    this.connectRotateCodeBtnEl.textContent = t('connect.recoveryKeyBtn');
+    this.connectRotateCodeBtnEl.title = t('connect.recoveryKeyTitle');
+    this.connectRecoveryEmailBtnEl.textContent = t('connect.recoveryEmailBtn');
+    this.connectRecoveryEmailBtnEl.title = t('connect.recoveryEmailTitle');
+    this.connectChangePinBtnEl.textContent = t('connect.changePinBtn');
+    this.connectRotCustomInput.placeholder = t('connect.rotPlaceholder');
+    this.connectRotPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
+    this.connectRotSubmitBtnEl.textContent = t('connect.saveKeyBtn');
+    this.connectRotGenBtnEl.textContent = t('connect.genAutoBtn');
+    this.connectRotHintEl.textContent = t('connect.rotHint');
+    this.connectRotCopyBtnEl.textContent = t('connect.copyKeyBtn');
+    this.connectEmailInput.placeholder = t('onboarding.emailPlaceholder');
+    this.connectEmailPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
+    this.connectSaveEmailBtnEl.textContent = t('connect.emailSaveBtn');
+    this.connectCurPinInput.placeholder = t('connect.currentPinPlaceholder');
+    this.connectNextPinInput.placeholder = t('connect.newPinPlaceholder');
+    this.connectNextPinConfInput.placeholder = t('connect.confirmNewPinPlaceholder');
+    this.connectSavePinBtnEl.textContent = t('connect.savePinBtn');
+    this.connectInviteTitleEl.textContent = t('connect.inviteTitle');
+    this.connectTargetField.input.placeholder = t('connect.inviteTargetPlaceholder');
+    this.connectTargetField.refreshLocale();
+    this.connectInviteBtn.textContent = t('connect.inviteBtn');
+    this.connectIncomingTitleEl.textContent = t('connect.incomingTitle');
+    this.connectOutgoingTitleEl.textContent = t('connect.outgoingTitle');
+    this.connectConvTitleEl.textContent = t('connect.conversationsTitle');
+
+    if (this.currentSession) {
+      if (this.isConnectViewActive()) {
+        this.applyConnectSessionMeta(this.currentSession);
+      } else if (this.currentRoom) {
+        this.updateRoomInfo(this.currentRoom, this.currentSession);
+      } else if (this.currentSession.talk2tmId) {
+        this.renderRoomInfoStrip(
+          t('chat.bilateralLabel'),
+          t('chat.selfTag', { name: this.currentSession.displayName }),
+          'waiting'
+        );
+      }
+    }
+    if (this.lastHubData) {
+      this.updateConnectHubData(this.lastHubData);
+    }
+
+    // Chat + Mensagens renderizadas
+    this.loadOlderBtn.textContent = t('chat.loadOlder');
+    this.selectModeBtn.textContent = this.isSelectionMode
+      ? t('chat.exitSelection')
+      : t('chat.selectAll');
+    this.selectModeBtn.title = t('chat.selectAllTitle');
+    this.updateInactivityBadge();
+    this.msgInputEl.placeholder = t('chat.msgPlaceholder');
+    this.sendBtnEl.textContent = t('chat.sendBtn');
+    this.selectAllBtnEl.title = t('chat.toggleSelectAllTitle');
+    this.cancelSelectionBtnEl.textContent = t('common.cancel');
+    this.cancelSelectionBtnEl.title = t('chat.cancelSelectionTitle');
+    this.deleteBtnEl.title = t('chat.deleteTitle');
+    if (this.isSelectionMode) {
+      this.updateSelectionUI();
+    } else {
+      this.selectAllBtnEl.textContent = t('chat.selectAll');
+      this.deleteBtnEl.textContent = t('chat.delete');
+    }
+
+    for (const [messageId, item] of this.renderedMessages.entries()) {
+      const row = document.getElementById(`ttm-msg-${messageId}`);
+      if (!row) continue;
+      const timeSpan = row.querySelector('.msg-time') as HTMLElement | null;
+      if (timeSpan) {
+        timeSpan.textContent = `[${formatTime(item.msg.createdAt)}] `;
+        const fullDt = formatFullDateTime(item.msg.createdAt);
+        if (fullDt) timeSpan.title = fullDt;
+      }
+      const statusSpan = row.querySelector('.msg-status') as HTMLElement | null;
+      if (statusSpan && item.isSelf) {
+        const st = this.computeMessageStatus(item.msg, item.isSelf);
+        statusSpan.textContent = st.text;
+        statusSpan.setAttribute('data-status', st.dataStatus);
+        if (st.title) statusSpan.setAttribute('title', st.title);
+      }
+      const delBtn = row.querySelector('.ttm-msg-del') as HTMLButtonElement | null;
+      if (delBtn) {
+        delBtn.title = t('chat.deleteSingleTitle');
+        delBtn.setAttribute('aria-label', t('chat.deleteSingleAria'));
+      }
+    }
+    this.syncDateSeparators();
+
+    // Modal de definições
+    this.settingsModalTitleEl.textContent = t('settings.title');
+    this.settingsSessionLabelEl.textContent = t('settings.sessionLabel');
+    this.settingsInactivityLabelEl.textContent = t('settings.inactivityLabel');
+    this.settingsAppearanceLabelEl.textContent = t('settings.appearanceLabel');
+    this.settingsLanguageLabelEl.textContent = t('settings.languageLabel');
+    this.settingsSaveBtnEl.textContent = t('settings.saveBtn');
+    this.settingsCancelBtnEl.textContent = t('common.close');
+    this.populateSettingsSelects();
   }
 
   public deleteSingleMessage(messageId: string): void {

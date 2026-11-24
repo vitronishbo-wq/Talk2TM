@@ -2,6 +2,7 @@
  * Talk2TM — Motor de Notificação e Instalação PWA com Persistência Robusta
  * Arquitetura de 3 Estados Persistentes + Gestão de Cooldown e Fallback de Storage.
  */
+import { t } from '../i18n';
 
 export const PWA_PROMPT_VERSION = 'v1';
 export const PWA_STORAGE_KEY = `talk2tm_pwa_prompt_${PWA_PROMPT_VERSION}`;
@@ -189,6 +190,11 @@ export class PWAPromptBar {
   private isIOS: boolean = false;
   private isStandalone: boolean = false;
   private storage = getSafeStorage();
+  private instructionMode: 'default' | 'ios' | 'desktop' = 'default';
+  private installBtnEl: HTMLButtonElement | null = null;
+  private continueBtnEl: HTMLButtonElement | null = null;
+  private understoodBtnEl: HTMLButtonElement | null = null;
+  private hintTextEl: HTMLElement | null = null;
 
   constructor(parentContainer: HTMLElement) {
     this.container = parentContainer;
@@ -243,25 +249,26 @@ export class PWAPromptBar {
     this.bannerEl = document.createElement('div');
     this.bannerEl.id = 'ttm-pwa-bar';
     this.bannerEl.className = 'ttm-pwa-bar';
+    this.instructionMode = 'default';
 
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'ttm-pwa-actions';
 
-    const installBtn = document.createElement('button');
-    installBtn.type = 'button';
-    installBtn.className = 'ttm-pwa-btn ttm-pwa-btn-install';
-    installBtn.textContent = 'Instalar';
-    installBtn.addEventListener('click', () => this.handleInstallClick());
+    this.installBtnEl = document.createElement('button');
+    this.installBtnEl.type = 'button';
+    this.installBtnEl.className = 'ttm-pwa-btn ttm-pwa-btn-install';
+    this.installBtnEl.textContent = t('pwa.install');
+    this.installBtnEl.addEventListener('click', () => this.handleInstallClick());
 
-    const continueBtn = document.createElement('button');
-    continueBtn.type = 'button';
-    continueBtn.className = 'ttm-pwa-btn ttm-pwa-btn-continue';
-    continueBtn.textContent = 'Continuar';
-    continueBtn.title = 'Continuar no navegador';
-    continueBtn.addEventListener('click', () => this.handleContinueClick());
+    this.continueBtnEl = document.createElement('button');
+    this.continueBtnEl.type = 'button';
+    this.continueBtnEl.className = 'ttm-pwa-btn ttm-pwa-btn-continue';
+    this.continueBtnEl.textContent = t('pwa.continue');
+    this.continueBtnEl.title = t('pwa.continueTitle');
+    this.continueBtnEl.addEventListener('click', () => this.handleContinueClick());
 
-    actionsDiv.appendChild(installBtn);
-    actionsDiv.appendChild(continueBtn);
+    actionsDiv.appendChild(this.installBtnEl);
+    actionsDiv.appendChild(this.continueBtnEl);
 
     this.bannerEl.appendChild(actionsDiv);
 
@@ -297,17 +304,17 @@ export class PWAPromptBar {
 
     // Fluxo iPhone / iPad
     if (this.isIOS) {
-      this.showIOSInstructions();
+      this.showInstructionBanner('ios');
       return;
     }
 
     // Navegadores desktop sem beforeinstallprompt direto
-    alert('Para instalar: clique no ícone de instalação na barra de endereços do navegador.');
-    this.dismiss(false);
+    this.showInstructionBanner('desktop');
   }
 
-  private showIOSInstructions(): void {
+  private showInstructionBanner(mode: 'ios' | 'desktop'): void {
     if (!this.bannerEl) return;
+    this.instructionMode = mode;
 
     let textSpan = this.bannerEl.querySelector('.ttm-pwa-text') as HTMLElement | null;
     if (!textSpan) {
@@ -315,7 +322,9 @@ export class PWAPromptBar {
       textSpan.className = 'ttm-pwa-text';
       this.bannerEl.insertBefore(textSpan, this.bannerEl.firstChild);
     }
-    textSpan.textContent = 'Toque em Compartilhar e "Adicionar à Tela de Início"';
+    this.hintTextEl = textSpan;
+    textSpan.textContent =
+      mode === 'ios' ? t('pwa.iosInstruction') : t('pwa.desktopHint');
     textSpan.style.color = '#38bdf8';
 
     const actionsDiv = this.bannerEl.querySelector('.ttm-pwa-actions') as HTMLElement | null;
@@ -324,18 +333,34 @@ export class PWAPromptBar {
         actionsDiv.removeChild(actionsDiv.firstChild);
       }
 
-      const understoodBtn = document.createElement('button');
-      understoodBtn.type = 'button';
-      understoodBtn.className = 'ttm-pwa-btn ttm-pwa-btn-continue';
-      understoodBtn.textContent = 'Entendido';
-      understoodBtn.addEventListener('click', () => {
-        // Ao clicar em Entendido no iOS, registra 'continued' para dar tempo ao usuário
-        // Quando abrir pelo ícone, o detector standalone marcará 'installed' automaticamente
+      this.understoodBtnEl = document.createElement('button');
+      this.understoodBtnEl.type = 'button';
+      this.understoodBtnEl.className = 'ttm-pwa-btn ttm-pwa-btn-continue';
+      this.understoodBtnEl.textContent = t('pwa.understood');
+      this.understoodBtnEl.addEventListener('click', () => {
         savePWAState({ decision: 'continued', timestamp: Date.now() }, this.storage);
         this.dismiss(false);
       });
 
-      actionsDiv.appendChild(understoodBtn);
+      actionsDiv.appendChild(this.understoodBtnEl);
+    }
+  }
+
+  public refreshLocale(): void {
+    if (!this.bannerEl) return;
+    if (this.installBtnEl) {
+      this.installBtnEl.textContent = t('pwa.install');
+    }
+    if (this.continueBtnEl) {
+      this.continueBtnEl.textContent = t('pwa.continue');
+      this.continueBtnEl.title = t('pwa.continueTitle');
+    }
+    if (this.hintTextEl && this.instructionMode !== 'default') {
+      this.hintTextEl.textContent =
+        this.instructionMode === 'ios' ? t('pwa.iosInstruction') : t('pwa.desktopHint');
+    }
+    if (this.understoodBtnEl) {
+      this.understoodBtnEl.textContent = t('pwa.understood');
     }
   }
 

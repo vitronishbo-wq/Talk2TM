@@ -4,7 +4,18 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CONFIG, ACCESS_CONFIG, getUserByPin, DEFAULT_SETTINGS, USER_AUTH_CREDENTIALS, getCredentialsByUser, loadSettings, saveSettings, normalizeAppearanceMode } from '../src/config';
+import {
+  CONFIG,
+  ACCESS_CONFIG,
+  getUserByPin,
+  DEFAULT_SETTINGS,
+  USER_AUTH_CREDENTIALS,
+  getCredentialsByUser,
+  loadSettings,
+  saveSettings,
+  normalizeAppearanceMode,
+  normalizeSettingsLanguage,
+} from '../src/config';
 import { getTalk2TMIconSvg } from '../src/ui/lockscreen';
 import {
   sanitizeMessageText,
@@ -12,6 +23,7 @@ import {
   sanitizeRoom,
   generateId,
   getLocalDateKey,
+  formatTime,
   formatDateSeparatorLabel,
   formatFullDateTime,
 } from '../src/utils/sanitize';
@@ -104,6 +116,7 @@ import {
   detectSuggestedCountry,
   findCountryByE164,
   getCountriesByDialCode,
+  getCountryDisplayName,
   normalizePhoneNumber,
   maskPhoneNumber,
   hashPhoneNumber,
@@ -114,6 +127,23 @@ import { testIdentityAcceptanceFlow } from '../src/firebase/diagnostic';
 import { normalizeCalculatorSequence, isAdminRouteSequence } from '../src/ui/calculator';
 import { formatAdminActivationDate } from '../src/ui/admin';
 import { ADMIN_PAGE_SIZE } from '../src/firebase/admin';
+import {
+  GLOBAL_FALLBACK_LOCALE,
+  LOCALE_REGISTRY,
+  SUPPORTED_LOCALES,
+  detectSystemLocale,
+  getCurrentLocale,
+  getLanguagePreference,
+  getLocalizedCountryName,
+  initI18n,
+  loadLocaleDictionary,
+  resolveEffectiveLocale,
+  setAppLocale,
+  setAppLocaleSync,
+  t,
+  type SupportedLocale,
+} from '../src/i18n';
+import { en } from '../src/i18n/locales/en';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -1038,7 +1068,7 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     }
   });
 
-  // 44. Sinalização de Data: separadores de dia (Hoje, Ontem, dias anteriores) e formatação completa
+  // 44. Sinalização de Data: separadores de dia (Hoje, Ontem, dias anteriores) e formatação completa via Intl
   check('Sinalização de Data: formatDateSeparatorLabel identifica Hoje, Ontem e dias anteriores corretamente', () => {
     const refNow = new Date(2026, 10, 15, 1, 15, 0); // 15/11/2026 01:15 local
     const todayMsg = new Date(2026, 10, 15, 0, 5, 0).toISOString();
@@ -1048,10 +1078,12 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(getLocalDateKey(todayMsg) === '2026-11-15', 'Chave local deve refletir 2026-11-15');
     assert(getLocalDateKey(twoDaysAgoMsg) === '2026-11-13', 'Chave local deve refletir 2026-11-13');
 
-    assert(formatDateSeparatorLabel(todayMsg, refNow) === 'Hoje · 15/11/2026', 'Mensagem do mesmo dia deve mostrar Hoje');
-    assert(formatDateSeparatorLabel(yesterdayMsg, refNow) === 'Ontem · 14/11/2026', 'Mensagem de ontem deve mostrar Ontem');
-    assert(formatDateSeparatorLabel(twoDaysAgoMsg, refNow) === 'Sex · 13/11/2026', 'Mensagem de 2 dias atrás deve mostrar dia da semana e data');
-    assert(formatFullDateTime(twoDaysAgoMsg) === '13/11/2026 08:43', 'Tooltip completo deve conter DD/MM/AAAA HH:MM');
+    assert(formatDateSeparatorLabel(todayMsg, refNow, 'pt') === 'Hoje · 15/11/2026', 'Mensagem do mesmo dia em pt deve mostrar Hoje');
+    assert(formatDateSeparatorLabel(yesterdayMsg, refNow, 'pt') === 'Ontem · 14/11/2026', 'Mensagem de ontem em pt deve mostrar Ontem');
+    const ptOlder = formatDateSeparatorLabel(twoDaysAgoMsg, refNow, 'pt');
+    assert(ptOlder.includes(' · 13/11/2026') && ptOlder.split(' · ')[0].length >= 3, `Mensagem de 2 dias atrás em pt deve mostrar dia da semana e data (atual: ${ptOlder})`);
+    assert(formatFullDateTime(twoDaysAgoMsg, 'pt') === '13/11/2026 08:43', 'Tooltip completo em pt deve conter DD/MM/AAAA HH:MM');
+    assert(formatDateSeparatorLabel(todayMsg, refNow, 'en').startsWith('Today · '), 'Mensagem do mesmo dia em en deve usar Intl Today');
   });
 
   // 45. Read Receipts: getPartnerLastRead escolhe carimbo mais recente por nome/UID e campos A/B
@@ -1723,6 +1755,98 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     );
   });
 
+  // 66. Internacionalização Ultraleve: prioridade manual > sistema > fallback, Intl.DisplayNames/RelativeTimeFormat com fallbacks e integridade
+  check('i18n Ultraleve: prioridade absoluta, fallback en, Intl com fallbacks seguros, persistência local e integridade', () => {
+    assert(
+      SUPPORTED_LOCALES.join(',') === 'pt,en,fr,es' && GLOBAL_FALLBACK_LOCALE === 'en',
+      'Idiomas iniciais devem ser pt, en, fr, es com fallback global en'
+    );
+    assert(DEFAULT_SETTINGS.language === 'auto', 'Preferência padrão de idioma deve ser auto');
+    assert(normalizeSettingsLanguage('fr') === 'fr' && normalizeSettingsLanguage('de') === 'auto', 'Preferência não suportada deve normalizar para auto');
+
+    // Prioridade: navigator.languages -> navigator.language -> fallback global en
+    assert(
+      detectSystemLocale({ languages: ['fr-FR', 'pt-PT'], language: 'es-ES' }) === 'fr',
+      'navigator.languages deve ter prioridade sobre navigator.language'
+    );
+    assert(
+      detectSystemLocale({ languages: ['ja-JP', 'es-MX'], language: 'en-US' }) === 'es',
+      'Deve percorrer navigator.languages até encontrar idioma suportado'
+    );
+    assert(
+      detectSystemLocale({ languages: [], language: 'pt-BR' }) === 'pt',
+      'Deve usar navigator.language quando navigator.languages estiver vazio'
+    );
+    assert(
+      detectSystemLocale({ languages: ['de-DE', 'zh-CN'], language: 'ja-JP' }) === 'en',
+      'Idioma sem tradução deve cair no fallback global en'
+    );
+
+    // Prioridade absoluta: preferência manual > sistema
+    assert(
+      resolveEffectiveLocale('es', { languages: ['fr-FR'], language: 'pt-PT' }) === 'es',
+      'Preferência manual explícita deve sobrepor-se sempre ao idioma do sistema'
+    );
+    assert(
+      resolveEffectiveLocale('auto', { languages: ['fr-FR'], language: 'pt-PT' }) === 'fr',
+      'Modo automático deve resolver pelo sistema'
+    );
+
+    // Persistência local exclusiva de language em ttm_settings (sem escritas no Firestore)
+    const fakeStorage: Record<string, string> = {};
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (key: string) => fakeStorage[key] || null,
+      setItem: (key: string, val: string) => { fakeStorage[key] = val; },
+      removeItem: (key: string) => { delete fakeStorage[key]; },
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+    try {
+      saveSettings({ sessionTimeoutMinutes: 5, inactivityLockSeconds: 300, appearance: 'talk2tm', language: 'fr' });
+      const reloaded = loadSettings();
+      assert(reloaded.language === 'fr', 'Preferência manual de idioma deve persistir localmente em ttm_settings');
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
+
+    // Intl.DisplayNames em tempo de execução + fallback seguro se indisponível
+    const aoNameFr = getLocalizedCountryName('AO', 'fr', 'Angola');
+    const deNamePt = getCountryDisplayName({ iso: 'DE', name: 'Germany' }, 'pt');
+    assert(aoNameFr.toLowerCase().includes('angola'), `Intl.DisplayNames deve localizar AO em fr (atual: ${aoNameFr})`);
+    assert(deNamePt.toLowerCase().includes('alemanha'), `Intl.DisplayNames deve localizar DE em pt (atual: ${deNamePt})`);
+    assert(searchPhoneCountries('allemagne', 'fr').some((c) => c.iso === 'DE'), 'Pesquisa localizada em fr deve encontrar DE por "allemagne"');
+
+    const origDisplayNames = Intl.DisplayNames;
+    const origRtf = Intl.RelativeTimeFormat;
+    try {
+      (Intl as unknown as { DisplayNames?: unknown }).DisplayNames = undefined;
+      (Intl as unknown as { RelativeTimeFormat?: unknown }).RelativeTimeFormat = undefined;
+      assert(
+        getLocalizedCountryName('XY', 'fr', 'FallbackLand') === 'FallbackLand',
+        'Deve usar fallback nativo quando Intl.DisplayNames estiver ausente'
+      );
+      const refNow = new Date(2026, 10, 15, 12, 0, 0);
+      const todayIso = new Date(2026, 10, 15, 9, 5, 0).toISOString();
+      const sepEn = formatDateSeparatorLabel(todayIso, refNow, 'en');
+      assert(sepEn.startsWith('Today · '), `Fallback nativo sem Intl.RelativeTimeFormat deve funcionar em en (atual: ${sepEn})`);
+      assert(/^\d{2}:\d{2}$/.test(formatTime(todayIso, 'en')), 'formatTime deve retornar HH:MM');
+    } finally {
+      (Intl as unknown as { DisplayNames?: unknown }).DisplayNames = origDisplayNames;
+      (Intl as unknown as { RelativeTimeFormat?: unknown }).RelativeTimeFormat = origRtf;
+    }
+
+    // Integridade: nunca alterar PINs, E.164, nem mensagens de utilizador quando o idioma muda
+    const prevLoc = getCurrentLocale();
+    setAppLocaleSync('en');
+    assert(getCurrentLocale() === 'en' && getLanguagePreference() === 'en', 'setAppLocaleSync deve ativar idioma sincronamente');
+    assert(verifyPassword('852456').user === 'Truman' && verifyPassword('135790').user === 'Mãezinha', 'PINs legados e nomes próprios nunca são traduzidos');
+    assert(normalizePhoneNumber('081 234 5678', 'NA').e164 === '+264812345678', 'Normalização E.164 é invariante ao idioma da UI');
+    assert(sanitizeMessageText('Olá maman, 852456!').text === 'Olá maman, 852456!', 'Conteúdo de mensagens nunca pode ser traduzido ou alterado');
+    setAppLocaleSync(prevLoc);
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
@@ -1919,6 +2043,51 @@ export async function runAsyncZeroCostTests(): Promise<{ passed: number; total: 
     assert(restored?.recoveryEmail === 'carlos@example.com', 'recoveryEmail deve ser preservado');
     assert(restored?.pendingRecoveryEmail === 'carlos.novo@example.com', 'pendingRecoveryEmail deve ser preservado');
     assert(restored?.internalSecret === undefined, 'internalSecret deve continuar sendo removido');
+  });
+
+  // 63. Micro-dicionários i18n modulares: carregamento dinâmico, paridade total de chaves e variáveis entre pt, en, fr e es
+  await checkAsync('i18n Modular: carregamento dinâmico, paridade de chaves/placeholders em pt/en/fr/es e cache offline SW', async () => {
+    const enKeys = Object.keys(en).sort();
+    assert(enKeys.length > 100, 'Dicionário base en deve conter todas as chaves da interface');
+
+    const extractPlaceholders = (text: string): string => {
+      const matches = text.match(/\{[a-zA-Z0-9_]+\}/g) || [];
+      return [...matches].sort().join(',');
+    };
+
+    for (const loc of SUPPORTED_LOCALES as readonly SupportedLocale[]) {
+      const dict = await loadLocaleDictionary(loc);
+      const keys = Object.keys(dict).sort();
+      assert(
+        keys.length === enKeys.length && keys.every((k, i) => k === enKeys[i]),
+        `Dicionário "${loc}" deve ter exatamente as mesmas chaves que "en"`
+      );
+      for (const key of enKeys as Array<keyof typeof en>) {
+        const val = dict[key];
+        assert(typeof val === 'string' && val.trim().length > 0, `Chave "${String(key)}" vazia em "${loc}"`);
+        assert(
+          extractPlaceholders(val) === extractPlaceholders(en[key]),
+          `Placeholders incompatíveis em "${loc}.${String(key)}"`
+        );
+      }
+      assert(Boolean(LOCALE_REGISTRY[loc].nativeLabel), `LOCALE_REGISTRY.${loc} deve definir nativeLabel`);
+    }
+
+    // Testa initI18n e setAppLocale em runtime com alteração efetiva do dicionário
+    await initI18n('auto', { languages: ['es-ES'] });
+    assert(getCurrentLocale() === 'es', 'initI18n auto deve selecionar es quando sistema é es-ES');
+    assert(t('settings.title') === 'Ajustes Mínimos', 'Tradução em es deve refletir o micro-dicionário carregado');
+
+    await setAppLocale('fr');
+    assert(getCurrentLocale() === 'fr', 'setAppLocale(fr) deve trocar para fr');
+    assert(t('settings.title') === 'Paramètres Minimaux', 'Tradução em fr deve atualizar imediatamente');
+
+    await setAppLocale('pt');
+    assert(t('settings.title') === 'Definições Mínimas', 'Tradução em pt deve atualizar imediatamente');
+
+    // Garante cobertura offline no Service Worker para chunks JS de idioma
+    const swSrc = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
+    assert(swSrc.includes('/assets/') && swSrc.includes('caches.open'), 'Service Worker deve armazenar chunks modulares em cache offline');
   });
 
   console.log(`\x1b[32m✔ Talk2TM Zero-Cost Async: ${passed}/${total} testes assíncronos executados com 100% de aprovação.\x1b[0m`);

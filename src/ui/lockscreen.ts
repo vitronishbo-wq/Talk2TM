@@ -7,6 +7,7 @@
 import { AllowedUser, getUserByPin } from '../config';
 import { getAllLocalIdentities } from '../identity';
 import { isAdminRouteSequence, normalizeCalculatorSequence } from './calculator';
+import { t } from '../i18n';
 
 export function getTalk2TMIconSvg(size: number = 64, className: string = 'ttm-brand-mark-svg'): string {
   return `<svg class="${className}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="${size}" height="${size}" aria-hidden="true"><circle cx="256" cy="256" r="244" fill="#2563EB"/><path fill="#FFFFFF" d="M168 134h120c28.7 0 52 23.3 52 52v50c0 28.7-23.3 52-52 52h-92l-46 30c-5.2 3.4-12-0.4-12-6.6v-25.2c-12.5-8.9-20-23.4-20-39.2v-61c0-28.7 23.3-52 50-52z"/><path fill="#FFFFFF" stroke="#2563EB" stroke-width="18" stroke-linejoin="round" d="M224 224h120c28.7 0 52 23.3 52 52v50c0 15.8-7.5 30.3-20 39.2v25.2c0 6.2-6.8 10-12 6.6l-46-30h-94c-28.7 0-52-23.3-52-52v-39c0-28.7 23.3-52 52-52z"/><path fill="#2563EB" d="M256 208c2.6 25.5 18.5 41.4 44 44-25.5 2.6-41.4 18.5-44 44-2.6-25.5-18.5-41.4-44-44 25.5-2.6 41.4-18.5 44-44z"/></svg>`;
@@ -36,6 +37,10 @@ export class Talk2TMLockScreen {
   private pinDotsEl!: HTMLElement;
   private backspaceBtnEl!: HTMLButtonElement;
   private feedbackEl!: HTMLElement;
+  private createBtnEl!: HTMLButtonElement;
+  private recoverBtnEl!: HTMLButtonElement;
+  private asteriskBtnEl?: HTMLButtonElement;
+  private hashBtnEl?: HTMLButtonElement;
   private feedbackTimerId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(container: HTMLElement, callbacks: Talk2TMLockCallbacks) {
@@ -61,8 +66,8 @@ export class Talk2TMLockScreen {
 
     this.unreadDotEl = document.createElement('span');
     this.unreadDotEl.className = 'ttm-lock-unread-dot';
-    this.unreadDotEl.setAttribute('aria-label', 'Nova mensagem');
-    this.unreadDotEl.title = 'Nova mensagem';
+    this.unreadDotEl.setAttribute('aria-label', t('lock.unreadLabel'));
+    this.unreadDotEl.title = t('lock.unreadLabel');
     this.logoWrapEl.appendChild(this.unreadDotEl);
 
     const titleEl = document.createElement('h1');
@@ -71,7 +76,7 @@ export class Talk2TMLockScreen {
 
     this.subtitleEl = document.createElement('p');
     this.subtitleEl.className = 'ttm-lock-subtitle';
-    this.subtitleEl.textContent = 'Digite o seu PIN de acesso';
+    this.subtitleEl.textContent = t('lock.subtitleDefault');
 
     heroEl.appendChild(this.logoWrapEl);
     heroEl.appendChild(titleEl);
@@ -89,8 +94,8 @@ export class Talk2TMLockScreen {
     this.backspaceBtnEl.type = 'button';
     this.backspaceBtnEl.className = 'ttm-pin-backspace';
     this.backspaceBtnEl.textContent = '⌫';
-    this.backspaceBtnEl.title = 'Apagar último dígito';
-    this.backspaceBtnEl.setAttribute('aria-label', 'Apagar último dígito');
+    this.backspaceBtnEl.title = t('lock.backspaceLabel');
+    this.backspaceBtnEl.setAttribute('aria-label', t('lock.backspaceLabel'));
     this.backspaceBtnEl.disabled = true;
     this.backspaceBtnEl.addEventListener('click', (e) => {
       e.preventDefault();
@@ -116,7 +121,12 @@ export class Talk2TMLockScreen {
       btn.className =
         key === '*' || key === '#' ? 'ttm-pin-key ttm-pin-key-sym' : 'ttm-pin-key';
       btn.textContent = key;
-      btn.setAttribute('aria-label', key === '*' ? 'Asterisco' : key === '#' ? 'Cardinal' : key);
+      btn.setAttribute(
+        'aria-label',
+        key === '*' ? t('lock.keyAsterisk') : key === '#' ? t('lock.keyHash') : key
+      );
+      if (key === '*') this.asteriskBtnEl = btn;
+      if (key === '#') this.hashBtnEl = btn;
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         this.inputToken(key);
@@ -128,11 +138,11 @@ export class Talk2TMLockScreen {
     const footerActions = document.createElement('div');
     footerActions.className = 'ttm-lock-footer';
 
-    const createBtn = document.createElement('button');
-    createBtn.type = 'button';
-    createBtn.className = 'ttm-lock-link';
-    createBtn.textContent = 'Criar conta';
-    createBtn.addEventListener('click', () => {
+    this.createBtnEl = document.createElement('button');
+    this.createBtnEl.type = 'button';
+    this.createBtnEl.className = 'ttm-lock-link';
+    this.createBtnEl.textContent = t('lock.createAccount');
+    this.createBtnEl.addEventListener('click', () => {
       this.callbacks.onOpenOnboarding();
     });
 
@@ -141,17 +151,17 @@ export class Talk2TMLockScreen {
     sep.setAttribute('aria-hidden', 'true');
     sep.textContent = '·';
 
-    const recoverBtn = document.createElement('button');
-    recoverBtn.type = 'button';
-    recoverBtn.className = 'ttm-lock-link';
-    recoverBtn.textContent = 'Recuperar acesso';
-    recoverBtn.addEventListener('click', () => {
+    this.recoverBtnEl = document.createElement('button');
+    this.recoverBtnEl.type = 'button';
+    this.recoverBtnEl.className = 'ttm-lock-link';
+    this.recoverBtnEl.textContent = t('lock.recoverAccess');
+    this.recoverBtnEl.addEventListener('click', () => {
       this.callbacks.onOpenRecovery();
     });
 
-    footerActions.appendChild(createBtn);
+    footerActions.appendChild(this.createBtnEl);
     footerActions.appendChild(sep);
-    footerActions.appendChild(recoverBtn);
+    footerActions.appendChild(this.recoverBtnEl);
 
     this.rootEl.appendChild(heroEl);
     this.rootEl.appendChild(pinBarEl);
@@ -246,9 +256,7 @@ export class Talk2TMLockScreen {
       if (showErrorOnMiss && seqId === this.checkSeq && snap.length > 0) {
         const hasAccounts = getAllLocalIdentities().length > 0;
         this.showError(
-          hasAccounts
-            ? 'PIN incorreto neste aparelho.'
-            : 'Sem conta neste aparelho — toque em Criar conta ou Recuperar.'
+          hasAccounts ? t('lock.wrongPin') : t('lock.noAccount')
         );
       }
     } catch {
@@ -267,7 +275,7 @@ export class Talk2TMLockScreen {
       return;
     }
     if (!this.sequence) {
-      this.showError('Digite o seu PIN de acesso.');
+      this.showError(t('lock.enterPinPrompt'));
       return;
     }
     await this.checkVaultUnlock(true);
@@ -345,12 +353,24 @@ export class Talk2TMLockScreen {
     return this.hasUnreadDotState;
   }
 
-  public show(): void {
-    this.clear();
+  public refreshLocale(): void {
     const hasVault = getAllLocalIdentities().length > 0;
     this.subtitleEl.textContent = hasVault
-      ? 'Digite o seu PIN de acesso'
-      : 'Digite o PIN ou crie uma conta';
+      ? t('lock.subtitleDefault')
+      : t('lock.subtitleNoVault');
+    this.unreadDotEl.setAttribute('aria-label', t('lock.unreadLabel'));
+    this.unreadDotEl.title = t('lock.unreadLabel');
+    this.backspaceBtnEl.title = t('lock.backspaceLabel');
+    this.backspaceBtnEl.setAttribute('aria-label', t('lock.backspaceLabel'));
+    this.createBtnEl.textContent = t('lock.createAccount');
+    this.recoverBtnEl.textContent = t('lock.recoverAccess');
+    this.asteriskBtnEl?.setAttribute('aria-label', t('lock.keyAsterisk'));
+    this.hashBtnEl?.setAttribute('aria-label', t('lock.keyHash'));
+  }
+
+  public show(): void {
+    this.clear();
+    this.refreshLocale();
     this.isVisible = true;
     this.rootEl.style.display = 'flex';
   }

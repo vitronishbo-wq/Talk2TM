@@ -39,6 +39,7 @@ import {
   hashPhoneNumber,
   phoneHashToInternalEmail,
 } from './utils/phone';
+import { t } from './i18n';
 
 const LOCAL_IDENTITY_V1_KEY = 'talk2tm_identity_v1';
 const LOCAL_VAULT_V2_KEY = 'talk2tm_identities_v2';
@@ -93,7 +94,7 @@ function getWebCrypto(): Crypto {
   if (typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.subtle) {
     return globalThis.crypto;
   }
-  throw new Error('Web Crypto API indisponível neste navegador.');
+  throw new Error(t('err.webCryptoUnavailable'));
 }
 
 function getRandomBytes(length: number): Uint8Array {
@@ -117,7 +118,7 @@ function bytesToHex(bytes: Uint8Array): string {
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.trim().toLowerCase();
   if (!clean || clean.length % 2 !== 0) {
-    throw new Error('Dados criptográficos corrompidos.');
+    throw new Error(t('err.corruptedCrypto'));
   }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
@@ -216,28 +217,28 @@ export function validateRecoverySecret(
     return {
       valid: false,
       normalized,
-      error: 'A chave pessoal deve ter pelo menos 6 caracteres (letras ou números).',
+      error: t('err.recoveryKeyTooShort'),
     };
   }
   if (normalized.length > 40) {
     return {
       valid: false,
       normalized,
-      error: 'A chave pessoal deve ter no máximo 40 caracteres.',
+      error: t('err.recoveryKeyTooLong'),
     };
   }
   if (pin && normalized === pin.trim().toUpperCase()) {
     return {
       valid: false,
       normalized,
-      error: 'Por segurança, a chave pessoal não pode ser igual ao PIN da calculadora.',
+      error: t('err.recoveryKeyEqualsPin'),
     };
   }
   if (/^(.)\1+$/.test(normalized) || WEAK_RECOVERY_KEYS.has(normalized)) {
     return {
       valid: false,
       normalized,
-      error: 'Escolha uma chave pessoal menos óbvia (evite sequências como 123456 ou caracteres repetidos).',
+      error: t('err.recoveryKeyWeak'),
     };
   }
   return { valid: true, normalized };
@@ -254,10 +255,10 @@ export function validateOptionalRecoveryEmail(
     return { valid: true, email: undefined };
   }
   if (trimmed.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-    return { valid: false, error: 'Informe um e-mail válido ou deixe o campo em branco.' };
+    return { valid: false, error: t('err.emailInvalidOrBlank') };
   }
   if (trimmed.endsWith('@talk2tm.internal')) {
-    return { valid: false, error: 'Use um endereço de e-mail pessoal válido.' };
+    return { valid: false, error: t('err.emailPersonalRequired') };
   }
   return { valid: true, email: trimmed };
 }
@@ -269,7 +270,7 @@ export function validateOptionalRecoveryEmail(
 export async function deriveAuthPassword(recoveryCode: string, phoneHash: string): Promise<string> {
   const normalizedCode = normalizeRecoveryCode(recoveryCode);
   if (normalizedCode.length < 6) {
-    throw new Error('Chave de recuperação inválida (mínimo 6 caracteres).');
+    throw new Error(t('err.recoveryKeyTooShort'));
   }
   const webCrypto = getWebCrypto();
   const encoder = new TextEncoder();
@@ -377,13 +378,13 @@ export async function unsealAuthSecretWithPin(
       );
       return new TextDecoder().decode(decrypted);
     } catch {
-      throw new Error('PIN incorreto para esta conta.');
+      throw new Error(t('err.wrongPinAccount'));
     }
   }
   if (identity.internalSecret) {
     return identity.internalSecret;
   }
-  throw new Error('Credencial local indisponível. Use "Recuperar conta" com seu código.');
+  throw new Error(t('err.localCredentialUnavailable'));
 }
 
 function getStorageOrNull(
@@ -626,12 +627,12 @@ export async function validateLocalPin(
 ): Promise<{ valid: boolean; error?: string }> {
   const clean = (pin || '').trim();
   if (!/^\d{4,8}$/.test(clean)) {
-    return { valid: false, error: 'O PIN deve ter entre 4 e 8 dígitos numéricos.' };
+    return { valid: false, error: t('err.pinFormat') };
   }
   if (RESERVED_SYSTEM_PINS.has(clean)) {
     return {
       valid: false,
-      error: 'Este PIN é reservado pelo sistema. Escolha outro código de 4 a 8 dígitos.',
+      error: t('err.pinReserved'),
     };
   }
   if (checkCollisions) {
@@ -639,7 +640,7 @@ export async function validateLocalPin(
     if (existing && existing.uid !== excludeUid) {
       return {
         valid: false,
-        error: 'Este PIN já está em uso por outra conta neste aparelho. Escolha um PIN diferente.',
+        error: t('err.pinCollision'),
       };
     }
   }
@@ -686,24 +687,24 @@ export async function registerPhoneIdentity(
 ): Promise<RegisterPhoneIdentityResult> {
   const cleanName = (params.displayName || '').trim().slice(0, 30);
   if (!cleanName) {
-    throw new Error('Informe seu nome ou apelido (até 30 caracteres).');
+    throw new Error(t('err.nameRequired'));
   }
 
   const phoneCheck = normalizePhoneNumber(params.phone);
   if (!phoneCheck.valid || !phoneCheck.e164) {
-    throw new Error(phoneCheck.error || 'Número de telefone inválido.');
+    throw new Error(phoneCheck.error || t('onboarding.errPhoneInvalid'));
   }
 
   const pinCheck = await validateLocalPin(params.pin, true);
   if (!pinCheck.valid) {
-    throw new Error(pinCheck.error || 'PIN inválido.');
+    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
   }
 
   let recoveryCode: string;
   if (params.recoveryCode && params.recoveryCode.trim()) {
     const recCheck = validateRecoverySecret(params.recoveryCode, params.pin);
     if (!recCheck.valid) {
-      throw new Error(recCheck.error || 'Chave de recuperação inválida.');
+      throw new Error(recCheck.error || t('onboarding.errSecretInvalid'));
     }
     recoveryCode = params.recoveryCode.trim();
   } else {
@@ -712,7 +713,7 @@ export async function registerPhoneIdentity(
 
   const emailCheck = validateOptionalRecoveryEmail(params.recoveryEmail);
   if (!emailCheck.valid) {
-    throw new Error(emailCheck.error || 'E-mail de recuperação inválido.');
+    throw new Error(emailCheck.error || t('onboarding.errEmailInvalid'));
   }
 
   const e164Phone = phoneCheck.e164;
@@ -726,7 +727,7 @@ export async function registerPhoneIdentity(
   const auth = getFirebaseAuth();
   const db = getFirebaseDB();
   if (!auth || !db) {
-    throw new Error('Serviço Firebase indisponível no momento. Verifique sua conexão.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   let user: User;
@@ -736,13 +737,11 @@ export async function registerPhoneIdentity(
   } catch (err: any) {
     if (err?.code === 'auth/email-already-in-use') {
       if (emailCheck.email) {
-        throw new Error(
-          'Este e-mail de recuperação já está associado a outra conta. Use outro e-mail ou entre em "Entrar / Recuperar Conta".'
-        );
+        throw new Error(t('err.emailInUse'));
       }
-      throw new Error('Este número de telefone já possui conta cadastrada. Use "Entrar / Recuperar Conta" se necessário.');
+      throw new Error(t('err.phoneInUse'));
     }
-    throw new Error(err?.message || 'Não foi possível criar a conta.');
+    throw new Error(err?.message || t('err.createAccountFailed'));
   }
 
   syncAuthState(user);
@@ -754,7 +753,7 @@ export async function registerPhoneIdentity(
     // Verifica antes se phoneLookup já está ocupado por outra conta (evita escrita parcial)
     const existingPhoneSnap = await getDoc(doc(db, 'phoneLookup', phoneHash));
     if (existingPhoneSnap.exists() && existingPhoneSnap.data()?.uid !== user.uid) {
-      throw new Error('Este número de telefone já está associado a outra conta.');
+      throw new Error(t('err.phoneInUse'));
     }
 
     const now = new Date().toISOString();
@@ -817,7 +816,7 @@ export async function registerPhoneIdentity(
     if (err instanceof Error && err.message) {
       throw err;
     }
-    throw new Error('Falha ao finalizar o cadastro no banco de dados.');
+    throw new Error(t('err.finalizeSignupFailed'));
   }
 }
 
@@ -833,11 +832,11 @@ export async function recoverPhoneIdentity(
   const rawPhone = (params.phone || '').trim();
   const emailCheck = validateOptionalRecoveryEmail(params.recoveryEmail);
   if (!emailCheck.valid) {
-    throw new Error(emailCheck.error || 'E-mail de recuperação inválido.');
+    throw new Error(emailCheck.error || t('onboarding.errEmailInvalid'));
   }
 
   if (!rawPhone && !emailCheck.email) {
-    throw new Error('Informe o número de telefone cadastrado (ou o e-mail de recuperação associado).');
+    throw new Error(t('recovery.errMissingPhoneOrEmail'));
   }
 
   let phoneHash: string | null = null;
@@ -845,7 +844,7 @@ export async function recoverPhoneIdentity(
   if (rawPhone) {
     const phoneCheck = normalizePhoneNumber(rawPhone);
     if (!phoneCheck.valid || !phoneCheck.e164) {
-      throw new Error(phoneCheck.error || 'Número de telefone inválido.');
+      throw new Error(phoneCheck.error || t('onboarding.errPhoneInvalid'));
     }
     phoneHash = await hashPhoneNumber(phoneCheck.e164);
     phoneMasked = maskPhoneNumber(phoneCheck.e164);
@@ -854,7 +853,7 @@ export async function recoverPhoneIdentity(
   const rawRecoverySecret = (params.recoveryCode || '').trim();
   const normalizedCode = normalizeRecoveryCode(rawRecoverySecret);
   if (normalizedCode.length < 6 && rawRecoverySecret.length < 6) {
-    throw new Error('Informe sua chave pessoal (mínimo 6 caracteres) ou senha redefinida.');
+    throw new Error(t('recovery.errSecretMissing'));
   }
 
   const existingLocal = getAllLocalIdentities().find(
@@ -864,14 +863,14 @@ export async function recoverPhoneIdentity(
   );
   const pinCheck = await validateLocalPin(params.newPin, true, existingLocal?.uid);
   if (!pinCheck.valid) {
-    throw new Error(pinCheck.error || 'Novo PIN inválido.');
+    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
   }
 
   await initFirebase();
   const auth = getFirebaseAuth();
   const db = getFirebaseDB();
   if (!auth || !db) {
-    throw new Error('Serviço Firebase indisponível no momento.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   const loginEmail = emailCheck.email || phoneHashToInternalEmail(phoneHash!);
@@ -893,7 +892,7 @@ export async function recoverPhoneIdentity(
         err?.code === 'auth/wrong-password' ||
         err?.code === 'auth/user-not-found';
       if (!isCredErr) {
-        throw new Error(err?.message || 'Não foi possível autenticar a recuperação.');
+        throw new Error(err?.message || t('err.recoverAuthFailed'));
       }
     }
   }
@@ -911,23 +910,19 @@ export async function recoverPhoneIdentity(
         err?.code === 'auth/wrong-password' ||
         err?.code === 'auth/user-not-found';
       if (!isCredErr) {
-        throw new Error(err?.message || 'Não foi possível autenticar a recuperação.');
+        throw new Error(err?.message || t('err.recoverAuthFailed'));
       }
     }
   }
 
   if (!user) {
     if (!rawPhone && emailCheck.email) {
-      throw new Error(
-        'Não foi possível entrar apenas com e-mail. Informe também o número de telefone cadastrado ou use [esqueci a chave — recuperar por e-mail].'
-      );
+      throw new Error(t('err.recoverEmailOnlyFailed'));
     }
     if (rawPhone && !emailCheck.email) {
-      throw new Error(
-        'Telefone ou chave pessoal incorretos. Se associou um e-mail de recuperação à conta, informe-o também acima.'
-      );
+      throw new Error(t('err.recoverPhoneKeyFailed'));
     }
-    throw new Error('Telefone, e-mail ou chave pessoal de recuperação incorretos.');
+    throw new Error(t('err.recoverAllFailed'));
   }
 
   syncAuthState(user);
@@ -935,7 +930,7 @@ export async function recoverPhoneIdentity(
 
   const userSnap = await getDoc(doc(db, 'users', user.uid));
   if (!userSnap.exists()) {
-    throw new Error('Metadados da conta não encontrados.');
+    throw new Error(t('err.accountMetadataMissing'));
   }
   const accountData = userSnap.data() as UserAccount;
   const talk2tmId = accountData.talk2tmId;
@@ -944,7 +939,7 @@ export async function recoverPhoneIdentity(
   if (phoneHash && accountData.phoneHash && accountData.phoneHash !== phoneHash) {
     await signOut(auth).catch(() => {});
     syncAuthState(null);
-    throw new Error('O telefone informado não corresponde a este e-mail de recuperação.');
+    throw new Error(t('err.phoneEmailMismatch'));
   }
 
   // Se entrou usando a senha redefinida via link do Firebase, promove-a imediatamente para a chave derivada PBKDF2
@@ -1090,7 +1085,7 @@ export async function regenerateRecoveryCodeWithPin(
 ): Promise<{ recoveryCode: string }> {
   const identity = getAllLocalIdentities().find((a) => a.uid === uid);
   if (!identity || !identity.phoneHash) {
-    throw new Error('Esta conta não suporta alteração de chave de recuperação.');
+    throw new Error(t('err.recoveryChangeUnsupported'));
   }
 
   const oldAuthPassword = await unsealAuthSecretWithPin(identity, currentPin.trim());
@@ -1098,7 +1093,7 @@ export async function regenerateRecoveryCodeWithPin(
   if (customRecoveryCode && customRecoveryCode.trim()) {
     const check = validateRecoverySecret(customRecoveryCode, currentPin);
     if (!check.valid) {
-      throw new Error(check.error || 'Chave pessoal inválida.');
+      throw new Error(check.error || t('onboarding.errSecretInvalid'));
     }
     newRecoveryCode = customRecoveryCode.trim();
   } else {
@@ -1109,7 +1104,7 @@ export async function regenerateRecoveryCodeWithPin(
   await initFirebase();
   const auth = getFirebaseAuth();
   if (!auth) {
-    throw new Error('Serviço Firebase Auth indisponível.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   let user = auth.currentUser;
@@ -1150,13 +1145,13 @@ export async function updateLocalPinForAccount(
 ): Promise<void> {
   const identity = getAllLocalIdentities().find((a) => a.uid === uid);
   if (!identity) {
-    throw new Error('Conta local não encontrada.');
+    throw new Error(t('err.localAccountNotFound'));
   }
 
   const authPassword = await unsealAuthSecretWithPin(identity, currentPin.trim());
   const pinCheck = await validateLocalPin(newPin, true, uid);
   if (!pinCheck.valid) {
-    throw new Error(pinCheck.error || 'Novo PIN inválido.');
+    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
   }
 
   const sealed = await sealAuthSecretWithPin(authPassword, newPin.trim());
@@ -1184,13 +1179,13 @@ export async function associateRecoveryEmailWithPin(
 ): Promise<{ status: 'already_active' | 'verification_sent'; email: string }> {
   const emailCheck = validateOptionalRecoveryEmail(rawEmail);
   if (!emailCheck.valid || !emailCheck.email) {
-    throw new Error(emailCheck.error || 'Informe um endereço de e-mail válido.');
+    throw new Error(emailCheck.error || t('connect.emailValidRequired'));
   }
 
   const cleanEmail = emailCheck.email;
   const identity = getAllLocalIdentities().find((a) => a.uid === uid);
   if (!identity) {
-    throw new Error('Conta local não encontrada.');
+    throw new Error(t('err.localAccountNotFound'));
   }
 
   const authPassword = await unsealAuthSecretWithPin(identity, currentPin.trim());
@@ -1198,7 +1193,7 @@ export async function associateRecoveryEmailWithPin(
   await initFirebase();
   const auth = getFirebaseAuth();
   if (!auth) {
-    throw new Error('Serviço Firebase Auth indisponível.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   let user = auth.currentUser;
@@ -1234,15 +1229,15 @@ export async function associateRecoveryEmailWithPin(
     await verifyBeforeUpdateEmail(user, cleanEmail, { url: continueUrl });
   } catch (err: any) {
     if (err?.code === 'auth/email-already-in-use') {
-      throw new Error('Este e-mail já está associado a outra conta.');
+      throw new Error(t('err.emailAlreadyInUse'));
     }
     if (err?.code === 'auth/invalid-email') {
-      throw new Error('Endereço de e-mail inválido.');
+      throw new Error(t('err.invalidEmail'));
     }
     if (err?.code === 'auth/too-many-requests') {
-      throw new Error('Muitas tentativas seguidas. Aguarde alguns minutos e tente novamente.');
+      throw new Error(t('err.tooManyRequests'));
     }
-    throw new Error(err?.message || 'Não foi possível enviar o e-mail de confirmação.');
+    throw new Error(err?.message || t('err.sendConfirmEmailFailed'));
   }
 
   upsertLocalIdentity(
@@ -1262,13 +1257,13 @@ export async function associateRecoveryEmailWithPin(
 export async function sendPasswordResetForRecoveryEmail(rawEmail: string): Promise<{ email: string }> {
   const emailCheck = validateOptionalRecoveryEmail(rawEmail);
   if (!emailCheck.valid || !emailCheck.email) {
-    throw new Error(emailCheck.error || 'Informe o e-mail de recuperação associado à conta.');
+    throw new Error(emailCheck.error || t('connect.emailValidRequired'));
   }
 
   await initFirebase();
   const auth = getFirebaseAuth();
   if (!auth) {
-    throw new Error('Serviço Firebase Auth indisponível no momento.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   const continueUrl =
@@ -1281,12 +1276,12 @@ export async function sendPasswordResetForRecoveryEmail(rawEmail: string): Promi
     return { email: emailCheck.email };
   } catch (err: any) {
     if (err?.code === 'auth/invalid-email') {
-      throw new Error('Endereço de e-mail inválido.');
+      throw new Error(t('err.invalidEmail'));
     }
     if (err?.code === 'auth/too-many-requests') {
-      throw new Error('Muitos pedidos em sequência. Aguarde alguns minutos antes de tentar novamente.');
+      throw new Error(t('err.tooManyRequests'));
     }
-    throw new Error(err?.message || 'Não foi possível enviar o link de redefinição.');
+    throw new Error(err?.message || t('err.sendResetFailed'));
   }
 }
 
@@ -1297,12 +1292,12 @@ export async function verifyInAppPasswordResetCode(oobCode: string): Promise<str
   await initFirebase();
   const auth = getFirebaseAuth();
   if (!auth) {
-    throw new Error('Serviço Firebase Auth indisponível.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
   try {
     return await verifyPasswordResetCode(auth, oobCode);
   } catch {
-    throw new Error('O link de redefinição expirou ou já foi utilizado. Peça um novo link.');
+    throw new Error(t('err.resetLinkExpired'));
   }
 }
 
@@ -1316,19 +1311,19 @@ export async function completePasswordResetInApp(params: {
 }): Promise<LocalIdentity> {
   const recCheck = validateRecoverySecret(params.recoveryCode, params.newPin);
   if (!recCheck.valid) {
-    throw new Error(recCheck.error || 'Nova chave pessoal inválida.');
+    throw new Error(recCheck.error || t('onboarding.errSecretInvalid'));
   }
 
   const pinCheck = await validateLocalPin(params.newPin, true);
   if (!pinCheck.valid) {
-    throw new Error(pinCheck.error || 'PIN inválido.');
+    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
   }
 
   await initFirebase();
   const auth = getFirebaseAuth();
   const db = getFirebaseDB();
   if (!auth || !db) {
-    throw new Error('Serviço Firebase indisponível.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   const rawSecret = params.recoveryCode.trim();
@@ -1342,7 +1337,7 @@ export async function completePasswordResetInApp(params: {
 
   const userSnap = await getDoc(doc(db, 'users', user.uid));
   if (!userSnap.exists()) {
-    throw new Error('Metadados da conta não encontrados.');
+    throw new Error(t('err.accountMetadataMissing'));
   }
   const accountData = userSnap.data() as UserAccount;
   const talk2tmId = accountData.talk2tmId;
@@ -1385,7 +1380,7 @@ export async function completePasswordResetInApp(params: {
 export async function createTalk2TMIdentity(displayName: string): Promise<LocalIdentity> {
   const cleanName = displayName.trim().slice(0, 30);
   if (!cleanName) {
-    throw new Error('Nome de exibição é obrigatório.');
+    throw new Error(t('err.displayNameRequired'));
   }
 
   await initFirebase();
@@ -1396,7 +1391,7 @@ export async function createTalk2TMIdentity(displayName: string): Promise<LocalI
   const db = getFirebaseDB();
 
   if (!auth || !db) {
-    throw new Error('Serviço Firebase não inicializado.');
+    throw new Error(t('err.firebaseUnavailable'));
   }
 
   const userCredential = await createUserWithEmailAndPassword(auth, internalEmail, internalSecret);
@@ -1514,7 +1509,7 @@ export async function findProfileByTalk2TMId(talk2tmId: string): Promise<UserPro
 export async function findProfileByPhone(rawPhone: string): Promise<PhoneDirectoryEntry | null> {
   const phoneCheck = normalizePhoneNumber(rawPhone);
   if (!phoneCheck.valid || !phoneCheck.e164) {
-    throw new Error(phoneCheck.error || 'Número de telefone inválido.');
+    throw new Error(phoneCheck.error || t('onboarding.errPhoneInvalid'));
   }
 
   const { db, configured } = await initFirebase();

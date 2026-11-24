@@ -1,4 +1,5 @@
 import { ChatConfig } from './types';
+import type { LanguagePreference } from './i18n/types';
 
 /**
  * Talk2TM — Configurações e Credenciais
@@ -62,6 +63,7 @@ export interface AppSettings {
   sessionTimeoutMinutes: number; // 0 = desativado, ou 1, 5, 15, 30, 60
   inactivityLockSeconds: number; // 0 = desativado, 60 = 1 min, 300 = 5 min (padrão), etc.
   appearance?: AppAppearanceMode; // 'talk2tm' (padrão) ou 'calculator' (modo discreto local)
+  language?: LanguagePreference; // 'auto' (padrão) ou 'pt' | 'en' | 'fr' | 'es' (apenas neste dispositivo)
   version?: number;
 }
 
@@ -69,11 +71,19 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sessionTimeoutMinutes: 5, // Padrão pré-definido de 5 minutos
   inactivityLockSeconds: 300, // Padrão pré-definido de 5 minutos (300 segundos sem teclar bloqueia)
   appearance: 'talk2tm', // Entrada padrão direta Talk2TM
+  language: 'auto', // Detecção automática do idioma do dispositivo por padrão
   version: 2,
 };
 
 export function normalizeAppearanceMode(value: unknown): AppAppearanceMode {
   return value === 'calculator' ? 'calculator' : 'talk2tm';
+}
+
+export function normalizeSettingsLanguage(value: unknown): LanguagePreference {
+  if (value === 'auto' || value === 'pt' || value === 'en' || value === 'fr' || value === 'es') {
+    return value;
+  }
+  return 'auto';
 }
 
 export function loadSettings(): AppSettings {
@@ -89,6 +99,7 @@ export function loadSettings(): AppSettings {
           sessionTimeoutMinutes: typeof parsed.sessionTimeoutMinutes === 'number' && parsed.sessionTimeoutMinutes > 0 ? parsed.sessionTimeoutMinutes : DEFAULT_SETTINGS.sessionTimeoutMinutes,
           inactivityLockSeconds: DEFAULT_SETTINGS.inactivityLockSeconds,
           appearance: normalizeAppearanceMode(parsed.appearance),
+          language: normalizeSettingsLanguage(parsed.language),
           version: 2,
         };
         saveSettings(migrated);
@@ -99,6 +110,7 @@ export function loadSettings(): AppSettings {
         sessionTimeoutMinutes: typeof parsed.sessionTimeoutMinutes === 'number' ? parsed.sessionTimeoutMinutes : DEFAULT_SETTINGS.sessionTimeoutMinutes,
         inactivityLockSeconds: typeof parsed.inactivityLockSeconds === 'number' ? parsed.inactivityLockSeconds : DEFAULT_SETTINGS.inactivityLockSeconds,
         appearance: normalizeAppearanceMode(parsed.appearance),
+        language: normalizeSettingsLanguage(parsed.language),
         version: 2,
       };
     }
@@ -115,6 +127,7 @@ export function saveSettings(settings: AppSettings): void {
     const payload: AppSettings = {
       ...settings,
       appearance: normalizeAppearanceMode(settings.appearance),
+      language: normalizeSettingsLanguage(settings.language),
       version: settings.version ?? DEFAULT_SETTINGS.version,
     };
     localStorage.setItem('ttm_settings', JSON.stringify(payload));

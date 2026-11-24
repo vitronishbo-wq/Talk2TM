@@ -33,6 +33,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { Conversation, ConversationInvite, ConversationMessage, Message, PhoneDirectoryEntry, Room, UserProfile } from '../types';
+import { t } from '../i18n';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
 import { maxIsoDate, selectLatestMessages } from '../utils/unread';
 import { hashPhoneNumber, normalizePhoneNumber } from '../utils/phone';
@@ -597,7 +598,7 @@ export async function joinFirestoreRoom(
       return {
         success: false,
         room: data,
-        error: 'Sala cheia: limite de 2 participantes atingido.',
+        error: t('err.roomFull'),
       };
     };
 
@@ -627,7 +628,7 @@ export async function sendFirestoreMessage(msg: Message): Promise<void> {
   // Layer 2: Explicit guard check — proceed ONLY if auth.currentUser != null and auth.currentUser.isAnonymous === false.
   if (!isAuthValidAndNonAnonymous()) {
     console.warn('Talk2TM [Layer 2 Guard]: Escrita rejeitada em sendFirestoreMessage — usuário não autenticado ou anônimo.');
-    throw new Error('Operação cancelada: requer autenticação não-anônima ativa.');
+    throw new Error(t('err.authNonAnonRequired'));
   }
 
   const authUser = firebaseAuth?.currentUser;
@@ -850,7 +851,7 @@ export async function sendFirestoreConversationMessage(msg: Message | Conversati
 
   if (!isAuthValidAndNonAnonymous()) {
     console.warn('Talk2TM [Guard]: Escrita rejeitada em sendFirestoreConversationMessage — usuário não autenticado ou anônimo.');
-    throw new Error('Operação cancelada: requer autenticação não-anônima ativa.');
+    throw new Error(t('err.authNonAnonRequired'));
   }
 
   const authUser = firebaseAuth?.currentUser;
@@ -858,7 +859,7 @@ export async function sendFirestoreConversationMessage(msg: Message | Conversati
   const conversationId = ('conversationId' in msg && msg.conversationId) ? msg.conversationId : ('room' in msg ? msg.room : '');
 
   if (!conversationId) {
-    throw new Error('conversationId obrigatório para enviar mensagem de conversa.');
+    throw new Error(t('err.conversationIdRequired'));
   }
 
   const docRef = doc(db, 'conversations', conversationId, 'messages', msg.messageId);
@@ -1037,7 +1038,7 @@ export async function getOrCreateConversation(
   userB: { uid: string; talk2tmId: string; displayName: string }
 ): Promise<Conversation> {
   if (!userA.uid || !userB.uid || userA.uid === userB.uid) {
-    throw new Error('Conversa bilateral exige dois participantes distintos.');
+    throw new Error(t('err.bilateralNeedsTwo'));
   }
 
   const { db } = await initFirebase();
@@ -1123,7 +1124,7 @@ async function sendInviteToTargetProfile(
   targetProfile: UserProfile
 ): Promise<{ status: 'invited' | 'already_connected'; invite?: ConversationInvite; conversation?: Conversation }> {
   if (targetProfile.uid === fromUser.uid) {
-    throw new Error('Não é possível convidar a própria conta.');
+    throw new Error(t('err.cannotInviteSelf'));
   }
 
   const sortedUids = [fromUser.uid, targetProfile.uid].sort();
@@ -1234,12 +1235,12 @@ export async function sendConversationInviteByPhone(
 }> {
   const phoneCheck = normalizePhoneNumber(rawTargetPhone);
   if (!phoneCheck.valid || !phoneCheck.e164) {
-    throw new Error(phoneCheck.error || 'Número de telefone inválido.');
+    throw new Error(phoneCheck.error || t('onboarding.errPhoneInvalid'));
   }
 
   const { db, configured } = await initFirebase();
   if (!configured || !db || !isAuthValidAndNonAnonymous()) {
-    throw new Error('Sessão autenticada necessária para procurar contactos e enviar convite.');
+    throw new Error(t('err.authRequiredForContacts'));
   }
 
   const phoneHash = await hashPhoneNumber(phoneCheck.e164);
@@ -1254,10 +1255,10 @@ export async function sendConversationInviteByPhone(
   }
 
   if (!directoryEntry || directoryEntry.active === false) {
-    throw new Error('Nenhum utilizador encontrado com este número.');
+    throw new Error(t('err.phoneNotFound'));
   }
   if (directoryEntry.uid === fromUser.uid) {
-    throw new Error('Não é possível enviar convite para o seu próprio número.');
+    throw new Error(t('err.cannotInviteSelfPhone'));
   }
 
   // Confirma perfil ativo em userProfiles (mantém consistência de regras)
@@ -1272,7 +1273,7 @@ export async function sendConversationInviteByPhone(
   }
 
   if (!targetProfile || targetProfile.active === false) {
-    throw new Error('Contacto indisponível no momento.');
+    throw new Error(t('err.contactUnavailable'));
   }
 
   const res = await sendInviteToTargetProfile(db, fromUser, targetProfile);
@@ -1291,15 +1292,15 @@ export async function sendConversationInvite(
 ): Promise<{ status: 'invited' | 'already_connected'; invite?: ConversationInvite; conversation?: Conversation }> {
   const cleanTargetId = targetTalk2tmId.trim().toUpperCase();
   if (!/^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(cleanTargetId)) {
-    throw new Error('Código inválido. Use o formato TM-XXXX-XXXX.');
+    throw new Error(t('err.invalidCodeFormat'));
   }
   if (cleanTargetId === fromUser.talk2tmId) {
-    throw new Error('Não é possível enviar convite para o próprio código.');
+    throw new Error(t('err.cannotInviteSelfCode'));
   }
 
   const { db, configured } = await initFirebase();
   if (!configured || !db || !isAuthValidAndNonAnonymous()) {
-    throw new Error('Sessão autenticada necessária para enviar convite.');
+    throw new Error(t('err.authRequiredForInvite'));
   }
 
   let targetProfile: UserProfile | null = null;
@@ -1313,7 +1314,7 @@ export async function sendConversationInvite(
   }
 
   if (!targetProfile || targetProfile.active === false) {
-    throw new Error('Código Talk2TM não encontrado.');
+    throw new Error(t('err.codeNotFound'));
   }
 
   return await sendInviteToTargetProfile(db, fromUser, targetProfile);
@@ -1328,7 +1329,7 @@ export async function acceptConversationInvite(
 ): Promise<Conversation> {
   const { db, configured } = await initFirebase();
   if (!configured || !db || !isAuthValidAndNonAnonymous()) {
-    throw new Error('Autenticação ativa necessária para aceitar o convite.');
+    throw new Error(t('err.authRequiredForAccept'));
   }
 
   const now = new Date().toISOString();

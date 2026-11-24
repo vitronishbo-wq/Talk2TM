@@ -7,6 +7,7 @@
  */
 
 import { getUserByPin, AllowedUser } from '../config';
+import { t } from '../i18n';
 
 const DEFAULT_ADMIN_ROUTE_TRIGGER = '*123456789*#';
 
@@ -64,6 +65,7 @@ export class MobileCalculator {
   private displayEl!: HTMLElement;
   private expressionEl!: HTMLElement;
   private rootEl!: HTMLElement;
+  private topLabelEl!: HTMLElement;
   private manualBtnEl!: HTMLButtonElement;
   private hasUnreadDotState: boolean = false;
   private isVisible: boolean = true;
@@ -84,14 +86,14 @@ export class MobileCalculator {
     const topBar = document.createElement('div');
     topBar.className = 'calc-topbar';
 
-    const topLabel = document.createElement('span');
-    topLabel.className = 'calc-label';
-    topLabel.textContent = 'Calculadora';
+    this.topLabelEl = document.createElement('span');
+    this.topLabelEl.className = 'calc-label';
+    this.topLabelEl.textContent = t('calc.label');
 
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
     manualBtn.className = 'calc-manual-btn';
-    manualBtn.title = 'Modo Graus / Radianos';
+    manualBtn.title = t('calc.degTitle');
 
     const degText = document.createElement('span');
     degText.textContent = 'DEG';
@@ -110,7 +112,7 @@ export class MobileCalculator {
     });
     this.manualBtnEl = manualBtn;
 
-    topBar.appendChild(topLabel);
+    topBar.appendChild(this.topLabelEl);
     topBar.appendChild(manualBtn);
     this.rootEl.appendChild(topBar);
 
@@ -462,8 +464,18 @@ export class MobileCalculator {
     return this.hasUnreadDotState;
   }
 
+  public refreshLocale(): void {
+    if (this.topLabelEl) {
+      this.topLabelEl.textContent = t('calc.label');
+    }
+    if (this.manualBtnEl) {
+      this.manualBtnEl.title = t('calc.degTitle');
+    }
+  }
+
   public show(): void {
     this.clear();
+    this.refreshLocale();
     this.isVisible = true;
     this.rootEl.style.display = 'flex';
   }

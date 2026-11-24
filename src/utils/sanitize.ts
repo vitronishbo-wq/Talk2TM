@@ -1,4 +1,5 @@
 import { CONFIG } from '../config';
+import { getCurrentLocale, LOCALE_REGISTRY, t, type SupportedLocale } from '../i18n';
 
 /**
  * Sanitiza e normaliza o nome da sala (Camada 03.1)
@@ -33,17 +34,17 @@ export function sanitizeName(raw: string): string {
  */
 export function sanitizeMessageText(raw: string): { valid: boolean; text: string; error?: string } {
   if (!raw) {
-    return { valid: false, text: '', error: 'Mensagem vazia' };
+    return { valid: false, text: '', error: t('chat.msgEmpty') };
   }
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
-    return { valid: false, text: '', error: 'Mensagem não pode conter apenas espaços' };
+    return { valid: false, text: '', error: t('chat.msgWhitespace') };
   }
   if (trimmed.length > CONFIG.MESSAGE_MAX_LENGTH) {
     return {
       valid: false,
       text: '',
-      error: `Mensagem excede limite de ${CONFIG.MESSAGE_MAX_LENGTH} caracteres (atual: ${trimmed.length})`,
+      error: t('chat.msgTooLong', { max: CONFIG.MESSAGE_MAX_LENGTH, current: trimmed.length }),
     };
   }
   // Remove caracteres nulos indesejados mas preserva quebras de linha e caracteres válidos
@@ -63,13 +64,53 @@ export function generateId(prefix = 'id'): string {
   return `${prefix}_${timestamp}_${randomPart}`;
 }
 
+function capitalizeWord(value: string): string {
+  const clean = value.trim().replace(/\.$/, '');
+  if (!clean) return '';
+  return clean.charAt(0).toUpperCase() + clean.slice(1);
+}
+
+function formatDateNumeric(d: Date, locale: SupportedLocale): string {
+  const tag = LOCALE_REGISTRY[locale].intlTag;
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function') {
+      return new Intl.DateTimeFormat(tag, {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      }).format(d);
+    }
+  } catch {
+    // Fallback nativo abaixo
+  }
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 /**
- * Formata hora para visualização linear mínima
+ * Formata hora para visualização linear mínima usando Intl.DateTimeFormat com fallback nativo.
  */
-export function formatTime(isoString: string): string {
+export function formatTime(isoString: string, localeOverride?: SupportedLocale): string {
   try {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return '--:--';
+    const targetLocale = localeOverride ?? getCurrentLocale();
+    const tag = LOCALE_REGISTRY[targetLocale].intlTag;
+
+    if (typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function') {
+      try {
+        return new Intl.DateTimeFormat(tag, {
+          hour: '2-digit',
+          minute: '2-digit',
+          hourCycle: 'h23',
+        }).format(d);
+      } catch {
+        // Fallback nativo abaixo
+      }
+    }
+
     const hours = String(d.getHours()).padStart(2, '0');
     const minutes = String(d.getMinutes()).padStart(2, '0');
     return `${hours}:${minutes}`;
@@ -94,34 +135,71 @@ export function getLocalDateKey(isoString: string): string {
   }
 }
 
-const WEEKDAYS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'] as const;
+function formatRelativeDayLabel(offset: 0 | -1, locale: SupportedLocale): string {
+  const tag = LOCALE_REGISTRY[locale].intlTag;
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function') {
+      const rtf = new Intl.RelativeTimeFormat(tag, { numeric: 'auto' });
+      const formatted = capitalizeWord(rtf.format(offset, 'day'));
+      if (formatted && !/\d/.test(formatted)) {
+        return formatted;
+      }
+    }
+  } catch {
+    // Fallback nativo abaixo
+  }
+  return offset === 0 ? t('date.today', undefined, locale) : t('date.yesterday', undefined, locale);
+}
+
+function formatShortWeekday(d: Date, locale: SupportedLocale): string {
+  const tag = LOCALE_REGISTRY[locale].intlTag;
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function') {
+      const weekday = capitalizeWord(
+        new Intl.DateTimeFormat(tag, { weekday: 'short' }).format(d)
+      );
+      if (weekday) return weekday;
+    }
+  } catch {
+    // Fallback nativo abaixo
+  }
+  const list = t('date.weekdays', undefined, locale).split(',');
+  return list[d.getDay()] ?? '';
+}
 
 /**
- * Formata rótulo discreto para separador de dia ("Hoje · 15/11/2026", "Ontem · 14/11/2026", "Sex · 13/11/2026")
+ * Formata rótulo discreto para separador de dia usando Intl.RelativeTimeFormat e Intl.DateTimeFormat
+ * com fallback nativo (ex.: "Hoje · 15/11/2026", "Today · 11/15/2026", "Hier · 14/11/2026").
  */
-export function formatDateSeparatorLabel(isoString: string, referenceNow: Date = new Date()): string {
+export function formatDateSeparatorLabel(
+  isoString: string,
+  referenceNow: Date = new Date(),
+  localeOverride?: SupportedLocale
+): string {
   try {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return '';
 
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    const dateStr = `${dd}/${mm}/${yyyy}`;
+    const targetLocale = localeOverride ?? getCurrentLocale();
+    const dateStr = formatDateNumeric(d, targetLocale);
 
     const targetKey = getLocalDateKey(isoString);
     const todayKey = getLocalDateKey(referenceNow.toISOString());
 
-    const yesterday = new Date(referenceNow.getFullYear(), referenceNow.getMonth(), referenceNow.getDate() - 1);
+    const yesterday = new Date(
+      referenceNow.getFullYear(),
+      referenceNow.getMonth(),
+      referenceNow.getDate() - 1
+    );
     const yesterdayKey = getLocalDateKey(yesterday.toISOString());
 
     if (targetKey === todayKey) {
-      return `Hoje · ${dateStr}`;
+      return `${formatRelativeDayLabel(0, targetLocale)} · ${dateStr}`;
     }
     if (targetKey === yesterdayKey) {
-      return `Ontem · ${dateStr}`;
+      return `${formatRelativeDayLabel(-1, targetLocale)} · ${dateStr}`;
     }
-    const weekday = WEEKDAYS_PT[d.getDay()];
+    const weekday = formatShortWeekday(d, targetLocale);
     return `${weekday} · ${dateStr}`;
   } catch {
     return '';
@@ -129,18 +207,14 @@ export function formatDateSeparatorLabel(isoString: string, referenceNow: Date =
 }
 
 /**
- * Formata data e hora completas no fuso local (ex: "13/11/2026 08:43")
+ * Formata data e hora completas no fuso local e idioma ativo (ex: "13/11/2026 08:43")
  */
-export function formatFullDateTime(isoString: string): string {
+export function formatFullDateTime(isoString: string, localeOverride?: SupportedLocale): string {
   try {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return '';
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    const hh = String(d.getHours()).padStart(2, '0');
-    const min = String(d.getMinutes()).padStart(2, '0');
-    return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+    const targetLocale = localeOverride ?? getCurrentLocale();
+    return `${formatDateNumeric(d, targetLocale)} ${formatTime(isoString, targetLocale)}`;
   } catch {
     return '';
   }

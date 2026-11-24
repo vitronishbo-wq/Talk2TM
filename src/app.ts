@@ -13,8 +13,10 @@ import {
   ACCESS_CONFIG,
   AppSettings,
   loadSettings,
+  normalizeSettingsLanguage,
   saveSettings,
 } from './config';
+import { initI18n, prefetchLocaleChunks, setAppLocale, t } from './i18n';
 import { Conversation, ConversationInvite, ConnectionState, Message, Room, UserSession } from './types';
 import { generateId, sanitizeMessageText } from './utils/sanitize';
 import {
@@ -135,7 +137,7 @@ export function verifyPassword(inputPassword: string): AuthVerificationResult {
   if (!cleanPassword) {
     return {
       valid: false,
-      error: 'Por favor, digite a senha de acesso.',
+      error: t('app.authEmpty'),
     };
   }
 
@@ -157,7 +159,7 @@ export function verifyPassword(inputPassword: string): AuthVerificationResult {
 
   return {
     valid: false,
-    error: 'Senha inválida. Acesso não autorizado.',
+    error: t('app.authInvalid'),
   };
 }
 
@@ -288,6 +290,7 @@ export class Talk2TMApp {
     this.setupNetworkMonitoring();
     this.setupActivityListeners();
     this.registerServiceWorker();
+    prefetchLocaleChunks();
   }
 
   private async openAdminOverlay(): Promise<void> {
@@ -320,7 +323,7 @@ export class Talk2TMApp {
       if (getMonitorContext()) {
         this.startBackgroundMonitor(true);
       }
-      this.ui.showTemporaryNotice('Não foi possível abrir o módulo administrativo.');
+      this.ui.showTemporaryNotice(t('app.adminLoadFailed'));
     }
   }
 
@@ -398,11 +401,11 @@ export class Talk2TMApp {
       const hasSavedVault = getAllLocalIdentities().length > 0;
       let errMsg: string;
       if (isTmInput) {
-        errMsg = 'O acesso neste aparelho usa o PIN numérico (4 a 8 dígitos). Se mudou de aparelho, toque em [entrar noutro aparelho / recuperar].';
+        errMsg = t('pass.errNeedNumericPin');
       } else if (!hasSavedVault) {
-        errMsg = 'Este navegador ou modo anónimo ainda não tem nenhuma conta guardada. Se já tem conta, toque em [entrar noutro aparelho / recuperar].';
+        errMsg = t('pass.errNoSavedVault');
       } else {
-        errMsg = 'PIN incorreto neste aparelho. Tente novamente ou toque em [entrar noutro aparelho / recuperar].';
+        errMsg = t('pass.errWrongPin');
       }
       this.ui.showPassError(errMsg);
       this.ui.showTemporaryNotice(errMsg);
@@ -631,7 +634,7 @@ export class Talk2TMApp {
     this.leaveSession();
     this.stopBackgroundMonitor();
     this.ui.showCalculatorView();
-    this.ui.showTemporaryNotice('Esta conta foi desactivada pelo administrador.');
+    this.ui.showTemporaryNotice(t('app.accountSuspended'));
   }
 
   private attachOwnProfileSuspensionGuard(talk2tmId?: string): void {
@@ -789,7 +792,7 @@ export class Talk2TMApp {
 
     const sanitized = sanitizeMessageText(rawText);
     if (!sanitized.valid) {
-      this.ui.showTemporaryNotice(sanitized.error || 'Mensagem inválida');
+      this.ui.showTemporaryNotice(sanitized.error || t('chat.msgInvalid'));
       return;
     }
 
@@ -888,13 +891,20 @@ export class Talk2TMApp {
   }
 
   public updateSettings(newSettings: AppSettings): void {
-    this.appSettings = newSettings;
-    saveSettings(newSettings);
+    const normalizedLanguage = normalizeSettingsLanguage(newSettings.language);
+    const nextSettings: AppSettings = { ...newSettings, language: normalizedLanguage };
+    this.appSettings = nextSettings;
+    saveSettings(nextSettings);
 
     if (this.currentSession) {
       this.startSessionTimeout();
       this.resetInactivityTimer();
     }
+
+    void setAppLocale(normalizedLanguage).then(() => {
+      this.ui.refreshLocale();
+      this.ui.showTemporaryNotice(t('settings.updated'));
+    });
   }
 
   private scheduleOutboxRetry(): void {
@@ -1609,7 +1619,7 @@ export class Talk2TMApp {
         } catch (err: any) {
           this.ui.showRecoveryView();
           this.ui.showTemporaryNotice(
-            err?.message || 'Link de redefinição inválido ou expirado. Peça um novo link.'
+            err?.message || t('recovery.errOobInvalid')
           );
           return;
         }
@@ -1827,7 +1837,7 @@ export class Talk2TMApp {
 
   public async handleRegenerateRecoveryCode(currentPin: string, customRecoveryCode?: string): Promise<string> {
     if (!this.currentSession) {
-      throw new Error('Sessão ativa necessária.');
+      throw new Error(t('app.activeSessionRequired'));
     }
     const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
     const res = await regenerateRecoveryCodeWithPin(uid, currentPin, customRecoveryCode);
@@ -1839,7 +1849,7 @@ export class Talk2TMApp {
     email: string
   ): Promise<{ status: 'already_active' | 'verification_sent'; email: string }> {
     if (!this.currentSession) {
-      throw new Error('Sessão ativa necessária.');
+      throw new Error(t('app.activeSessionRequired'));
     }
     const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
     const res = await associateRecoveryEmailWithPin(uid, currentPin, email);
@@ -1855,7 +1865,7 @@ export class Talk2TMApp {
 
   public async handleChangeLocalPin(currentPin: string, newPin: string): Promise<void> {
     if (!this.currentSession) {
-      throw new Error('Sessão ativa necessária.');
+      throw new Error(t('app.activeSessionRequired'));
     }
     const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
     await updateLocalPinForAccount(uid, currentPin, newPin);
@@ -2044,7 +2054,7 @@ export class Talk2TMApp {
 
   private async handleSendInvite(targetPhone: string): Promise<void> {
     if (!this.currentSession || !this.currentSession.talk2tmId) {
-      throw new Error('Identidade necessária para enviar convite.');
+      throw new Error(t('err.identityNeededInvite'));
     }
     if (!isAuthValidAndNonAnonymous()) {
       await restoreLocalIdentity();
@@ -2060,19 +2070,19 @@ export class Talk2TMApp {
       targetPhone
     );
     if (res.status === 'already_connected' && res.conversation) {
-      this.ui.showConnectFeedback('Conexão pronta! Abrindo conversa...');
+      this.ui.showConnectFeedback(t('connect.readyOpening'));
       await this.connectToConversation(res.conversation.conversationId);
     } else {
       if (res.invite?.inviteId && res.targetDisplayName) {
         this.ui.cacheOutgoingInviteTargetName(res.invite.inviteId, res.targetDisplayName);
       }
-      this.ui.showConnectFeedback(`Convite enviado para ${res.targetDisplayName}. Aguardando aceitação.`);
+      this.ui.showConnectFeedback(t('connect.inviteSentTo', { name: res.targetDisplayName || '' }));
     }
   }
 
   private async handleAcceptInvite(invite: ConversationInvite): Promise<void> {
     if (!this.currentSession || !this.currentSession.talk2tmId) {
-      throw new Error('Identidade Talk2TM necessária para aceitar convite.');
+      throw new Error(t('err.identityNeededAccept'));
     }
     if (!isAuthValidAndNonAnonymous()) {
       await restoreLocalIdentity();
@@ -2091,12 +2101,12 @@ export class Talk2TMApp {
 
   private async handleDeclineInvite(inviteId: string): Promise<void> {
     await declineConversationInvite(inviteId);
-    this.ui.showConnectFeedback('Convite recusado.');
+    this.ui.showConnectFeedback(t('connect.inviteDeclined'));
   }
 
   private async handleCancelInvite(inviteId: string): Promise<void> {
     await cancelConversationInvite(inviteId);
-    this.ui.showConnectFeedback('Convite cancelado.');
+    this.ui.showConnectFeedback(t('connect.inviteCancelled'));
   }
 
   /**
@@ -2199,6 +2209,9 @@ export class Talk2TMApp {
 export async function startApp(container?: HTMLElement): Promise<Talk2TMApp> {
   const root = container || document.getElementById('root');
   if (!root) throw new Error('Elemento #root não encontrado no DOM');
+
+  const savedSettings = loadSettings();
+  await initI18n(savedSettings.language);
 
   const app = new Talk2TMApp(root);
   await app.init();

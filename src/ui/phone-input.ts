@@ -14,9 +14,11 @@ import {
   detectSuggestedCountry,
   findCountryByE164,
   getCountryByIso,
+  getCountryDisplayName,
   normalizePhoneNumber,
   searchPhoneCountries,
 } from '../utils/phone';
+import { t } from '../i18n';
 
 export interface PhoneInputFieldOptions {
   id?: string;
@@ -37,6 +39,7 @@ export interface PhoneInputField {
   validate: () => PhoneNormalizationResult;
   getValue: () => string;
   getE164OrRaw: () => string;
+  refreshLocale: () => void;
   reset: () => void;
 }
 
@@ -82,11 +85,18 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
   pickerButton.appendChild(caret);
 
   const syncBadge = () => {
+    const localizedName = getCountryDisplayName(selectedCountry);
     badge.textContent = `${selectedCountry.flag} ${selectedCountry.dialCode}`;
-    pickerButton.title = `${selectedCountry.name} (${selectedCountry.dialCode}) — tocar para mudar`;
+    pickerButton.title = t('phone.pickerTitle', {
+      country: localizedName,
+      dialCode: selectedCountry.dialCode,
+    });
     pickerButton.setAttribute(
       'aria-label',
-      `País: ${selectedCountry.name} ${selectedCountry.dialCode}. Tocar para pesquisar país ou indicativo.`
+      t('phone.pickerAria', {
+        country: localizedName,
+        dialCode: selectedCountry.dialCode,
+      })
     );
   };
 
@@ -101,7 +111,7 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
     options.variant === 'compact'
       ? 'ttm-connect-input ttm-connect-input-phone ttm-phone-input'
       : 'ttm-input ttm-input-left ttm-phone-input';
-  input.placeholder = options.placeholder || 'Número de telefone';
+  input.placeholder = options.placeholder || t('phone.placeholder');
   input.maxLength = 24;
   input.autocomplete = options.autocomplete || 'tel';
 
@@ -134,7 +144,7 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
     backdrop.className = 'ttm-country-modal-backdrop';
     backdrop.setAttribute('role', 'dialog');
     backdrop.setAttribute('aria-modal', 'true');
-    backdrop.setAttribute('aria-label', 'Selecionar país ou território');
+    backdrop.setAttribute('aria-label', t('phone.modalAria'));
 
     const sheet = document.createElement('div');
     sheet.className = 'ttm-country-modal';
@@ -144,12 +154,12 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
 
     const heading = document.createElement('strong');
     heading.className = 'ttm-country-modal-title';
-    heading.textContent = `País / Indicativo (${PHONE_COUNTRIES.length})`;
+    heading.textContent = t('phone.modalTitle', { count: PHONE_COUNTRIES.length });
 
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.className = 'ttm-btn-mini';
-    closeBtn.textContent = '[fechar]';
+    closeBtn.textContent = t('common.close');
     closeBtn.addEventListener('click', () => {
       closeModal();
       pickerButton.focus();
@@ -161,7 +171,7 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
     const searchInput = document.createElement('input');
     searchInput.type = 'search';
     searchInput.className = 'ttm-input ttm-input-left ttm-country-search';
-    searchInput.placeholder = 'Pesquisar país ou indicativo (ex.: Namíbia, +264, +1)';
+    searchInput.placeholder = t('phone.searchPlaceholder');
     searchInput.autocomplete = 'off';
     searchInput.autocapitalize = 'none';
 
@@ -180,7 +190,7 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
 
       const nameEl = document.createElement('span');
       nameEl.className = 'ttm-country-item-name';
-      nameEl.textContent = country.name;
+      nameEl.textContent = getCountryDisplayName(country);
 
       const isoEl = document.createElement('span');
       isoEl.className = 'ttm-country-item-iso';
@@ -225,10 +235,10 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
           priorityList.push(getCountryByIso(iso));
         }
 
-        appendSectionLabel('Sugeridos e frequentes');
+        appendSectionLabel(t('phone.suggestedSection'));
         priorityList.forEach((c) => listEl.appendChild(createCountryRow(c)));
 
-        appendSectionLabel(`Todos os países e territórios (${PHONE_COUNTRIES.length})`);
+        appendSectionLabel(t('phone.allSection', { count: PHONE_COUNTRIES.length }));
         PHONE_COUNTRIES.forEach((c) => listEl.appendChild(createCountryRow(c)));
         return;
       }
@@ -237,7 +247,7 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
       if (matches.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'ttm-country-empty';
-        empty.textContent = 'Nenhum país ou território encontrado.';
+        empty.textContent = t('phone.noResults');
         listEl.appendChild(empty);
         return;
       }
@@ -314,6 +324,13 @@ export function createPhoneInputField(options: PhoneInputFieldOptions = {}): Pho
       if (!raw) return '';
       const res = normalizePhoneNumber(raw, selectedCountry.iso);
       return res.valid && res.e164 ? res.e164 : raw;
+    },
+    refreshLocale: () => {
+      syncBadge();
+      if (!options.placeholder) {
+        input.placeholder = t('phone.placeholder');
+      }
+      emitChange();
     },
     reset: () => {
       closeModal();

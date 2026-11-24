@@ -10,6 +10,7 @@
  */
 
 import { RAW_PHONE_TERRITORIES } from './phone-metadata';
+import { getCurrentLocale, getLocalizedCountryName, LOCALE_REGISTRY, t, type SupportedLocale } from '../i18n';
 
 export interface PhoneCountry {
   iso: string;
@@ -322,12 +323,23 @@ export function getCountriesByDialCode(dialCode?: string): readonly PhoneCountry
   return (COMPILED_BY_CC.get(clean) ?? []).map((t) => t.country);
 }
 
+export function getCountryDisplayName(
+  country: Pick<PhoneCountry, 'iso' | 'name'>,
+  localeOverride?: SupportedLocale
+): string {
+  return getLocalizedCountryName(country.iso, localeOverride, country.name);
+}
+
 /**
- * Pesquisa países/territórios por nome (sem acentos), ISO ou indicativo (+264, 264, +1, etc.).
+ * Pesquisa países/territórios por nome localizado (Intl.DisplayNames) ou nome base, ISO ou indicativo (+264, 264, +1, etc.).
  * Quando pesquisa por indicativo exato (ex.: +1 ou 1), coloca os resultados exatos primeiro
  * e ordena o país principal antes dos territórios partilhados.
  */
-export function searchPhoneCountries(query: string): readonly PhoneCountry[] {
+export function searchPhoneCountries(
+  query: string,
+  localeOverride?: SupportedLocale
+): readonly PhoneCountry[] {
+  const activeLocale = localeOverride ?? getCurrentLocale();
   const raw = (query || '').trim();
   if (!raw) return PHONE_COUNTRIES;
 
@@ -339,8 +351,12 @@ export function searchPhoneCountries(query: string): readonly PhoneCountry[] {
     if (isDialQuery) {
       return c.cc.startsWith(digitsOnly) || c.dialCode.includes(digitsOnly);
     }
-    return c.searchKey.includes(norm);
+    if (c.searchKey.includes(norm)) return true;
+    const localized = normalizeSearchText(getCountryDisplayName(c, activeLocale));
+    return localized.includes(norm);
   });
+
+  const intlTag = LOCALE_REGISTRY[activeLocale].intlTag;
 
   return [...matches].sort((a, b) => {
     if (isDialQuery) {
@@ -350,11 +366,17 @@ export function searchPhoneCountries(query: string): readonly PhoneCountry[] {
       if (a.cc !== b.cc) return a.cc.localeCompare(b.cc);
       if (a.main !== b.main) return a.main ? -1 : 1;
     } else {
-      const aStarts = normalizeSearchText(a.name).startsWith(norm) || a.iso.toLowerCase() === norm;
-      const bStarts = normalizeSearchText(b.name).startsWith(norm) || b.iso.toLowerCase() === norm;
+      const aName = getCountryDisplayName(a, activeLocale);
+      const bName = getCountryDisplayName(b, activeLocale);
+      const aStarts = normalizeSearchText(aName).startsWith(norm) || a.iso.toLowerCase() === norm;
+      const bStarts = normalizeSearchText(bName).startsWith(norm) || b.iso.toLowerCase() === norm;
       if (aStarts !== bStarts) return aStarts ? -1 : 1;
+      return aName.localeCompare(bName, intlTag);
     }
-    return a.name.localeCompare(b.name, 'pt');
+    return getCountryDisplayName(a, activeLocale).localeCompare(
+      getCountryDisplayName(b, activeLocale),
+      intlTag
+    );
   });
 }
 
@@ -506,7 +528,7 @@ export function normalizePhoneNumber(
 ): PhoneNormalizationResult {
   const input = (raw || '').trim();
   if (!input) {
-    return { valid: false, error: 'Informe o número de telefone.' };
+    return { valid: false, error: t('phone.errEmpty') };
   }
 
   const defaultTerritory = resolveDefaultTerritory(defaultCountryOrIso);
@@ -522,7 +544,7 @@ export function normalizePhoneNumber(
     if (!/^[1-9]\d{4,14}$/.test(digitsAfterPlus)) {
       return {
         valid: false,
-        error: 'Número internacional inválido. Verifique o indicativo e os dígitos.',
+        error: t('phone.errInvalidIntl'),
       };
     }
 
@@ -530,7 +552,7 @@ export function normalizePhoneNumber(
     if (!cc) {
       return {
         valid: false,
-        error: 'Indicativo internacional não reconhecido.',
+        error: t('phone.errUnknownCode'),
       };
     }
 
@@ -575,20 +597,23 @@ export function normalizePhoneNumber(
 
     return {
       valid: false,
-      error: `${resolved.country.name} (${resolved.country.dialCode}): número inválido para o plano de numeração.`,
+      error: t('phone.errPlanInvalid', {
+        country: getCountryDisplayName(resolved.country),
+        dialCode: resolved.country.dialCode,
+      }),
     };
   }
 
   // 2. Número digitado sem '+' -> usa país/território selecionado
   const digits = cleaned.replace(/\D/g, '');
   if (!digits) {
-    return { valid: false, error: 'Informe um número de telefone válido.' };
+    return { valid: false, error: t('phone.errInvalidDigits') };
   }
 
   if (!defaultTerritory) {
     return {
       valid: false,
-      error: 'País não reconhecido. Selecione o país na lista.',
+      error: t('phone.errUnknownCountry'),
     };
   }
 
@@ -649,11 +674,25 @@ export function normalizePhoneNumber(
     }
   }
 
-  const lenDesc =
-    c.minLen === c.maxLen ? `${c.minLen} dígitos` : `${c.minLen} a ${c.maxLen} dígitos`;
+  const localizedName = getCountryDisplayName(c);
+  if (c.minLen === c.maxLen) {
+    return {
+      valid: false,
+      error: t('phone.errLengthExact', {
+        country: localizedName,
+        dialCode: c.dialCode,
+        min: c.minLen,
+      }),
+    };
+  }
   return {
     valid: false,
-    error: `${c.name} (${c.dialCode}): número inválido (esperado ${lenDesc} ou +indicativo).`,
+    error: t('phone.errLengthRange', {
+      country: localizedName,
+      dialCode: c.dialCode,
+      min: c.minLen,
+      max: c.maxLen,
+    }),
   };
 }
 
