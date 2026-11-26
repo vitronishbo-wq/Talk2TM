@@ -256,11 +256,29 @@ service cloud.firestore {
     function isCallerActive() {
       return isAuthenticated() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountStatus', 'active') != 'deleting' &&
         exists(/databases/$(database)/documents/userProfiles/$(callerTalk2tmId())) &&
         get(/databases/$(database)/documents/userProfiles/$(callerTalk2tmId())).data.active == true;
     }
 
-    // 1. users/{uid} — Metadados privados da conta (imutável após criação; get permitido ao dono ou admin)
+    function isPairBlocked(uid1, uid2) {
+      return exists(/databases/$(database)/documents/userBlocks/$(uid1 + '_' + uid2)) ||
+             exists(/databases/$(database)/documents/userBlocks/$(uid2 + '_' + uid1));
+    }
+
+    function isAccountDeletionInProgress(uid) {
+      return isAuthenticated() &&
+             !isProtectedLegacyUid(uid) &&
+             (
+               !existsAfter(/databases/$(database)/documents/users/$(uid)) ||
+               (
+                 exists(/databases/$(database)/documents/users/$(uid)) &&
+                 get(/databases/$(database)/documents/users/$(uid)).data.get('accountStatus', 'active') == 'deleting'
+               )
+             );
+    }
+
+    // 1. users/{uid} — Metadados privados da conta (atualização restrita ao estado 'deleting' na cascata de Hard Delete)
     match /users/{uid} {
       allow get: if isUser(uid) || isAdmin();
       allow list: if false;
@@ -273,8 +291,19 @@ service cloud.firestore {
                        request.resource.data.createdAt.size() >= 1 &&
                        (!('phoneHash' in request.resource.data) || isValidPhoneHash(request.resource.data.phoneHash)) &&
                        (!('phoneMasked' in request.resource.data) || (request.resource.data.phoneMasked is string && request.resource.data.phoneMasked.size() >= 3 && request.resource.data.phoneMasked.size() <= 30));
-      allow update: if false;
-      allow delete: if false;
+      allow update: if isUser(uid) &&
+                       !isProtectedLegacyUid(uid) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.talk2tmId == resource.data.talk2tmId &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.get('phoneHash', null) == resource.data.get('phoneHash', null) &&
+                       request.resource.data.get('phoneMasked', null) == resource.data.get('phoneMasked', null) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accountStatus', 'deletionRequestedAt']) &&
+                       request.resource.data.accountStatus == 'deleting' &&
+                       request.resource.data.deletionRequestedAt is string &&
+                       request.resource.data.deletionRequestedAt.size() >= 1 &&
+                       request.resource.data.deletionRequestedAt.size() <= 64;
+      allow delete: if isUser(uid) && !isProtectedLegacyUid(uid);
     }
 
     // 2. userProfiles/{talk2tmId} — Índice para descoberta 1:1 e gestão administrativa de estado/plano
@@ -330,7 +359,10 @@ service cloud.firestore {
                            ))
                          )
                        );
-      allow delete: if false;
+      allow delete: if isAuthenticated() &&
+                       resource != null &&
+                       resource.data.uid == request.auth.uid &&
+                       isAccountDeletionInProgress(request.auth.uid);
     }
 
     // 2b. phoneLookup/{phoneHash} — Descoberta exata por hash SHA-256 do telefone (anti-enumeração: list bloqueado)
@@ -383,7 +415,11 @@ service cloud.firestore {
                            request.resource.data.active is bool
                          )
                        );
-      allow delete: if false;
+      allow delete: if isAuthenticated() &&
+                       isValidPhoneHash(phoneHash) &&
+                       resource != null &&
+                       resource.data.uid == request.auth.uid &&
+                       isAccountDeletionInProgress(request.auth.uid);
     }
 
     // 3. conversations/{conversationId} — Vínculo estrito bilateral (exatamente 2 identidades distintas)
@@ -392,6 +428,24 @@ service cloud.firestore {
         request.auth.uid == convData.participantA ||
         request.auth.uid == convData.participantB
       );
+    }
+
+    function datingMatchIdForPair(uid1, uid2) {
+      return 'match_' + uid1 + '_' + uid2;
+    }
+
+    function isDatingMatchUnmatched(uid1, uid2) {
+      return exists(/databases/$(database)/documents/datingMatches/$(datingMatchIdForPair(uid1, uid2))) &&
+             get(/databases/$(database)/documents/datingMatches/$(datingMatchIdForPair(uid1, uid2))).data.status == 'unmatched';
+    }
+
+    function datingMatchAllowsConversation(matchData, convId, uidA, uidB, idA, idB) {
+      return matchData.status == 'matched' &&
+             matchData.conversationId == convId &&
+             matchData.participantA == uidA &&
+             matchData.participantB == uidB &&
+             matchData.talk2tmIdA == idA &&
+             matchData.talk2tmIdB == idB;
     }
 
     function inviteMatchesConversationPair(inviteData, convId, uidA, uidB, idA, idB) {
@@ -439,6 +493,7 @@ service cloud.firestore {
                        request.resource.data.participantA != request.resource.data.participantB &&
                        request.resource.data.participantA < request.resource.data.participantB &&
                        conversationId == 'conv_' + request.resource.data.participantA + '_' + request.resource.data.participantB &&
+                       !isPairBlocked(request.resource.data.participantA, request.resource.data.participantB) &&
                        (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB) &&
                        isValidTalk2tmId(request.resource.data.talk2tmIdA) &&
                        isValidTalk2tmId(request.resource.data.talk2tmIdB) &&
@@ -467,18 +522,35 @@ service cloud.firestore {
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.uid == request.resource.data.participantB &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.active == true &&
                        get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.displayName == request.resource.data.displayNameB &&
-                       exists(/databases/$(database)/documents/conversationInvites/$(conversationId)) &&
-                       inviteMatchesConversationPair(
-                         get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data,
-                         conversationId,
-                         request.resource.data.participantA,
-                         request.resource.data.participantB,
-                         request.resource.data.talk2tmIdA,
-                         request.resource.data.talk2tmIdB
+                       (
+                         (
+                           exists(/databases/$(database)/documents/conversationInvites/$(conversationId)) &&
+                           inviteMatchesConversationPair(
+                             get(/databases/$(database)/documents/conversationInvites/$(conversationId)).data,
+                             conversationId,
+                             request.resource.data.participantA,
+                             request.resource.data.participantB,
+                             request.resource.data.talk2tmIdA,
+                             request.resource.data.talk2tmIdB
+                           )
+                         ) ||
+                         (
+                           existsAfter(/databases/$(database)/documents/datingMatches/$(datingMatchIdForPair(request.resource.data.participantA, request.resource.data.participantB))) &&
+                           datingMatchAllowsConversation(
+                             getAfter(/databases/$(database)/documents/datingMatches/$(datingMatchIdForPair(request.resource.data.participantA, request.resource.data.participantB))).data,
+                             conversationId,
+                             request.resource.data.participantA,
+                             request.resource.data.participantB,
+                             request.resource.data.talk2tmIdA,
+                             request.resource.data.talk2tmIdB
+                           )
+                         )
                        );
       allow update: if isValidId(conversationId) &&
                        isConversationParticipant(resource.data) &&
                        isCallerActive() &&
+                       !isDatingMatchUnmatched(resource.data.participantA, resource.data.participantB) &&
+                       !isPairBlocked(resource.data.participantA, resource.data.participantB) &&
                        request.resource.data.conversationId == resource.data.conversationId &&
                        request.resource.data.participantA == resource.data.participantA &&
                        request.resource.data.participantB == resource.data.participantB &&
@@ -507,7 +579,11 @@ service cloud.firestore {
                            )
                          )
                        );
-      allow delete: if false;
+      allow delete: if isAuthenticated() &&
+                       isValidId(conversationId) &&
+                       resource != null &&
+                       isConversationParticipant(resource.data) &&
+                       isAccountDeletionInProgress(request.auth.uid);
 
       // 5. conversations/{conversationId}/messages/{messageId} — Subcoleção de mensagens bilaterais
       match /messages/{messageId} {
@@ -524,6 +600,14 @@ service cloud.firestore {
                          isValidId(messageId) &&
                          isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
                          isCallerActive() &&
+                         !isDatingMatchUnmatched(
+                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA,
+                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB
+                         ) &&
+                         !isPairBlocked(
+                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA,
+                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB
+                         ) &&
                          request.resource.data.keys().hasAll([
                            'messageId', 'conversationId', 'senderId', 'senderTalk2tmId',
                            'text', 'clientId', 'createdAt'
@@ -552,7 +636,11 @@ service cloud.firestore {
                          isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
                          isCallerActive() &&
                          isValidIndividualDelete(resource.data, request.resource.data);
-        allow delete: if false;
+        allow delete: if isAuthenticated() &&
+                         isValidId(conversationId) &&
+                         isValidId(messageId) &&
+                         isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
+                         isAccountDeletionInProgress(request.auth.uid);
       }
     }
 
@@ -585,6 +673,7 @@ service cloud.firestore {
                        request.resource.data.toUid is string &&
                        request.resource.data.toUid.size() >= 1 &&
                        request.resource.data.toUid != request.auth.uid &&
+                       !isPairBlocked(request.resource.data.fromUid, request.resource.data.toUid) &&
                        isValidTalk2tmId(request.resource.data.fromTalk2tmId) &&
                        isValidTalk2tmId(request.resource.data.toTalk2tmId) &&
                        request.resource.data.fromTalk2tmId != request.resource.data.toTalk2tmId &&
@@ -613,6 +702,7 @@ service cloud.firestore {
       allow update: if isAuthenticated() &&
                        isValidId(inviteId) &&
                        isCallerActive() &&
+                       !isPairBlocked(resource.data.fromUid, resource.data.toUid) &&
                        request.resource.data.inviteId == resource.data.inviteId &&
                        request.resource.data.conversationId == resource.data.conversationId &&
                        request.resource.data.createdAt == resource.data.createdAt &&
@@ -667,7 +757,852 @@ service cloud.firestore {
                            get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.active == true
                          )
                        );
+      allow delete: if isAuthenticated() &&
+                       isValidId(inviteId) &&
+                       resource != null &&
+                       (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid) &&
+                       isAccountDeletionInProgress(request.auth.uid);
+    }
+
+    // ====================================================================
+    // DATING FASE 1: datingProfiles/{profileUid} e evaluations/{targetUid}
+    // ====================================================================
+
+    function isValidDatingGender(g) {
+      return g in ['woman', 'man', 'non_binary'];
+    }
+
+    function isValidDatingSeeking(s) {
+      return s in ['women', 'men', 'all'];
+    }
+
+    function isValidDatingIntent(i) {
+      return i in ['serious', 'meet_people', 'chat'];
+    }
+
+    function isValidDatingProfileFields(data) {
+      return data.displayName is string &&
+             data.displayName.size() >= 1 &&
+             data.displayName.size() <= 30 &&
+             data.age is int &&
+             data.age >= 18 &&
+             data.age <= 99 &&
+             data.adultConfirmed == true &&
+             isValidDatingGender(data.gender) &&
+             isValidDatingSeeking(data.seeking) &&
+             data.countryCode is string &&
+             data.countryCode.matches('^[A-Z]{2}$') &&
+             data.city is string &&
+             data.city.size() >= 1 &&
+             data.city.size() <= 60 &&
+             data.cityKey is string &&
+             data.cityKey.size() >= 1 &&
+             data.cityKey.size() <= 60 &&
+             data.bio is string &&
+             data.bio.size() >= 1 &&
+             data.bio.size() <= 160 &&
+             isValidDatingIntent(data.intent) &&
+             data.termsAcceptedAt is string &&
+             data.termsAcceptedAt.size() >= 1 &&
+             data.termsAcceptedAt.size() <= 64 &&
+             data.termsVersion is string &&
+             data.termsVersion.size() >= 1 &&
+             data.termsVersion.size() <= 20 &&
+             data.discoverable is bool &&
+             data.paused is bool &&
+             data.suspended is bool &&
+             data.createdAt is string &&
+             data.createdAt.size() >= 1 &&
+             data.createdAt.size() <= 64 &&
+             data.updatedAt is string &&
+             data.updatedAt.size() >= 1 &&
+             data.updatedAt.size() <= 64;
+    }
+
+    function isValidDatingPhotoStatus(status) {
+      return status in ['none', 'pending', 'approved', 'rejected'];
+    }
+
+    function isValidOptionalDatingPhotoFields(data, profileUid) {
+      return (!('photoUrl' in data) || data.photoUrl == null || (
+               data.photoUrl is string &&
+               data.photoUrl.size() >= 12 &&
+               data.photoUrl.size() <= 700 &&
+               data.photoUrl.matches('^https://.*')
+             )) &&
+             (!('photoPath' in data) || data.photoPath == null || (
+               data.photoPath is string &&
+               data.photoPath == 'datingPhotos/' + profileUid + '/avatar.webp'
+             )) &&
+             (!('photoStatus' in data) || isValidDatingPhotoStatus(data.photoStatus)) &&
+             (!('photoUpdatedAt' in data) || data.photoUpdatedAt == null || (
+               data.photoUpdatedAt is string &&
+               data.photoUpdatedAt.size() >= 1 &&
+               data.photoUpdatedAt.size() <= 64
+             )) &&
+             (!('photoModerationNote' in data) || data.photoModerationNote == null || (
+               data.photoModerationNote is string &&
+               data.photoModerationNote.size() <= 160
+             ));
+    }
+
+    function isValidOwnerDatingPhotoState(data, profileUid) {
+      return !('photoStatus' in data) ||
+             (
+               data.photoStatus == 'none' &&
+               (!('photoUrl' in data) || data.photoUrl == null) &&
+               (!('photoPath' in data) || data.photoPath == null)
+             ) ||
+             (
+               data.photoStatus == 'pending' &&
+               ('photoUrl' in data) && data.photoUrl is string && data.photoUrl.matches('^https://.*') &&
+               ('photoPath' in data) && data.photoPath == 'datingPhotos/' + profileUid + '/avatar.webp' &&
+               (!('photoModerationNote' in data) || data.photoModerationNote == null)
+             );
+    }
+
+    match /datingProfiles/{profileUid} {
+      allow get: if isAuthenticated() &&
+                    isValidId(profileUid) &&
+                    (
+                      isUser(profileUid) ||
+                      isAdmin() ||
+                      (
+                        isCallerActive() &&
+                        (
+                          resource == null ||
+                          (
+                            resource.data.discoverable == true &&
+                            resource.data.paused == false &&
+                            resource.data.suspended == false &&
+                            resource.data.adultConfirmed == true &&
+                            resource.data.age >= 18
+                          )
+                        )
+                      )
+                    );
+      allow list: if isAuthenticated() &&
+                     (
+                       isAdmin() ||
+                       (
+                         isCallerActive() &&
+                         resource.data.discoverable == true &&
+                         resource.data.paused == false &&
+                         resource.data.suspended == false &&
+                         resource.data.adultConfirmed == true &&
+                         resource.data.age >= 18
+                       )
+                     );
+      allow create: if isUser(profileUid) &&
+                       isValidId(profileUid) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'uid', 'talk2tmId', 'displayName', 'age', 'gender', 'seeking',
+                         'countryCode', 'city', 'cityKey', 'bio', 'intent',
+                         'adultConfirmed', 'termsAcceptedAt', 'termsVersion',
+                         'discoverable', 'paused', 'suspended', 'createdAt', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'uid', 'talk2tmId', 'displayName', 'age', 'gender', 'seeking',
+                         'countryCode', 'city', 'cityKey', 'bio', 'intent',
+                         'adultConfirmed', 'termsAcceptedAt', 'termsVersion',
+                         'discoverable', 'paused', 'suspended',
+                         'photoUrl', 'photoPath', 'photoStatus', 'photoUpdatedAt', 'photoModerationNote',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       request.resource.data.uid == request.auth.uid &&
+                       isValidTalk2tmId(request.resource.data.talk2tmId) &&
+                       callerTalk2tmId() == request.resource.data.talk2tmId &&
+                       request.resource.data.suspended == false &&
+                       isValidDatingProfileFields(request.resource.data) &&
+                       isValidOptionalDatingPhotoFields(request.resource.data, profileUid) &&
+                       isValidOwnerDatingPhotoState(request.resource.data, profileUid);
+      allow update: if isAuthenticated() &&
+                       isValidId(profileUid) &&
+                       (
+                         (
+                           isUser(profileUid) &&
+                           isCallerActive() &&
+                           request.resource.data.uid == resource.data.uid &&
+                           request.resource.data.talk2tmId == resource.data.talk2tmId &&
+                           request.resource.data.createdAt == resource.data.createdAt &&
+                           request.resource.data.suspended == resource.data.suspended &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                             'displayName', 'age', 'gender', 'seeking',
+                             'countryCode', 'city', 'cityKey', 'bio', 'intent',
+                             'adultConfirmed', 'termsAcceptedAt', 'termsVersion',
+                             'discoverable', 'paused',
+                             'photoUrl', 'photoPath', 'photoStatus', 'photoUpdatedAt', 'photoModerationNote',
+                             'updatedAt'
+                           ]) &&
+                           isValidDatingProfileFields(request.resource.data) &&
+                           isValidOptionalDatingPhotoFields(request.resource.data, profileUid) &&
+                           (
+                             !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+                               'photoUrl', 'photoPath', 'photoStatus', 'photoUpdatedAt', 'photoModerationNote'
+                             ]) ||
+                             isValidOwnerDatingPhotoState(request.resource.data, profileUid)
+                           )
+                         ) ||
+                         (
+                           isAdmin() &&
+                           request.resource.data.updatedAt is string &&
+                           request.resource.data.updatedAt.size() >= 1 &&
+                           request.resource.data.updatedAt.size() <= 64 &&
+                           (
+                             (
+                               request.resource.data.diff(resource.data).affectedKeys().hasOnly(['suspended', 'updatedAt']) &&
+                               request.resource.data.suspended is bool
+                             ) ||
+                             (
+                               request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                                 'photoStatus', 'photoModerationNote', 'photoUpdatedAt', 'photoUrl', 'photoPath', 'updatedAt'
+                               ]) &&
+                               'photoStatus' in request.resource.data &&
+                               isValidDatingPhotoStatus(request.resource.data.photoStatus) &&
+                               isValidOptionalDatingPhotoFields(request.resource.data, profileUid)
+                             )
+                           )
+                         )
+                       );
+      allow delete: if isUser(profileUid) && isAccountDeletionInProgress(profileUid);
+
+      match /evaluations/{targetUid} {
+        allow get: if isUser(profileUid) && isValidId(profileUid) && isValidId(targetUid);
+        allow list: if isUser(profileUid) && isValidId(profileUid);
+        allow create, update: if isUser(profileUid) &&
+                                 isValidId(profileUid) &&
+                                 isValidId(targetUid) &&
+                                 targetUid != profileUid &&
+                                 isCallerActive() &&
+                                 request.resource.data.keys().hasAll(['targetUid', 'decision', 'createdAt', 'dayKey']) &&
+                                 request.resource.data.keys().hasOnly(['targetUid', 'decision', 'createdAt', 'dayKey']) &&
+                                 request.resource.data.targetUid == targetUid &&
+                                 request.resource.data.decision in ['seen', 'pass', 'like', 'blocked'] &&
+                                 request.resource.data.createdAt is string &&
+                                 request.resource.data.createdAt.size() >= 1 &&
+                                 request.resource.data.createdAt.size() <= 64 &&
+                                 request.resource.data.dayKey is string &&
+                                 request.resource.data.dayKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+        allow delete: if isUser(profileUid) && isAccountDeletionInProgress(profileUid);
+      }
+    }
+
+    // ====================================================================
+    // DATING FASE 2: datingLikes/{likeId} & datingMatches/{matchId}
+    // ====================================================================
+
+    function isValidCompositeDatingId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 266 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidDatingLikeFields(data, likeId) {
+      return data.likeId == likeId &&
+             data.fromUid is string &&
+             data.fromUid.size() >= 1 &&
+             data.fromUid.size() <= 128 &&
+             data.toUid is string &&
+             data.toUid.size() >= 1 &&
+             data.toUid.size() <= 128 &&
+             data.fromUid != data.toUid &&
+             data.likeId == data.fromUid + '_' + data.toUid &&
+             isValidTalk2tmId(data.fromTalk2tmId) &&
+             data.fromDisplayName is string &&
+             data.fromDisplayName.size() >= 1 &&
+             data.fromDisplayName.size() <= 30 &&
+             data.createdAt is string &&
+             data.createdAt.size() >= 1 &&
+             data.createdAt.size() <= 64;
+    }
+
+    match /datingLikes/{likeId} {
+      // Secreto: só quem já criou o like recíproco consegue ler o like recebido (nunca há enumeração)
+      allow get: if isAuthenticated() &&
+                    isValidCompositeDatingId(likeId) &&
+                    isCallerActive() &&
+                    resource != null &&
+                    (
+                      resource.data.fromUid == request.auth.uid ||
+                      (
+                        resource.data.toUid == request.auth.uid &&
+                        exists(/databases/$(database)/documents/datingLikes/$(request.auth.uid + '_' + resource.data.fromUid))
+                      )
+                    );
+      allow list: if isAuthenticated() &&
+                     isCallerActive() &&
+                     resource.data.fromUid == request.auth.uid;
+      allow create: if isAuthenticated() &&
+                       isValidCompositeDatingId(likeId) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'likeId', 'fromUid', 'toUid', 'fromTalk2tmId', 'fromDisplayName', 'createdAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'likeId', 'fromUid', 'toUid', 'fromTalk2tmId', 'fromDisplayName', 'createdAt'
+                       ]) &&
+                       request.resource.data.fromUid == request.auth.uid &&
+                       isValidDatingLikeFields(request.resource.data, likeId) &&
+                       !isPairBlocked(request.resource.data.fromUid, request.resource.data.toUid) &&
+                       callerTalk2tmId() == request.resource.data.fromTalk2tmId &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.displayName == request.resource.data.fromDisplayName &&
+                       exists(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)) &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)).data.suspended == false &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)).data.adultConfirmed == true &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)).data.age >= 18 &&
+                       exists(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)) &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.discoverable == true &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.paused == false &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.suspended == false &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.adultConfirmed == true &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.age >= 18 &&
+                       existsAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
+                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday >= 1 &&
+                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday <= 5 &&
+                       (
+                         (
+                           !exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
+                           getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday == 1
+                         ) ||
+                         (
+                           exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
+                           (
+                             (
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey !=
+                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey &&
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday == 1
+                             ) ||
+                             (
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey ==
+                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey &&
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday ==
+                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday + 1
+                             )
+                           )
+                         )
+                       );
+      allow update: if false;
+      allow delete: if isAuthenticated() &&
+                       isValidCompositeDatingId(likeId) &&
+                       !isProtectedLegacyUid(request.auth.uid) &&
+                       resource != null &&
+                       (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+    }
+
+    function isValidDatingMatchFields(data, matchId) {
+      return data.matchId == matchId &&
+             data.participantA is string &&
+             data.participantA.size() >= 1 &&
+             data.participantA.size() <= 128 &&
+             data.participantB is string &&
+             data.participantB.size() >= 1 &&
+             data.participantB.size() <= 128 &&
+             data.participantA < data.participantB &&
+             data.matchId == 'match_' + data.participantA + '_' + data.participantB &&
+             data.conversationId == 'conv_' + data.participantA + '_' + data.participantB &&
+             isValidTalk2tmId(data.talk2tmIdA) &&
+             isValidTalk2tmId(data.talk2tmIdB) &&
+             data.talk2tmIdA != data.talk2tmIdB &&
+             data.displayNameA is string &&
+             data.displayNameA.size() >= 1 &&
+             data.displayNameA.size() <= 30 &&
+             data.displayNameB is string &&
+             data.displayNameB.size() >= 1 &&
+             data.displayNameB.size() <= 30 &&
+             (data.matchedByUid == data.participantA || data.matchedByUid == data.participantB) &&
+             data.status in ['matched', 'unmatched'] &&
+             data.seenByA is bool &&
+             data.seenByB is bool &&
+             data.createdAt is string &&
+             data.createdAt.size() >= 1 &&
+             data.createdAt.size() <= 64 &&
+             data.updatedAt is string &&
+             data.updatedAt.size() >= 1 &&
+             data.updatedAt.size() <= 64 &&
+             (!('chatStarted' in data) || data.chatStarted is bool) &&
+             (!('chatStartedAt' in data) || (data.chatStartedAt is string && data.chatStartedAt.size() >= 1 && data.chatStartedAt.size() <= 64)) &&
+             (!('unmatchedByUid' in data) || (data.unmatchedByUid is string && data.unmatchedByUid.size() >= 1 && data.unmatchedByUid.size() <= 128)) &&
+             (!('unmatchedAt' in data) || (data.unmatchedAt is string && data.unmatchedAt.size() >= 1 && data.unmatchedAt.size() <= 64));
+    }
+
+    match /datingMatches/{matchId} {
+      allow get: if isAuthenticated() &&
+                    isValidCompositeDatingId(matchId) &&
+                    (
+                      isAdmin() ||
+                      resource == null ||
+                      (
+                        isCallerActive() &&
+                        (request.auth.uid == resource.data.participantA || request.auth.uid == resource.data.participantB)
+                      )
+                    );
+      allow list: if isAuthenticated() &&
+                     (
+                       isAdmin() ||
+                       (
+                         isCallerActive() &&
+                         (request.auth.uid == resource.data.participantA || request.auth.uid == resource.data.participantB)
+                       )
+                     );
+      allow create: if isAuthenticated() &&
+                       isValidCompositeDatingId(matchId) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'matchId', 'conversationId', 'participantA', 'participantB',
+                         'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
+                         'matchedByUid', 'status', 'seenByA', 'seenByB', 'createdAt', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'matchId', 'conversationId', 'participantA', 'participantB',
+                         'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
+                         'matchedByUid', 'status', 'seenByA', 'seenByB', 'chatStarted', 'chatStartedAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidDatingMatchFields(request.resource.data, matchId) &&
+                       !isPairBlocked(request.resource.data.participantA, request.resource.data.participantB) &&
+                       (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB) &&
+                       request.resource.data.matchedByUid == request.auth.uid &&
+                       request.resource.data.status == 'matched' &&
+                       existsAfter(/databases/$(database)/documents/datingLikes/$(request.resource.data.participantA + '_' + request.resource.data.participantB)) &&
+                       existsAfter(/databases/$(database)/documents/datingLikes/$(request.resource.data.participantB + '_' + request.resource.data.participantA)) &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.uid == request.resource.data.participantA &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.active == true &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.displayName == request.resource.data.displayNameA &&
+                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)) &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.uid == request.resource.data.participantB &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.active == true &&
+                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.displayName == request.resource.data.displayNameB &&
+                       exists(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantA)) &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantA)).data.suspended == false &&
+                       exists(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantB)) &&
+                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantB)).data.suspended == false;
+      allow update: if isAuthenticated() &&
+                       isValidCompositeDatingId(matchId) &&
+                       isCallerActive() &&
+                       (request.auth.uid == resource.data.participantA || request.auth.uid == resource.data.participantB) &&
+                       resource.data.status == 'matched' &&
+                       isValidDatingMatchFields(request.resource.data, matchId) &&
+                       request.resource.data.matchId == resource.data.matchId &&
+                       request.resource.data.conversationId == resource.data.conversationId &&
+                       request.resource.data.participantA == resource.data.participantA &&
+                       request.resource.data.participantB == resource.data.participantB &&
+                       request.resource.data.talk2tmIdA == resource.data.talk2tmIdA &&
+                       request.resource.data.talk2tmIdB == resource.data.talk2tmIdB &&
+                       request.resource.data.displayNameA == resource.data.displayNameA &&
+                       request.resource.data.displayNameB == resource.data.displayNameB &&
+                       request.resource.data.matchedByUid == resource.data.matchedByUid &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       (
+                         (
+                           request.resource.data.status == 'matched' &&
+                           (
+                             (
+                               request.auth.uid == resource.data.participantA &&
+                               request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seenByA', 'updatedAt']) &&
+                               request.resource.data.seenByA == true
+                             ) ||
+                             (
+                               request.auth.uid == resource.data.participantB &&
+                               request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seenByB', 'updatedAt']) &&
+                               request.resource.data.seenByB == true
+                             ) ||
+                             (
+                               request.resource.data.diff(resource.data).affectedKeys().hasOnly(['chatStarted', 'chatStartedAt', 'updatedAt']) &&
+                               request.resource.data.chatStarted == true &&
+                               (!('chatStarted' in resource.data) || resource.data.chatStarted != true) &&
+                               'chatStartedAt' in request.resource.data
+                             )
+                           )
+                         ) ||
+                         (
+                           request.resource.data.status == 'unmatched' &&
+                           request.resource.data.unmatchedByUid == request.auth.uid &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'unmatchedByUid', 'unmatchedAt', 'updatedAt']) &&
+                           'unmatchedAt' in request.resource.data
+                         )
+                       );
+      allow delete: if isAuthenticated() &&
+                       isValidCompositeDatingId(matchId) &&
+                       resource != null &&
+                       (resource.data.participantA == request.auth.uid || resource.data.participantB == request.auth.uid) &&
+                       isAccountDeletionInProgress(request.auth.uid);
+    }
+
+    // ====================================================================
+    // FASE 3: userBlocks/{blockId}, moderationReports/{reportId}, userRateLimits/{uid}
+    // ====================================================================
+
+    function isValidDayKey(dayKey) {
+      return dayKey is string && dayKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    match /userBlocks/{blockId} {
+      allow get: if isAuthenticated() &&
+                    isValidCompositeDatingId(blockId) &&
+                    (
+                      resource == null ||
+                      (
+                        isCallerActive() &&
+                        (resource.data.blockerUid == request.auth.uid || resource.data.blockedUid == request.auth.uid)
+                      )
+                    );
+      allow list: if isAuthenticated() &&
+                     isCallerActive() &&
+                     (resource.data.blockerUid == request.auth.uid || resource.data.blockedUid == request.auth.uid);
+      allow create: if isAuthenticated() &&
+                       isValidCompositeDatingId(blockId) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll(['blockId', 'blockerUid', 'blockedUid', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly([
+                         'blockId', 'blockerUid', 'blockedUid', 'blockerTalk2tmId', 'reason', 'createdAt'
+                       ]) &&
+                       request.resource.data.blockerUid == request.auth.uid &&
+                       request.resource.data.blockedUid is string &&
+                       request.resource.data.blockedUid.size() >= 1 &&
+                       request.resource.data.blockedUid.size() <= 128 &&
+                       request.resource.data.blockedUid != request.auth.uid &&
+                       blockId == request.resource.data.blockerUid + '_' + request.resource.data.blockedUid &&
+                       request.resource.data.blockId == blockId &&
+                       (!('blockerTalk2tmId' in request.resource.data) || (
+                         isValidTalk2tmId(request.resource.data.blockerTalk2tmId) &&
+                         callerTalk2tmId() == request.resource.data.blockerTalk2tmId
+                       )) &&
+                       (!('reason' in request.resource.data) || (
+                         request.resource.data.reason is string &&
+                         request.resource.data.reason.size() <= 120
+                       )) &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       request.resource.data.createdAt.size() <= 64;
+      allow update: if false;
+      allow delete: if isAuthenticated() &&
+                       isValidCompositeDatingId(blockId) &&
+                       !isProtectedLegacyUid(request.auth.uid) &&
+                       resource != null &&
+                       (resource.data.blockerUid == request.auth.uid || resource.data.blockedUid == request.auth.uid);
+    }
+
+    match /moderationReports/{reportId} {
+      allow get: if isAuthenticated() &&
+                    isValidCompositeDatingId(reportId) &&
+                    (
+                      isAdmin() ||
+                      (resource != null && resource.data.reporterUid == request.auth.uid)
+                    );
+      allow list: if isAuthenticated() &&
+                     (
+                       isAdmin() ||
+                       resource.data.reporterUid == request.auth.uid
+                     );
+      allow create: if isAuthenticated() &&
+                       isValidCompositeDatingId(reportId) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'reportId', 'reporterUid', 'reporterTalk2tmId', 'targetUid',
+                         'sourceType', 'reason', 'evidenceSnapshot', 'status', 'createdAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'reportId', 'reporterUid', 'reporterTalk2tmId', 'targetUid',
+                         'targetTalk2tmId', 'targetDisplayName', 'sourceType',
+                         'channelId', 'itemRefId', 'reason', 'details',
+                         'evidenceSnapshot', 'status', 'createdAt'
+                       ]) &&
+                       request.resource.data.reportId == reportId &&
+                       request.resource.data.reporterUid == request.auth.uid &&
+                       isValidTalk2tmId(request.resource.data.reporterTalk2tmId) &&
+                       callerTalk2tmId() == request.resource.data.reporterTalk2tmId &&
+                       request.resource.data.targetUid is string &&
+                       request.resource.data.targetUid.size() >= 1 &&
+                       request.resource.data.targetUid.size() <= 128 &&
+                       request.resource.data.targetUid != request.auth.uid &&
+                       (!('targetTalk2tmId' in request.resource.data) || isValidTalk2tmId(request.resource.data.targetTalk2tmId)) &&
+                       (!('targetDisplayName' in request.resource.data) || (
+                         request.resource.data.targetDisplayName is string &&
+                         request.resource.data.targetDisplayName.size() >= 1 &&
+                         request.resource.data.targetDisplayName.size() <= 30
+                       )) &&
+                       request.resource.data.sourceType in ['dating_profile', 'dating_match', 'chat_message', 'connection'] &&
+                       (!('channelId' in request.resource.data) || (request.resource.data.channelId is string && request.resource.data.channelId.size() <= 140)) &&
+                       (!('itemRefId' in request.resource.data) || (request.resource.data.itemRefId is string && request.resource.data.itemRefId.size() <= 140)) &&
+                       request.resource.data.reason in ['spam', 'harassment', 'fake_profile', 'underage', 'scam', 'other'] &&
+                       (!('details' in request.resource.data) || (request.resource.data.details is string && request.resource.data.details.size() <= 300)) &&
+                       request.resource.data.evidenceSnapshot is string &&
+                       request.resource.data.evidenceSnapshot.size() >= 1 &&
+                       request.resource.data.evidenceSnapshot.size() <= 500 &&
+                       request.resource.data.status == 'pending' &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       request.resource.data.createdAt.size() <= 64 &&
+                       existsAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
+                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday >= 1 &&
+                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday <= 10 &&
+                       (
+                         (
+                           !exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
+                           getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday == 1
+                         ) ||
+                         (
+                           exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
+                           (
+                             (
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey !=
+                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey &&
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday == 1
+                             ) ||
+                             (
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey ==
+                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey &&
+                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday ==
+                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday + 1
+                             )
+                           )
+                         )
+                       );
+      allow update: if isAdmin() &&
+                       isValidCompositeDatingId(reportId) &&
+                       request.resource.data.reportId == resource.data.reportId &&
+                       request.resource.data.reporterUid == resource.data.reporterUid &&
+                       request.resource.data.targetUid == resource.data.targetUid &&
+                       request.resource.data.evidenceSnapshot == resource.data.evidenceSnapshot &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                         'status', 'reviewedAt', 'reviewedByUid', 'resolutionAction', 'resolutionNote'
+                       ]) &&
+                       request.resource.data.status in ['pending', 'resolved', 'dismissed'] &&
+                       (!('reviewedAt' in request.resource.data) || (request.resource.data.reviewedAt is string && request.resource.data.reviewedAt.size() <= 64)) &&
+                       (!('reviewedByUid' in request.resource.data) || request.resource.data.reviewedByUid == request.auth.uid) &&
+                       (!('resolutionAction' in request.resource.data) || request.resource.data.resolutionAction in ['none', 'account_suspended', 'dismissed']) &&
+                       (!('resolutionNote' in request.resource.data) || (request.resource.data.resolutionNote is string && request.resource.data.resolutionNote.size() <= 200));
       allow delete: if false;
+    }
+
+    match /userRateLimits/{uid} {
+      allow get: if isUser(uid);
+      allow list: if false;
+      allow create: if isUser(uid) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'uid', 'dayKey', 'likeDayKey', 'likeCountToday',
+                         'reportDayKey', 'reportCountToday', 'inviteDayKey', 'inviteCountToday', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'uid', 'dayKey', 'likeDayKey', 'likeCountToday',
+                         'reportDayKey', 'reportCountToday', 'inviteDayKey', 'inviteCountToday',
+                         'lastReportAtMs', 'lastInviteAtMs', 'updatedAt'
+                       ]) &&
+                       request.resource.data.uid == uid &&
+                       isValidDayKey(request.resource.data.dayKey) &&
+                       isValidDayKey(request.resource.data.likeDayKey) &&
+                       isValidDayKey(request.resource.data.reportDayKey) &&
+                       isValidDayKey(request.resource.data.inviteDayKey) &&
+                       request.resource.data.likeCountToday is int &&
+                       request.resource.data.likeCountToday >= 0 &&
+                       request.resource.data.likeCountToday <= 5 &&
+                       request.resource.data.reportCountToday is int &&
+                       request.resource.data.reportCountToday >= 0 &&
+                       request.resource.data.reportCountToday <= 10 &&
+                       request.resource.data.inviteCountToday is int &&
+                       request.resource.data.inviteCountToday >= 0 &&
+                       request.resource.data.inviteCountToday <= 25 &&
+                       (!('lastReportAtMs' in request.resource.data) || request.resource.data.lastReportAtMs is number) &&
+                       (!('lastInviteAtMs' in request.resource.data) || request.resource.data.lastInviteAtMs is number) &&
+                       request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
+                       request.resource.data.updatedAt.size() <= 64;
+      allow update: if isUser(uid) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'uid', 'dayKey', 'likeDayKey', 'likeCountToday',
+                         'reportDayKey', 'reportCountToday', 'inviteDayKey', 'inviteCountToday', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'uid', 'dayKey', 'likeDayKey', 'likeCountToday',
+                         'reportDayKey', 'reportCountToday', 'inviteDayKey', 'inviteCountToday',
+                         'lastReportAtMs', 'lastInviteAtMs', 'updatedAt'
+                       ]) &&
+                       request.resource.data.uid == uid &&
+                       isValidDayKey(request.resource.data.dayKey) &&
+                       isValidDayKey(request.resource.data.likeDayKey) &&
+                       isValidDayKey(request.resource.data.reportDayKey) &&
+                       isValidDayKey(request.resource.data.inviteDayKey) &&
+                       request.resource.data.likeCountToday is int &&
+                       request.resource.data.likeCountToday >= 0 &&
+                       request.resource.data.likeCountToday <= 5 &&
+                       request.resource.data.reportCountToday is int &&
+                       request.resource.data.reportCountToday >= 0 &&
+                       request.resource.data.reportCountToday <= 10 &&
+                       request.resource.data.inviteCountToday is int &&
+                       request.resource.data.inviteCountToday <= 25 &&
+                       request.resource.data.inviteCountToday >= 0 &&
+                       (
+                         request.resource.data.likeDayKey != resource.data.likeDayKey ||
+                         request.resource.data.likeCountToday >= resource.data.likeCountToday
+                       ) &&
+                       (
+                         request.resource.data.reportDayKey != resource.data.reportDayKey ||
+                         request.resource.data.reportCountToday >= resource.data.reportCountToday
+                       ) &&
+                       (
+                         request.resource.data.inviteDayKey != resource.data.inviteDayKey ||
+                         request.resource.data.inviteCountToday >= resource.data.inviteCountToday
+                       ) &&
+                       (!('lastReportAtMs' in request.resource.data) || request.resource.data.lastReportAtMs is number) &&
+                       (!('lastInviteAtMs' in request.resource.data) || request.resource.data.lastInviteAtMs is number) &&
+                       request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
+                       request.resource.data.updatedAt.size() <= 64;
+      allow delete: if isUser(uid) && isAccountDeletionInProgress(uid);
+    }
+
+    // ====================================================================
+    // FASE 4: referralLinks/{code}, referralStats/{uid}, referralAttributions/{newUid}
+    // ====================================================================
+
+    function isValidReferralCode(code) {
+      return code is string && code.matches('^[A-Z0-9]{6,12}$');
+    }
+
+    match /referralLinks/{code} {
+      // Leitura pública por ID (get) sem listagem, expondo apenas código e primeiro nome do padrinho
+      allow get: if isValidReferralCode(code);
+      allow list: if isAdmin();
+      allow create: if isAuthenticated() &&
+                       isValidReferralCode(code) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'code', 'referrerUid', 'referrerDisplayName', 'active', 'createdAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'code', 'referrerUid', 'referrerDisplayName', 'active', 'createdAt'
+                       ]) &&
+                       request.resource.data.code == code &&
+                       request.resource.data.referrerUid == request.auth.uid &&
+                       request.resource.data.referrerDisplayName is string &&
+                       request.resource.data.referrerDisplayName.size() >= 1 &&
+                       request.resource.data.referrerDisplayName.size() <= 30 &&
+                       request.resource.data.active is bool &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       request.resource.data.createdAt.size() <= 64;
+      allow update: if isAuthenticated() &&
+                       isValidReferralCode(code) &&
+                       isCallerActive() &&
+                       resource.data.referrerUid == request.auth.uid &&
+                       request.resource.data.code == resource.data.code &&
+                       request.resource.data.referrerUid == resource.data.referrerUid &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['referrerDisplayName', 'active']) &&
+                       request.resource.data.referrerDisplayName is string &&
+                       request.resource.data.referrerDisplayName.size() >= 1 &&
+                       request.resource.data.referrerDisplayName.size() <= 30 &&
+                       request.resource.data.active is bool;
+      allow delete: if isAuthenticated() &&
+                       isValidReferralCode(code) &&
+                       resource != null &&
+                       resource.data.referrerUid == request.auth.uid &&
+                       isAccountDeletionInProgress(request.auth.uid);
+    }
+
+    match /referralStats/{uid} {
+      allow get: if isUser(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isUser(uid) &&
+                       isCallerActive() &&
+                       request.resource.data.keys().hasAll([
+                         'uid', 'referralCode', 'invitesSharedCount', 'updatedAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'uid', 'referralCode', 'invitesSharedCount', 'updatedAt'
+                       ]) &&
+                       request.resource.data.uid == uid &&
+                       isValidReferralCode(request.resource.data.referralCode) &&
+                       request.resource.data.invitesSharedCount is int &&
+                       request.resource.data.invitesSharedCount >= 0 &&
+                       request.resource.data.invitesSharedCount <= 50000 &&
+                       request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
+                       request.resource.data.updatedAt.size() <= 64;
+      allow update: if isUser(uid) &&
+                       isCallerActive() &&
+                       request.resource.data.uid == resource.data.uid &&
+                       isValidReferralCode(request.resource.data.referralCode) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                         'referralCode', 'invitesSharedCount', 'updatedAt'
+                       ]) &&
+                       request.resource.data.invitesSharedCount is int &&
+                       request.resource.data.invitesSharedCount >= resource.data.invitesSharedCount &&
+                       request.resource.data.invitesSharedCount <= 50000 &&
+                       request.resource.data.updatedAt is string &&
+                       request.resource.data.updatedAt.size() >= 1 &&
+                       request.resource.data.updatedAt.size() <= 64;
+      allow delete: if isUser(uid) && isAccountDeletionInProgress(uid);
+    }
+
+    match /referralAttributions/{newUid} {
+      allow get: if isUser(newUid) ||
+                    isAdmin() ||
+                    (isAuthenticated() && resource != null && resource.data.referrerUid == request.auth.uid);
+      allow list: if isAdmin() ||
+                     (isAuthenticated() && resource.data.referrerUid == request.auth.uid);
+      allow create: if isUser(newUid) &&
+                       !isProtectedLegacyUid(newUid) &&
+                       isCallerActive() &&
+                       !exists(/databases/$(database)/documents/referralAttributions/$(newUid)) &&
+                       request.resource.data.keys().hasAll([
+                         'newUid', 'newTalk2tmId', 'referralCode', 'referrerUid', 'createdAt'
+                       ]) &&
+                       request.resource.data.keys().hasOnly([
+                         'newUid', 'newTalk2tmId', 'referralCode', 'referrerUid', 'createdAt'
+                       ]) &&
+                       request.resource.data.newUid == newUid &&
+                       isValidTalk2tmId(request.resource.data.newTalk2tmId) &&
+                       callerTalk2tmId() == request.resource.data.newTalk2tmId &&
+                       isValidReferralCode(request.resource.data.referralCode) &&
+                       request.resource.data.referrerUid is string &&
+                       request.resource.data.referrerUid.size() >= 1 &&
+                       request.resource.data.referrerUid.size() <= 128 &&
+                       request.resource.data.referrerUid != newUid &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       request.resource.data.createdAt.size() <= 64 &&
+                       exists(/databases/$(database)/documents/referralLinks/$(request.resource.data.referralCode)) &&
+                       get(/databases/$(database)/documents/referralLinks/$(request.resource.data.referralCode)).data.referrerUid == request.resource.data.referrerUid &&
+                       get(/databases/$(database)/documents/referralLinks/$(request.resource.data.referralCode)).data.active == true;
+      allow update: if false;
+      allow delete: if isUser(newUid) && isAccountDeletionInProgress(newUid);
+    }
+
+    // ====================================================================
+    // FASE 5: growthTelemetry/{uid} — Atividade semanal (WAU) e cidade ativa sem PII
+    // ====================================================================
+
+    function isValidGrowthTelemetryFields(data, uid) {
+      return data.keys().hasAll(['uid', 'lastActiveAt', 'lastActiveDay', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'uid', 'lastActiveAt', 'lastActiveDay',
+               'city', 'cityKey', 'countryCode', 'updatedAt'
+             ]) &&
+             data.uid == uid &&
+             data.lastActiveAt is string &&
+             data.lastActiveAt.size() >= 1 &&
+             data.lastActiveAt.size() <= 64 &&
+             isValidDayKey(data.lastActiveDay) &&
+             data.updatedAt is string &&
+             data.updatedAt.size() >= 1 &&
+             data.updatedAt.size() <= 64 &&
+             (!('city' in data) || data.city == null || (data.city is string && data.city.size() <= 60)) &&
+             (!('cityKey' in data) || data.cityKey == null || (data.cityKey is string && data.cityKey.size() <= 60)) &&
+             (!('countryCode' in data) || data.countryCode == null || (data.countryCode is string && data.countryCode.size() <= 4));
+    }
+
+    match /growthTelemetry/{uid} {
+      allow get: if isUser(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if isUser(uid) &&
+                               !isProtectedLegacyUid(uid) &&
+                               isCallerActive() &&
+                               isValidGrowthTelemetryFields(request.resource.data, uid);
+      allow delete: if isUser(uid) && isAccountDeletionInProgress(uid);
     }
   }
 }

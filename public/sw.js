@@ -1,11 +1,39 @@
 // Talk2TM Minimalist Shell Service Worker
-const CACHE_NAME = 'talk2tm-shell-v8';
+const CACHE_NAME = 'talk2tm-shell-v9';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
   '/icon-talk2tm.svg'
 ];
+
+function sanitizeIncomingPushNotification(rawData) {
+  let parsed = {};
+  try {
+    if (rawData && typeof rawData.json === 'function') {
+      parsed = rawData.json() || {};
+    }
+  } catch {
+    parsed = {};
+  }
+
+  const kind = parsed && parsed.kind === 'match' ? 'match' : 'message';
+  // Privacidade rigorosa no ecrã bloqueado: nunca exibe nomes, remetentes ou conteúdo de mensagens
+  const safeBody = kind === 'match' ? 'Novo Match' : 'Nova atividade na conta';
+
+  return {
+    title: 'Talk2TM',
+    options: {
+      body: safeBody,
+      icon: '/icon-talk2tm.svg',
+      badge: '/icon-talk2tm.svg',
+      tag: kind === 'match' ? 'talk2tm-match' : 'talk2tm-activity',
+      renotify: false,
+      silent: false,
+      data: { url: '/' },
+    },
+  };
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -29,6 +57,30 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
+});
+
+self.addEventListener('push', (event) => {
+  const sanitized = sanitizeIncomingPushNotification(event.data);
+  event.waitUntil(self.registration.showNotification(sanitized.title, sanitized.options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification && event.notification.data && event.notification.data.url) || '/';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if ('focus' in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+      return undefined;
+    })
+  );
 });
 
 self.addEventListener('fetch', (event) => {
@@ -85,4 +137,5 @@ self.addEventListener('fetch', (event) => {
       .catch(() => caches.match(event.request).then((cached) => cached || new Response('Offline', { status: 503 })))
   );
 });
+
 

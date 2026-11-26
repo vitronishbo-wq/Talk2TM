@@ -17,7 +17,73 @@ import {
   saveSettings,
 } from './config';
 import { initI18n, prefetchLocaleChunks, setAppLocale, t } from './i18n';
-import { Conversation, ConversationInvite, ConnectionState, Message, Room, UserSession } from './types';
+import {
+  Conversation,
+  ConversationInvite,
+  ConnectionState,
+  DatingDiscoveryFilters,
+  DatingDiscoveryResult,
+  DatingEvaluationDecision,
+  DatingLikeResult,
+  DatingMatch,
+  DatingProfile,
+  DatingProfileInput,
+  Message,
+  ReportReason,
+  ReportSourceType,
+  Room,
+  UserSession,
+} from './types';
+import {
+  blockUserConnection,
+  checkAndRecordMessageBurst,
+  isLocallyBlockedPair,
+  loadLocalBlockedUids,
+  submitModerationReport,
+  subscribeToUserBlocks,
+} from './safety';
+import {
+  buildDatingMatchId,
+  discoverDatingProfiles,
+  ensureConversationForDatingMatch,
+  getDatingMatchPartner,
+  getOwnDatingProfile,
+  getUnmatchedConversationIds,
+  getUnseenDatingMatches,
+  loadLocalDatingMatches,
+  loadSavedDatingFilters,
+  loadSavedDatingProfile,
+  markDatingMatchChatStarted,
+  markDatingMatchSeen,
+  recordDatingEvaluation,
+  removeOwnDatingPhoto,
+  saveLocalDatingFilters,
+  saveLocalDatingMatches,
+  sendSecretDatingLike,
+  setDatingProfileVisibility,
+  subscribeToDatingMatchById,
+  subscribeToDatingMatches,
+  unmatchDatingConnection,
+  updateOwnDatingPhoto,
+  upsertOwnDatingProfile,
+  validateDatingFilters,
+} from './dating';
+import { dispatchDiscreetNotification } from './notifications';
+import { recordUserWeeklyActivityIfNeeded } from './growth';
+import {
+  attributeRegistrationReferral,
+  buildCanonicalReferralUrl,
+  buildWhatsAppReferralShareUrl,
+  clearPendingReferralCode,
+  deriveDeterministicReferralCode,
+  extractReferralCodeFromSearch,
+  fetchOwnReferralMetrics,
+  fetchPublicReferralInvite,
+  getPendingReferralCode,
+  incrementOwnReferralShareCount,
+  loadCachedReferralMetrics,
+  savePendingReferralCode,
+} from './referral';
 import { generateId, sanitizeMessageText } from './utils/sanitize';
 import {
   addToOutbox,
@@ -95,6 +161,7 @@ import {
   associateRecoveryEmailWithPin,
   authenticateVaultIdentity,
   completePasswordResetInApp,
+  deleteOwnAccountCompletely,
   findLocalIdentityByPin,
   getActiveVaultPinLengths,
   getAllLocalIdentities,
@@ -202,6 +269,17 @@ export class Talk2TMApp {
   private isCheckingCustomPin: boolean = false;
   private adminOverlayController: { destroy: () => Promise<void> } | null = null;
   private unsubscribeOwnProfile: Unsubscribe | null = null;
+  private unsubscribeUserBlocks: Unsubscribe | null = null;
+  private unsubscribeDatingMatches: Unsubscribe | null = null;
+  private unsubscribeActiveChatMatch: Unsubscribe | null = null;
+  private blockedPeerUids: Set<string> = new Set();
+  private hubDatingMatches: DatingMatch[] = [];
+  private notifiedUnseenMatchIds: Set<string> = new Set();
+  private knownMonitorMsgIds: Set<string> = new Set();
+  private hasInitializedMonitorMsgs: boolean = false;
+  private lastMonitorChannelId: string | null = null;
+  private knownRealtimeMsgIds: Set<string> = new Set();
+  private hasInitializedRealtimeMsgs: boolean = false;
 
   constructor(container: HTMLElement) {
     this.appSettings = loadSettings();
@@ -284,6 +362,56 @@ export class Talk2TMApp {
         if (this.currentSession?.talk2tmId) {
           void this.openBilateralHub(this.currentSession);
         }
+      },
+      onLoadDatingWorkspace: async () => {
+        return await this.handleLoadDatingWorkspace();
+      },
+      onSaveDatingProfile: async (input: DatingProfileInput) => {
+        return await this.handleSaveDatingProfile(input);
+      },
+      onSetDatingVisibility: async (opts: { discoverable?: boolean; paused?: boolean }) => {
+        return await this.handleSetDatingVisibility(opts);
+      },
+      onDiscoverDating: async (filters: DatingDiscoveryFilters, cursorUpdatedAt?: string) => {
+        return await this.handleDiscoverDating(filters, cursorUpdatedAt);
+      },
+      onEvaluateDatingProfile: async (
+        targetUid: string,
+        decision: DatingEvaluationDecision
+      ) => {
+        await this.handleEvaluateDatingProfile(targetUid, decision);
+      },
+      onLikeDatingCandidate: async (candidate: DatingProfile) => {
+        return await this.handleLikeDatingCandidate(candidate);
+      },
+      onOpenDatingMatchChat: async (match: DatingMatch) => {
+        await this.handleOpenDatingMatchChat(match);
+      },
+      onUnmatchDating: async (matchId: string) => {
+        await this.handleUnmatchDating(matchId);
+      },
+      onMarkDatingMatchSeen: async (match: DatingMatch) => {
+        await this.handleMarkDatingMatchSeen(match);
+      },
+      onReportTarget: async (params) => {
+        await this.handleReportTarget(params);
+      },
+      onBlockUser: async (targetUid: string, targetName: string) => {
+        await this.handleBlockUser(targetUid, targetName);
+      },
+      onDeleteOwnAccount: async (currentPin: string) => {
+        await this.handleDeleteOwnAccount(currentPin);
+      },
+      onUploadDatingPhoto: async (blob: Blob) => {
+        return await this.handleUploadDatingPhoto(blob);
+      },
+      onRemoveDatingPhoto: async () => {
+        return await this.handleRemoveDatingPhoto();
+      },
+      onTrackReferralShare: async (referralCode: string) => {
+        const uid = getCurrentAuthUser()?.uid || this.currentSession?.userId;
+        if (!uid) return 0;
+        return await incrementOwnReferralShareCount(uid, referralCode);
       },
     });
 
@@ -555,7 +683,7 @@ export class Talk2TMApp {
         // 4. Busca mensagens mais recentes do servidor e só então marca como consultadas/apaga o indicador
         await this.refreshLatestChannelFromServer(roomId, false, effectiveUid);
 
-        if (this.ui.isChatActive() && this.currentSession) {
+        if (this.ui.isChatActive() && document.visibilityState === 'visible' && this.currentSession) {
           await this.markChatAsRead(true);
         }
 
@@ -649,11 +777,71 @@ export class Talk2TMApp {
     });
   }
 
+  private stopUserBlocksSubscription(): void {
+    if (this.unsubscribeUserBlocks) {
+      this.unsubscribeUserBlocks();
+      this.unsubscribeUserBlocks = null;
+    }
+  }
+
+  private getConversationPartnerUid(
+    convOrRoom: { participantA?: string; participantB?: string | null } | null | undefined,
+    myUid: string
+  ): string | null {
+    if (!convOrRoom || !myUid) return null;
+    if (convOrRoom.participantA === myUid) return convOrRoom.participantB || null;
+    if (convOrRoom.participantB === myUid) return convOrRoom.participantA || null;
+    return null;
+  }
+
+  private isPeerBlocked(myUid: string, peerUid?: string | null): boolean {
+    if (!myUid || !peerUid || myUid === peerUid) return false;
+    return this.blockedPeerUids.has(peerUid) || isLocallyBlockedPair(myUid, peerUid);
+  }
+
+  private filterUnblockedDatingMatches(matches: DatingMatch[], myUid: string): DatingMatch[] {
+    if (!myUid) return matches;
+    return matches.filter((m) => !this.isPeerBlocked(myUid, getDatingMatchPartner(m, myUid).uid));
+  }
+
+  private syncBlockedStateAcrossViews(myUid: string): void {
+    const filteredMatches = this.filterUnblockedDatingMatches(this.hubDatingMatches, myUid);
+    if (this.ui.isConnectViewActive()) {
+      this.ui.updateDatingMatches(filteredMatches, myUid);
+      this.renderConnectHubData();
+    }
+    if (this.currentSession?.conversationId && this.currentRoom) {
+      const partnerUid = this.getConversationPartnerUid(this.currentRoom, myUid);
+      const blocked = Boolean(partnerUid && this.isPeerBlocked(myUid, partnerUid));
+      this.ui.setChatBlockedState(blocked);
+      if (blocked && this.ui.isChatActive()) {
+        this.ui.showTemporaryNotice(t('safety.blockedChatNotice'));
+      }
+    }
+  }
+
+  private attachUserBlocksSubscription(uid?: string): void {
+    if (!uid) return;
+    const localBlocked = loadLocalBlockedUids(uid);
+    this.blockedPeerUids = new Set(localBlocked);
+
+    this.stopUserBlocksSubscription();
+    if (!isAuthValidAndNonAnonymous()) return;
+
+    this.unsubscribeUserBlocks = subscribeToUserBlocks(uid, (peerUids) => {
+      this.blockedPeerUids = peerUids;
+      this.syncBlockedStateAcrossViews(uid);
+    });
+  }
+
   public leaveSession(): void {
     this.stopAllTimers();
     this.stopActiveChatSyncLoop();
+    this.stopActiveChatMatchSubscription();
     this.stopConnectHubListeners();
     this.stopOwnProfileSubscription();
+    this.stopUserBlocksSubscription();
+    this.blockedPeerUids.clear();
     if (this.unsubscribeMessages) {
       this.unsubscribeMessages();
       this.unsubscribeMessages = null;
@@ -808,6 +996,22 @@ export class Talk2TMApp {
       saveSession(this.currentSession);
     }
 
+    if (this.currentSession.conversationId) {
+      const partnerUid = this.getConversationPartnerUid(this.currentRoom, effectiveSenderId);
+      if (partnerUid && this.isPeerBlocked(effectiveSenderId, partnerUid)) {
+        this.ui.setChatBlockedState(true);
+        this.ui.showTemporaryNotice(t('safety.blockedChatNotice'));
+        return;
+      }
+    }
+
+    try {
+      checkAndRecordMessageBurst(effectiveSenderId, sanitized.text);
+    } catch (rateErr: any) {
+      this.ui.showTemporaryNotice(rateErr?.message || t('safety.errRateLimitMessages'));
+      return;
+    }
+
     const msg: Message = {
       messageId,
       room: channelId,
@@ -825,6 +1029,14 @@ export class Talk2TMApp {
     await addToOutbox(msg);
     this.ui.appendOrUpdateMessage(msg, true);
     this.markChatAsRead();
+    if (this.currentSession.conversationId) {
+      void markDatingMatchChatStarted({
+        conversationId: this.currentSession.conversationId,
+        myUid: effectiveSenderId,
+        participantA: this.currentRoom?.participantA,
+        participantB: this.currentRoom?.participantB,
+      });
+    }
 
     // Explicit guard check: procede APENAS se auth.currentUser != null e auth.currentUser.isAnonymous === false.
     // Aguarda consolidação rápida do Auth se ainda estiver finalizando nos primeiros segundos após abrir o chat.
@@ -1044,6 +1256,8 @@ export class Talk2TMApp {
     }
 
     const isConversation = Boolean(this.currentSession?.conversationId);
+    this.knownRealtimeMsgIds.clear();
+    this.hasInitializedRealtimeMsgs = false;
 
     if (isConversation && this.currentSession?.conversationId) {
       const convId = this.currentSession.conversationId;
@@ -1051,6 +1265,9 @@ export class Talk2TMApp {
         const roomEquivalent = conversationToRoom(conv);
         this.currentRoom = roomEquivalent;
         saveLocalRoom(roomEquivalent);
+        if (!this.unsubscribeActiveChatMatch && conv.participantA && conv.participantB) {
+          this.attachActiveChatMatchGuard(conv.participantA, conv.participantB, convId);
+        }
         if (this.currentSession) {
           this.ui.updateRoomInfo(roomEquivalent, this.currentSession);
           this.ui.updateReadReceipts(roomEquivalent, this.currentSession);
@@ -1080,14 +1297,7 @@ export class Talk2TMApp {
               this.ui.appendOrUpdateMessage(resolvedMsg, this.isOwnMessage(resolvedMsg, this.currentSession));
             }
           }
-          if (this.ui.isChatActive()) {
-            const hasIncomingFromPartner = visibleIncoming.some(
-              (m) => !this.isOwnMessage(m, this.currentSession!)
-            );
-            await this.markChatAsRead(hasIncomingFromPartner);
-          } else {
-            await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
-          }
+          await this.handleRealtimeIncomingBatch(visibleIncoming);
         },
         (err) => {
           console.warn('Listener Firestore da conversa offline:', err);
@@ -1127,14 +1337,7 @@ export class Talk2TMApp {
               this.ui.appendOrUpdateMessage(msg, this.isOwnMessage(msg, this.currentSession));
             }
           }
-          if (this.ui.isChatActive()) {
-            const hasIncomingFromPartner = visibleIncoming.some(
-              (m) => !this.isOwnMessage(m, this.currentSession!)
-            );
-            await this.markChatAsRead(hasIncomingFromPartner);
-          } else {
-            await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
-          }
+          await this.handleRealtimeIncomingBatch(visibleIncoming);
         },
         (err) => {
           console.warn('Listener Firestore offline:', err);
@@ -1211,6 +1414,12 @@ export class Talk2TMApp {
       return;
     }
 
+    if (this.lastMonitorChannelId !== ctx.channelId) {
+      this.knownMonitorMsgIds.clear();
+      this.hasInitializedMonitorMsgs = false;
+      this.lastMonitorChannelId = ctx.channelId;
+    }
+
     const effectiveUid = getCurrentAuthUser()?.uid || ctx.userId;
 
     if (ctx.isConversation) {
@@ -1238,6 +1447,13 @@ export class Talk2TMApp {
           }
           this.cachedMonitorMessages = visible;
           await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
+          this.processMonitorNotificationCandidates(
+            visible,
+            ctx.channelId,
+            effectiveUid,
+            ctx.displayName,
+            this.cachedMonitorChannel
+          );
         },
         (err) => {
           console.debug('Talk2TM [Monitor]: listener em espera:', err?.message);
@@ -1269,12 +1485,119 @@ export class Talk2TMApp {
           }
           this.cachedMonitorMessages = visible;
           await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
+          this.processMonitorNotificationCandidates(
+            visible,
+            ctx.channelId,
+            effectiveUid,
+            ctx.displayName,
+            this.cachedMonitorChannel
+          );
         },
         (err) => {
           console.debug('Talk2TM [Monitor]: listener em espera:', err?.message);
         }
       );
     }
+  }
+
+  private async handleRealtimeIncomingBatch(visibleIncoming: Message[]): Promise<void> {
+    if (!this.currentSession) return;
+    const isVisibleChat = this.ui.isChatActive() && document.visibilityState === 'visible';
+    const hasIncomingFromPartner = visibleIncoming.some(
+      (m) => !this.isOwnMessage(m, this.currentSession!)
+    );
+
+    if (isVisibleChat) {
+      for (const m of visibleIncoming) {
+        this.knownRealtimeMsgIds.add(m.messageId);
+      }
+      this.hasInitializedRealtimeMsgs = true;
+      await this.markChatAsRead(hasIncomingFromPartner);
+      return;
+    }
+
+    if (!this.hasInitializedRealtimeMsgs) {
+      for (const m of visibleIncoming) {
+        this.knownRealtimeMsgIds.add(m.messageId);
+      }
+      this.hasInitializedRealtimeMsgs = true;
+    } else {
+      const newlyArrived = visibleIncoming.filter(
+        (m) => !this.knownRealtimeMsgIds.has(m.messageId) && !this.isOwnMessage(m, this.currentSession!)
+      );
+      for (const m of visibleIncoming) {
+        this.knownRealtimeMsgIds.add(m.messageId);
+      }
+      const latestNew = newlyArrived[newlyArrived.length - 1];
+      if (latestNew) {
+        void dispatchDiscreetNotification({
+          kind: 'message',
+          settings: this.appSettings,
+          eventKey: latestNew.messageId,
+          isAppForegroundContext: false,
+        });
+      }
+    }
+
+    if (!this.ui.isChatActive()) {
+      await this.evaluateUnreadIndicator(visibleIncoming, this.currentRoom);
+    }
+  }
+
+  private processMonitorNotificationCandidates(
+    messages: Message[],
+    channelId: string,
+    myUid: string,
+    myDisplayName: string,
+    channelMeta?: Room | Conversation | null
+  ): void {
+    if (!this.hasInitializedMonitorMsgs) {
+      for (const m of messages) {
+        this.knownMonitorMsgIds.add(m.messageId);
+      }
+      this.hasInitializedMonitorMsgs = true;
+      return;
+    }
+
+    const localStoredRead = getLocalLastReadTimestamp(channelId, myUid);
+    const channelSelfRead = getSelfLastReadFromChannel(channelMeta, myUid, myDisplayName);
+    const lastReadIso = maxIsoDate(localStoredRead, channelSelfRead);
+
+    const newIncoming = messages.filter((m) => {
+      if (this.knownMonitorMsgIds.has(m.messageId)) return false;
+      const isOwn =
+        m.senderId === myUid ||
+        (Boolean(myDisplayName) && m.sender === myDisplayName);
+      if (isOwn) return false;
+      if (isMessageHiddenLocally(channelId, m.messageId)) return false;
+      return !lastReadIso || m.createdAt > lastReadIso;
+    });
+
+    for (const m of messages) {
+      this.knownMonitorMsgIds.add(m.messageId);
+    }
+
+    const latest = newIncoming[newIncoming.length - 1];
+    if (latest) {
+      void dispatchDiscreetNotification({
+        kind: 'message',
+        settings: this.appSettings,
+        eventKey: latest.messageId,
+        isAppForegroundContext: false,
+      });
+    }
+  }
+
+  private syncWeeklyActivityTelemetry(uid: string, forceCitySync: boolean = false): void {
+    if (!uid) return;
+    const savedDating = loadSavedDatingProfile(uid);
+    void recordUserWeeklyActivityIfNeeded({
+      uid,
+      city: savedDating?.city || null,
+      cityKey: savedDating?.cityKey || null,
+      countryCode: savedDating?.countryCode || null,
+      forceCitySync,
+    });
   }
 
   /**
@@ -1284,7 +1607,7 @@ export class Talk2TMApp {
     messages: Message[],
     channelMeta?: Room | Conversation | null
   ): Promise<void> {
-    if (this.ui.isChatActive()) {
+    if (this.ui.isChatActive() && document.visibilityState === 'visible') {
       this.ui.setCalculatorUnreadDot(false);
       return;
     }
@@ -1422,7 +1745,7 @@ export class Talk2TMApp {
         }
 
         const visible = await this.refreshLatestChannelFromServer(channelId, isConv, myUid);
-        if (this.ui.isChatActive()) {
+        if (this.ui.isChatActive() && document.visibilityState === 'visible') {
           await this.markChatAsRead();
           await this.syncPendingOutbox();
         } else {
@@ -1440,6 +1763,13 @@ export class Talk2TMApp {
         const visible = await this.refreshLatestChannelFromServer(ctx.channelId, ctx.isConversation, effectiveUid);
         this.cachedMonitorMessages = visible;
         await this.evaluateUnreadIndicator(visible, this.cachedMonitorChannel);
+        this.processMonitorNotificationCandidates(
+          visible,
+          ctx.channelId,
+          effectiveUid,
+          ctx.displayName,
+          this.cachedMonitorChannel
+        );
       }
 
       // Garante drenagem de mensagens pendentes no outbox mesmo em segundo plano
@@ -1624,6 +1954,20 @@ export class Talk2TMApp {
           return;
         }
       }
+
+      const refCode = extractReferralCodeFromSearch(window.location.search);
+      if (refCode) {
+        savePendingReferralCode(refCode);
+        if (window.history?.replaceState) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        const invite = await fetchPublicReferralInvite(refCode).catch(() => null);
+        this.ui.showReferralLandingView({
+          code: refCode,
+          referrerDisplayName: invite?.referrerDisplayName,
+        });
+        return;
+      }
     }
 
     this.ui.showCalculatorView();
@@ -1723,7 +2067,10 @@ export class Talk2TMApp {
         }
       }
       if (this.currentSession && this.currentSession.userId === identity.uid) {
+        const activeUid = getCurrentAuthUser()?.uid || identity.uid;
         this.attachOwnProfileSuspensionGuard(identity.talk2tmId);
+        this.attachUserBlocksSubscription(activeUid);
+        this.syncWeeklyActivityTelemetry(activeUid);
         await this.connectToConversation(lastConvId);
       }
     } else {
@@ -1756,7 +2103,10 @@ export class Talk2TMApp {
         }
       }
       if (this.currentSession && this.currentSession.userId === identity.uid) {
+        const activeUid = getCurrentAuthUser()?.uid || identity.uid;
         this.attachOwnProfileSuspensionGuard(identity.talk2tmId);
+        this.attachUserBlocksSubscription(activeUid);
+        this.syncWeeklyActivityTelemetry(activeUid);
         await this.openBilateralHub(session);
       }
     }
@@ -1776,6 +2126,16 @@ export class Talk2TMApp {
     recoveryEmail?: string;
   }): Promise<{ talk2tmId: string; recoveryCode: string; e164Phone: string }> {
     const result = await registerPhoneIdentity(params);
+
+    const pendingRef = getPendingReferralCode();
+    if (pendingRef) {
+      await attributeRegistrationReferral({
+        newUid: result.identity.uid,
+        newTalk2tmId: result.identity.talk2tmId,
+        referralCode: pendingRef,
+      }).catch(() => {});
+      clearPendingReferralCode();
+    }
 
     this.pendingOnboardingSession = {
       userId: result.identity.uid,
@@ -1813,6 +2173,8 @@ export class Talk2TMApp {
     this.stopBackgroundMonitor();
     this.startSessionTimeout();
     this.resetInactivityTimer();
+    this.attachUserBlocksSubscription(session.userId);
+    this.syncWeeklyActivityTelemetry(session.userId);
     await this.openBilateralHub(session);
   }
 
@@ -1871,6 +2233,37 @@ export class Talk2TMApp {
     await updateLocalPinForAccount(uid, currentPin, newPin);
   }
 
+  private stopActiveChatMatchSubscription(): void {
+    if (this.unsubscribeActiveChatMatch) {
+      this.unsubscribeActiveChatMatch();
+      this.unsubscribeActiveChatMatch = null;
+    }
+  }
+
+  private attachActiveChatMatchGuard(
+    participantA: string,
+    participantB: string,
+    conversationId: string
+  ): void {
+    this.stopActiveChatMatchSubscription();
+    if (!participantA || !participantB || !isAuthValidAndNonAnonymous()) return;
+    const matchId = buildDatingMatchId(participantA, participantB);
+    this.unsubscribeActiveChatMatch = subscribeToDatingMatchById(matchId, (match) => {
+      if (match?.status === 'unmatched' && this.currentSession?.conversationId === conversationId) {
+        const sessionSnapshot = this.currentSession;
+        const uid = getCurrentAuthUser()?.uid || sessionSnapshot.userId;
+        const nextMatches = this.hubDatingMatches.some((m) => m.matchId === match.matchId)
+          ? this.hubDatingMatches.map((m) => (m.matchId === match.matchId ? match : m))
+          : [match, ...this.hubDatingMatches];
+        this.hubDatingMatches = nextMatches;
+        saveLocalDatingMatches(uid, nextMatches);
+        void this.openBilateralHub(sessionSnapshot).then(() => {
+          this.ui.showTemporaryNotice(t('dating.unmatchedChatClosed'));
+        });
+      }
+    });
+  }
+
   private stopConnectHubListeners(): void {
     if (this.unsubscribeIncomingInvites) {
       this.unsubscribeIncomingInvites();
@@ -1884,6 +2277,10 @@ export class Talk2TMApp {
       this.unsubscribeUserConversations();
       this.unsubscribeUserConversations = null;
     }
+    if (this.unsubscribeDatingMatches) {
+      this.unsubscribeDatingMatches();
+      this.unsubscribeDatingMatches = null;
+    }
     if (this.unsubscribeHubAuthWait) {
       this.unsubscribeHubAuthWait();
       this.unsubscribeHubAuthWait = null;
@@ -1891,10 +2288,16 @@ export class Talk2TMApp {
   }
 
   private renderConnectHubData(): void {
+    const myUid = getCurrentAuthUser()?.uid || this.currentSession?.userId || '';
+    const unmatchedIds = getUnmatchedConversationIds(this.hubDatingMatches);
     this.ui.updateConnectHubData({
-      incoming: this.hubIncomingInvites,
-      outgoing: this.hubOutgoingInvites,
-      conversations: this.hubConversations,
+      incoming: this.hubIncomingInvites.filter((inv) => !this.isPeerBlocked(myUid, inv.fromUid)),
+      outgoing: this.hubOutgoingInvites.filter((inv) => !this.isPeerBlocked(myUid, inv.toUid)),
+      conversations: this.hubConversations.filter((c) => {
+        if (unmatchedIds.has(c.conversationId)) return false;
+        const partnerUid = this.getConversationPartnerUid(c, myUid);
+        return !this.isPeerBlocked(myUid, partnerUid);
+      }),
     });
   }
 
@@ -1919,6 +2322,7 @@ export class Talk2TMApp {
    */
   public async openBilateralHub(session: UserSession): Promise<void> {
     this.stopActiveChatSyncLoop();
+    this.stopActiveChatMatchSubscription();
     if (this.unsubscribeMessages) {
       this.unsubscribeMessages();
       this.unsubscribeMessages = null;
@@ -1948,13 +2352,21 @@ export class Talk2TMApp {
     this.hubHasRemoteConversationsSnapshot = false;
     if (!sameHubConversations) {
       this.hubConversations = [];
+      this.notifiedUnseenMatchIds.clear();
     }
     this.knownAcceptedInviteIds.clear();
+    this.hubDatingMatches = loadLocalDatingMatches(hubSession.userId);
+    this.blockedPeerUids = new Set(loadLocalBlockedUids(hubSession.userId));
 
     this.ui.showConnectView(hubSession);
+    this.renderImmediateReferralMetrics(hubSession.userId);
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
     this.startSessionTimeout();
     this.resetInactivityTimer();
+    this.ui.updateDatingMatches(
+      this.filterUnblockedDatingMatches(this.hubDatingMatches, hubSession.userId),
+      hubSession.userId
+    );
     this.renderConnectHubData();
 
     // Pré-carrega conversas já sincronizadas no IndexedDB imediatamente (sem bloquear Auth/rede)
@@ -1964,10 +2376,47 @@ export class Talk2TMApp {
       await waitForAuthCompletion(3000);
     }
 
+    const effectiveUid = getCurrentAuthUser()?.uid || hubSession.userId;
     if (this.currentSession?.talk2tmId) {
       this.attachOwnProfileSuspensionGuard(this.currentSession.talk2tmId);
     }
+    this.attachUserBlocksSubscription(effectiveUid);
     this.attachConnectHubListeners(hubSession);
+    if (isAuthValidAndNonAnonymous()) {
+      void this.refreshOwnReferralMetrics(effectiveUid, hubSession.displayName);
+    }
+  }
+
+  private renderImmediateReferralMetrics(uid: string): void {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const cached = loadCachedReferralMetrics(uid);
+    if (cached) {
+      this.ui.updateReferralMetrics(cached);
+      return;
+    }
+    const code = deriveDeterministicReferralCode(uid);
+    const inviteUrl = buildCanonicalReferralUrl(origin, code);
+    const shareText = t('referral.whatsappShareText', { url: inviteUrl });
+    this.ui.updateReferralMetrics({
+      referralCode: code,
+      inviteUrl,
+      whatsappUrl: buildWhatsAppReferralShareUrl(shareText),
+      invitesSharedCount: 0,
+      convertedCount: 0,
+    });
+  }
+
+  private async refreshOwnReferralMetrics(uid: string, displayName: string): Promise<void> {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const summary = await fetchOwnReferralMetrics(
+      uid,
+      displayName,
+      origin,
+      (inviteUrl) => t('referral.whatsappShareText', { url: inviteUrl })
+    ).catch(() => null);
+    if (summary && this.ui.isConnectViewActive()) {
+      this.ui.updateReferralMetrics(summary);
+    }
   }
 
   private attachConnectHubListeners(session: UserSession): void {
@@ -1981,7 +2430,9 @@ export class Talk2TMApp {
             if (session.talk2tmId) {
               this.attachOwnProfileSuspensionGuard(session.talk2tmId);
             }
+            this.attachUserBlocksSubscription(resolved.uid);
             this.attachConnectHubListeners({ ...session, userId: resolved.uid });
+            void this.refreshOwnReferralMetrics(resolved.uid, session.displayName);
           }
         });
       }
@@ -2008,7 +2459,10 @@ export class Talk2TMApp {
       } else {
         // Quando Conta B acaba de aceitar um convite pendente nosso, abre a conversa bilateral automaticamente
         const newlyAccepted = invites.find(
-          (inv) => inv.status === 'accepted' && !this.knownAcceptedInviteIds.has(inv.inviteId)
+          (inv) =>
+            inv.status === 'accepted' &&
+            !this.knownAcceptedInviteIds.has(inv.inviteId) &&
+            !this.isPeerBlocked(myUid, inv.toUid)
         );
         if (newlyAccepted && this.ui.isConnectViewActive()) {
           this.knownAcceptedInviteIds.add(newlyAccepted.inviteId);
@@ -2027,6 +2481,36 @@ export class Talk2TMApp {
       this.hubConversations = conversations;
       conversations.forEach((c) => saveLocalConversation(c).catch(() => {}));
       this.renderConnectHubData();
+    });
+
+    this.unsubscribeDatingMatches = subscribeToDatingMatches(myUid, (matches) => {
+      this.hubDatingMatches = matches;
+      const visibleMatches = this.filterUnblockedDatingMatches(matches, myUid);
+      this.renderConnectHubData();
+      this.ui.updateDatingMatches(visibleMatches, myUid);
+
+      const unseen = getUnseenDatingMatches(visibleMatches, myUid);
+      const isDatingForeground =
+        this.ui.isConnectViewActive() &&
+        this.ui.getActiveConnectTab() === 'dating' &&
+        document.visibilityState === 'visible';
+      for (const m of unseen) {
+        if (!this.notifiedUnseenMatchIds.has(m.matchId)) {
+          this.notifiedUnseenMatchIds.add(m.matchId);
+          if (this.ui.getActiveConnectTab() === 'connections') {
+            const partner = getDatingMatchPartner(m, myUid);
+            this.ui.showTemporaryNotice(
+              t('dating.matchToastNotice', { name: partner.displayName || partner.talk2tmId })
+            );
+          }
+          void dispatchDiscreetNotification({
+            kind: 'match',
+            settings: this.appSettings,
+            eventKey: m.matchId,
+            isAppForegroundContext: isDatingForeground,
+          });
+        }
+      }
     });
   }
 
@@ -2109,6 +2593,294 @@ export class Talk2TMApp {
     this.ui.showConnectFeedback(t('connect.inviteCancelled'));
   }
 
+  private async ensureActiveNonAnonUid(): Promise<string> {
+    if (!this.currentSession || !this.currentSession.talk2tmId) {
+      throw new Error(t('err.identityNeededInvite'));
+    }
+    if (!isAuthValidAndNonAnonymous()) {
+      await restoreLocalIdentity();
+      await waitForAuthCompletion(3000);
+    }
+    return getCurrentAuthUser()?.uid || this.currentSession.userId;
+  }
+
+  private async handleLoadDatingWorkspace(): Promise<{
+    profile: DatingProfile | null;
+    filters: DatingDiscoveryFilters;
+    discovery: DatingDiscoveryResult | null;
+    matches: DatingMatch[];
+  }> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const profile = await getOwnDatingProfile(uid);
+    if (profile) {
+      void recordUserWeeklyActivityIfNeeded({
+        uid,
+        city: profile.city,
+        cityKey: profile.cityKey,
+        countryCode: profile.countryCode,
+      });
+    }
+    const filters = loadSavedDatingFilters(
+      uid,
+      profile?.seeking || 'all',
+      profile?.countryCode || ''
+    );
+    let discovery: DatingDiscoveryResult | null = null;
+    if (profile && profile.discoverable && !profile.paused && !profile.suspended) {
+      discovery = await discoverDatingProfiles({
+        viewerProfile: profile,
+        filters,
+      });
+    }
+    const rawMatches = this.hubDatingMatches.length > 0 ? this.hubDatingMatches : loadLocalDatingMatches(uid);
+    const matches = this.filterUnblockedDatingMatches(rawMatches, uid);
+    return { profile, filters, discovery, matches };
+  }
+
+  private async handleSaveDatingProfile(input: DatingProfileInput): Promise<{
+    profile: DatingProfile;
+    discovery: DatingDiscoveryResult | null;
+  }> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const talk2tmId = this.currentSession?.talk2tmId;
+    if (!talk2tmId) {
+      throw new Error(t('err.identityNeededInvite'));
+    }
+    const profile = await upsertOwnDatingProfile(uid, talk2tmId, input);
+    void recordUserWeeklyActivityIfNeeded({
+      uid,
+      city: profile.city,
+      cityKey: profile.cityKey,
+      countryCode: profile.countryCode,
+      forceCitySync: true,
+    });
+    const filters = loadSavedDatingFilters(uid, profile.seeking, profile.countryCode);
+    saveLocalDatingFilters(uid, filters);
+
+    let discovery: DatingDiscoveryResult | null = null;
+    if (profile.discoverable && !profile.paused && !profile.suspended) {
+      discovery = await discoverDatingProfiles({
+        viewerProfile: profile,
+        filters,
+      });
+    }
+    return { profile, discovery };
+  }
+
+  private async handleSetDatingVisibility(opts: {
+    discoverable?: boolean;
+    paused?: boolean;
+  }): Promise<DatingProfile> {
+    const uid = await this.ensureActiveNonAnonUid();
+    return await setDatingProfileVisibility(uid, opts);
+  }
+
+  private async handleUploadDatingPhoto(blob: Blob): Promise<DatingProfile> {
+    const uid = await this.ensureActiveNonAnonUid();
+    return await updateOwnDatingPhoto({ uid, fileBlob: blob });
+  }
+
+  private async handleRemoveDatingPhoto(): Promise<DatingProfile> {
+    const uid = await this.ensureActiveNonAnonUid();
+    return await removeOwnDatingPhoto(uid);
+  }
+
+  private async handleDiscoverDating(
+    filters: DatingDiscoveryFilters,
+    cursorUpdatedAt?: string
+  ): Promise<DatingDiscoveryResult> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const profile = await getOwnDatingProfile(uid);
+    if (!profile) {
+      throw new Error(t('dating.errProfileNotFound'));
+    }
+    const cleanFilters = validateDatingFilters(filters, profile.countryCode);
+    saveLocalDatingFilters(uid, cleanFilters);
+    return await discoverDatingProfiles({
+      viewerProfile: profile,
+      filters: cleanFilters,
+      cursorUpdatedAt,
+    });
+  }
+
+  private async handleEvaluateDatingProfile(
+    targetUid: string,
+    decision: DatingEvaluationDecision
+  ): Promise<void> {
+    const uid = await this.ensureActiveNonAnonUid();
+    await recordDatingEvaluation(uid, targetUid, decision);
+  }
+
+  private async handleLikeDatingCandidate(candidate: DatingProfile): Promise<DatingLikeResult> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const viewerProfile = await getOwnDatingProfile(uid);
+    if (!viewerProfile) {
+      throw new Error(t('dating.errProfileNotFound'));
+    }
+    const res = await sendSecretDatingLike({ viewerProfile, candidate });
+    if (res.matched && res.match) {
+      this.notifiedUnseenMatchIds.add(res.match.matchId);
+      const nextMatches = this.hubDatingMatches.some((m) => m.matchId === res.match!.matchId)
+        ? this.hubDatingMatches.map((m) => (m.matchId === res.match!.matchId ? res.match! : m))
+        : [res.match, ...this.hubDatingMatches];
+      this.hubDatingMatches = nextMatches;
+      saveLocalDatingMatches(uid, nextMatches);
+      if (res.conversation) {
+        await saveLocalConversation(res.conversation).catch(() => {});
+        await saveLocalRoom(conversationToRoom(res.conversation)).catch(() => {});
+        if (!this.hubConversations.some((c) => c.conversationId === res.conversation!.conversationId)) {
+          this.hubConversations = [res.conversation, ...this.hubConversations];
+        }
+      }
+      this.ui.updateDatingMatches(nextMatches, uid);
+      this.renderConnectHubData();
+    }
+    return res;
+  }
+
+  private async handleOpenDatingMatchChat(match: DatingMatch): Promise<void> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const updatedMatch = await markDatingMatchSeen(match, uid);
+    if (updatedMatch) {
+      this.hubDatingMatches = this.hubDatingMatches.map((m) =>
+        m.matchId === updatedMatch.matchId ? updatedMatch : m
+      );
+      this.ui.updateDatingMatches(this.hubDatingMatches, uid);
+    }
+    const conv = await ensureConversationForDatingMatch(match);
+    await saveLocalConversation(conv).catch(() => {});
+    await saveLocalRoom(conversationToRoom(conv)).catch(() => {});
+    await this.connectToConversation(conv.conversationId);
+  }
+
+  private async handleUnmatchDating(matchId: string): Promise<void> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const updated = await unmatchDatingConnection(matchId, uid);
+    const nextMatches = this.hubDatingMatches.some((m) => m.matchId === updated.matchId)
+      ? this.hubDatingMatches.map((m) => (m.matchId === updated.matchId ? updated : m))
+      : [updated, ...this.hubDatingMatches];
+    this.hubDatingMatches = nextMatches;
+    saveLocalDatingMatches(uid, nextMatches);
+    this.ui.updateDatingMatches(nextMatches, uid);
+    this.renderConnectHubData();
+    this.ui.showTemporaryNotice(t('dating.unmatchDoneNotice'));
+  }
+
+  private async handleMarkDatingMatchSeen(match: DatingMatch): Promise<void> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const updated = await markDatingMatchSeen(match, uid);
+    if (updated) {
+      this.hubDatingMatches = this.hubDatingMatches.map((m) =>
+        m.matchId === updated.matchId ? updated : m
+      );
+      this.ui.updateDatingMatches(this.filterUnblockedDatingMatches(this.hubDatingMatches, uid), uid);
+    }
+  }
+
+  private async handleReportTarget(params: {
+    targetUid: string;
+    targetTalk2tmId?: string;
+    targetDisplayName?: string;
+    sourceType: ReportSourceType;
+    channelId?: string;
+    itemRefId?: string;
+    reason: ReportReason;
+    details?: string;
+    evidenceSnapshot: string;
+  }): Promise<void> {
+    const uid = await this.ensureActiveNonAnonUid();
+    const talk2tmId = this.currentSession?.talk2tmId;
+    if (!talk2tmId) {
+      throw new Error(t('err.identityNeededInvite'));
+    }
+    await submitModerationReport({
+      reporterUid: uid,
+      reporterTalk2tmId: talk2tmId,
+      ...params,
+    });
+  }
+
+  private async handleBlockUser(targetUid: string, _targetName: string): Promise<void> {
+    const uid = await this.ensureActiveNonAnonUid();
+    await blockUserConnection({
+      blockerUid: uid,
+      blockerTalk2tmId: this.currentSession?.talk2tmId,
+      blockedUid: targetUid,
+    });
+    this.blockedPeerUids.add(targetUid);
+
+    const activeConvPartner =
+      this.currentSession?.conversationId && this.currentRoom
+        ? this.getConversationPartnerUid(this.currentRoom, uid)
+        : null;
+
+    if (activeConvPartner && activeConvPartner === targetUid && this.currentSession) {
+      await this.openBilateralHub(this.currentSession);
+      this.ui.showTemporaryNotice(t('safety.blockedDoneNotice'));
+      return;
+    }
+
+    this.syncBlockedStateAcrossViews(uid);
+    if (this.ui.getActiveConnectTab() !== 'dating') {
+      this.ui.showConnectFeedback(t('safety.blockedDoneNotice'));
+    }
+  }
+
+  private async handleDeleteOwnAccount(currentPin: string): Promise<void> {
+    if (!this.currentSession || !this.currentSession.talk2tmId) {
+      throw new Error(t('safety.errCannotDeleteLegacy'));
+    }
+    const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
+    const convIds = Array.from(
+      new Set([
+        ...this.hubConversations.map((c) => c.conversationId),
+        ...(this.currentSession.conversationId ? [this.currentSession.conversationId] : []),
+      ])
+    );
+
+    await deleteOwnAccountCompletely({
+      uid,
+      currentPin,
+      conversationIds: convIds,
+    });
+
+    this.stopAllTimers();
+    this.stopActiveChatSyncLoop();
+    this.stopActiveChatMatchSubscription();
+    this.stopConnectHubListeners();
+    this.stopOwnProfileSubscription();
+    this.stopUserBlocksSubscription();
+    this.stopBackgroundMonitor();
+    this.blockedPeerUids.clear();
+    this.hubIncomingInvites = [];
+    this.hubOutgoingInvites = [];
+    this.hubConversations = [];
+    this.hubDatingMatches = [];
+
+    if (this.unsubscribeMessages) {
+      this.unsubscribeMessages();
+      this.unsubscribeMessages = null;
+    }
+    if (this.unsubscribeRoom) {
+      this.unsubscribeRoom();
+      this.unsubscribeRoom = null;
+    }
+
+    this.currentSession = null;
+    this.currentRoom = null;
+    clearSession();
+
+    const monitor = getMonitorContext();
+    if (monitor && monitor.userId === uid) {
+      clearMonitorContext();
+    }
+
+    this.ui.clearMessages();
+    this.ui.hideAllPrimaryViews();
+    this.ui.showLockView();
+    this.ui.showTemporaryNotice(t('safety.deleteAccountDoneNotice'));
+  }
+
   /**
    * Conecta a sessão ativa a um canal de conversa bilateral (Fase 4).
    * Carrega metadados da conversa (participantA + participantB), histórico local com tombstones,
@@ -2117,6 +2889,7 @@ export class Talk2TMApp {
   public async connectToConversation(conversationId: string): Promise<void> {
     if (!this.currentSession) return;
     this.stopConnectHubListeners();
+    this.stopActiveChatMatchSubscription();
 
     const effectiveUid = getCurrentAuthUser()?.uid || this.currentSession.userId;
     this.currentSession.userId = effectiveUid;
@@ -2135,6 +2908,7 @@ export class Talk2TMApp {
     if (this.currentSession?.talk2tmId && isAuthValidAndNonAnonymous()) {
       this.attachOwnProfileSuspensionGuard(this.currentSession.talk2tmId);
     }
+    this.attachUserBlocksSubscription(effectiveUid);
 
     // Carrega metadados da conversa bilateral para resolver nomes de participantA/participantB e lastRead
     let convRoom: Room | null = await getLocalRoom(conversationId).catch(() => null);
@@ -2157,9 +2931,17 @@ export class Talk2TMApp {
 
     if (convRoom) {
       this.currentRoom = convRoom;
+      if (convRoom.participantA && convRoom.participantB) {
+        this.attachActiveChatMatchGuard(convRoom.participantA, convRoom.participantB, conversationId);
+      }
     }
 
     this.ui.showChatView(this.currentSession, convRoom || undefined);
+    const partnerUid = this.getConversationPartnerUid(convRoom, effectiveUid);
+    if (partnerUid && this.isPeerBlocked(effectiveUid, partnerUid)) {
+      this.ui.setChatBlockedState(true);
+      this.ui.showTemporaryNotice(t('safety.blockedChatNotice'));
+    }
     this.setConnectionState(navigator.onLine ? 'conectando' : 'offline');
     this.startSessionTimeout();
     this.resetInactivityTimer();
@@ -2195,7 +2977,7 @@ export class Talk2TMApp {
     // Configura listeners em tempo real para conversations/{conversationId} e sincroniza do servidor
     this.setupRealtimeListeners(conversationId);
     await this.refreshLatestChannelFromServer(conversationId, true, effectiveUid);
-    if (this.ui.isChatActive()) {
+    if (this.ui.isChatActive() && document.visibilityState === 'visible') {
       await this.markChatAsRead(true);
     }
     await this.syncPendingOutbox();

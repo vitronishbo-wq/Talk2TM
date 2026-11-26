@@ -32,7 +32,20 @@ import {
   reauthenticateWithCredential,
   User,
 } from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
+import {
+  doc,
+  setDoc,
+  getDoc,
+  getDocs,
+  updateDoc,
+  deleteDoc,
+  collection,
+  query,
+  where,
+  limit,
+  writeBatch,
+  DocumentReference,
+} from 'firebase/firestore';
 import {
   normalizePhoneNumber,
   maskPhoneNumber,
@@ -40,10 +53,14 @@ import {
   phoneHashToInternalEmail,
 } from './utils/phone';
 import { t } from './i18n';
+import { checkAccountCreationThrottle, recordAccountCreationAttempt } from './safety';
+import { clearAccountScopedIndexedDBData } from './storage/indexeddb';
+import { deleteDatingPhotoFromStorage } from './media/photo';
 
 const LOCAL_IDENTITY_V1_KEY = 'talk2tm_identity_v1';
 const LOCAL_VAULT_V2_KEY = 'talk2tm_identities_v2';
 const RESERVED_SYSTEM_PINS = new Set(['852456', '135790']);
+const PROTECTED_LEGACY_UIDS = new Set(['uid_truman_852456', 'uid_maezinha_135790']);
 
 export interface LocalIdentity {
   uid: string;
@@ -730,10 +747,13 @@ export async function registerPhoneIdentity(
     throw new Error(t('err.firebaseUnavailable'));
   }
 
+  checkAccountCreationThrottle();
+
   let user: User;
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, internalEmail, authPassword);
     user = userCredential.user;
+    recordAccountCreationAttempt();
   } catch (err: any) {
     if (err?.code === 'auth/email-already-in-use') {
       if (emailCheck.email) {
@@ -1521,3 +1541,327 @@ export async function findProfileByPhone(rawPhone: string): Promise<PhoneDirecto
 
   return snap.data() as PhoneDirectoryEntry;
 }
+
+/**
+ * Remove exclusivamente os rastros locais de um UID do cofre e do localStorage,
+ * preservando integralmente outras contas no cofre multi-conta e dados do par legado Truman/Mãezinha.
+ */
+export function removeAccountFromLocalVault(
+  uid: string,
+  conversationIds: string[] = [],
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+): void {
+  const storeRef = storage || (typeof localStorage !== 'undefined' ? localStorage : undefined);
+  if (!storeRef || !uid || PROTECTED_LEGACY_UIDS.has(uid)) return;
+
+  const vault = readVaultStore(storeRef);
+  const remaining = vault.accounts.filter((a) => a.uid !== uid);
+  if (remaining.length === 0) {
+    try {
+      storeRef.removeItem(LOCAL_VAULT_V2_KEY);
+      storeRef.removeItem(LOCAL_IDENTITY_V1_KEY);
+    } catch {
+      // ignora erro de storage
+    }
+  } else {
+    const nextActiveUid = vault.activeUid === uid ? remaining[0].uid : vault.activeUid;
+    writeVaultStore({ activeUid: nextActiveUid, accounts: remaining }, storeRef);
+    const activeAcc = remaining.find((a) => a.uid === nextActiveUid) || remaining[0];
+    if (activeAcc) {
+      try {
+        storeRef.setItem(LOCAL_IDENTITY_V1_KEY, JSON.stringify(activeAcc));
+      } catch {
+        // ignora erro
+      }
+    }
+  }
+
+  // Limpa sessão ativa apenas se pertencer ao UID apagado
+  try {
+    const rawSession = storeRef.getItem('talk2tm_session');
+    if (rawSession) {
+      const parsed = JSON.parse(rawSession) as { userId?: string };
+      if (!parsed?.userId || parsed.userId === uid) {
+        storeRef.removeItem('talk2tm_session');
+      }
+    }
+  } catch {
+    try {
+      storeRef.removeItem('talk2tm_session');
+    } catch {
+      // ignora
+    }
+  }
+
+  // Limpa contexto de monitor em segundo plano apenas se pertencer ao UID apagado ou às suas conversas
+  try {
+    const rawMonitor = storeRef.getItem('talk2tm_monitor_v1');
+    if (rawMonitor) {
+      const parsed = JSON.parse(rawMonitor) as { userId?: string; channelId?: string };
+      if (
+        parsed?.userId === uid ||
+        (parsed?.channelId &&
+          parsed.channelId !== 'truman-maezinha' &&
+          conversationIds.includes(parsed.channelId))
+      ) {
+        storeRef.removeItem('talk2tm_monitor_v1');
+      }
+    }
+  } catch {
+    // ignora
+  }
+
+  const perUidKeys = [
+    `talk2tm_last_conv_${uid}`,
+    `talk2tm_dating_profile_v1_${uid}`,
+    `talk2tm_dating_filters_v1_${uid}`,
+    `talk2tm_dating_evals_v1_${uid}`,
+    `talk2tm_dating_blocks_v1_${uid}`,
+    `talk2tm_dating_matches_v1_${uid}`,
+    `talk2tm_blocks_v1_${uid}`,
+    `talk2tm_ratelimit_v1_${uid}`,
+    `talk2tm_ref_summary_v1_${uid}`,
+    `talk2tm_activity_ping_v1_${uid}`,
+  ];
+  for (const key of perUidKeys) {
+    try {
+      storeRef.removeItem(key);
+    } catch {
+      // ignora
+    }
+  }
+
+  for (const rawCid of conversationIds) {
+    const cid = (rawCid || '').trim();
+    if (!cid || cid === 'truman-maezinha' || !cid.startsWith('conv_')) continue;
+    for (const cKey of [
+      `talk2tm_hidden_${cid}`,
+      `ttm_last_read_${cid}_${uid}`,
+      `ttm_last_read_${cid}`,
+    ]) {
+      try {
+        storeRef.removeItem(cKey);
+      } catch {
+        // ignora
+      }
+    }
+  }
+}
+
+async function commitBatchDeletionsInChunks(
+  db: NonNullable<ReturnType<typeof getFirebaseDB>>,
+  refs: DocumentReference[]
+): Promise<void> {
+  const seen = new Map<string, DocumentReference>();
+  for (const ref of refs) {
+    seen.set(ref.path, ref);
+  }
+  const unique = Array.from(seen.values());
+  const CHUNK_SIZE = 380;
+  for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
+    const batch = writeBatch(db);
+    const slice = unique.slice(i, i + CHUNK_SIZE);
+    for (const ref of slice) {
+      batch.delete(ref);
+    }
+    await batch.commit();
+  }
+}
+
+/**
+ * Eliminação Real de Conta (Hard Delete):
+ * - Exige PIN local válido para decifrar a credencial Auth e reautenticar o utilizador.
+ * - Marca users/{uid}.accountStatus = 'deleting' para autorizar a cascata nas regras de segurança.
+ * - Apaga avaliações Dating, bloqueios, likes, matches, convites, conversas bilaterais e mensagens.
+ * - Apaga num batch atômico final: userRateLimits/{uid}, datingProfiles/{uid}, phoneLookup/{phoneHash}, userProfiles/{talk2tmId} e users/{uid}.
+ * - Elimina o utilizador no Firebase Auth (user.delete()) e limpa apenas os dados locais daquela conta.
+ */
+export async function deleteOwnAccountCompletely(params: {
+  uid: string;
+  currentPin: string;
+  conversationIds?: string[];
+}): Promise<{ deletedConversationIds: string[] }> {
+  const { uid } = params;
+  const cleanPin = (params.currentPin || '').trim();
+  if (!uid || PROTECTED_LEGACY_UIDS.has(uid)) {
+    throw new Error(t('safety.errCannotDeleteLegacy'));
+  }
+
+  const identity = getAllLocalIdentities().find((a) => a.uid === uid);
+  if (!identity) {
+    throw new Error(t('err.localAccountNotFound'));
+  }
+
+  const authPassword = await unsealAuthSecretWithPin(identity, cleanPin);
+
+  await initFirebase();
+  const auth = getFirebaseAuth();
+  const db = getFirebaseDB();
+  if (!auth || !db) {
+    throw new Error(t('err.firebaseUnavailable'));
+  }
+
+  let user = auth.currentUser;
+  if (!user || user.uid !== uid) {
+    try {
+      const cred = await signInWithEmailAndPassword(auth, identity.internalEmail, authPassword);
+      user = cred.user;
+    } catch (err) {
+      if (identity.pendingRecoveryEmail) {
+        const cred = await signInWithEmailAndPassword(auth, identity.pendingRecoveryEmail, authPassword);
+        user = cred.user;
+      } else {
+        throw err;
+      }
+    }
+    syncAuthState(user);
+  } else {
+    const activeEmail = (user.email || identity.internalEmail).toLowerCase();
+    const emailCred = EmailAuthProvider.credential(activeEmail, authPassword);
+    await reauthenticateWithCredential(user, emailCred);
+  }
+
+  await user.getIdToken(true).catch(() => {});
+
+  const userRef = doc(db, 'users', uid);
+  const userSnap = await getDoc(userRef);
+  const accountData = userSnap.exists() ? (userSnap.data() as UserAccount) : null;
+  const talk2tmId = accountData?.talk2tmId || identity.talk2tmId;
+  const phoneHash = accountData?.phoneHash || identity.phoneHash;
+
+  const nowIso = new Date().toISOString();
+  if (userSnap.exists() && accountData?.accountStatus !== 'deleting') {
+    await updateDoc(userRef, {
+      accountStatus: 'deleting',
+      deletionRequestedAt: nowIso,
+    });
+  }
+
+  const deletedConversationIds = new Set<string>(
+    (params.conversationIds || []).filter((id) => Boolean(id) && id !== 'truman-maezinha')
+  );
+  const batchDeleteRefs: DocumentReference[] = [];
+
+  // 1. Avaliações Dating (subcoleção privada)
+  const evalSnap = await getDocs(query(collection(db, 'datingProfiles', uid, 'evaluations'), limit(500)));
+  evalSnap.forEach((d) => batchDeleteRefs.push(d.ref));
+
+  // 2. Bloqueios em que a conta participa
+  const [blocksOut, blocksIn] = await Promise.all([
+    getDocs(query(collection(db, 'userBlocks'), where('blockerUid', '==', uid), limit(300))),
+    getDocs(query(collection(db, 'userBlocks'), where('blockedUid', '==', uid), limit(300))),
+  ]);
+  blocksOut.forEach((d) => batchDeleteRefs.push(d.ref));
+  blocksIn.forEach((d) => batchDeleteRefs.push(d.ref));
+
+  // 3. Likes secretos enviados (nota: datingLikes allow list restringe fromUid == auth.uid)
+  const likesOut = await getDocs(query(collection(db, 'datingLikes'), where('fromUid', '==', uid), limit(300)));
+  likesOut.forEach((d) => batchDeleteRefs.push(d.ref));
+
+  // 4. Matches Dating + eventual like recíproco conhecido via participantA/B
+  const [matchesA, matchesB] = await Promise.all([
+    getDocs(query(collection(db, 'datingMatches'), where('participantA', '==', uid), limit(300))),
+    getDocs(query(collection(db, 'datingMatches'), where('participantB', '==', uid), limit(300))),
+  ]);
+  for (const d of [...matchesA.docs, ...matchesB.docs]) {
+    const m = d.data() as { participantA?: string; participantB?: string; conversationId?: string };
+    const peerUid = m.participantA === uid ? m.participantB : m.participantA;
+    if (peerUid) {
+      batchDeleteRefs.push(doc(db, 'datingLikes', `${peerUid}_${uid}`));
+    }
+    if (m.conversationId && m.conversationId.startsWith('conv_')) {
+      deletedConversationIds.add(m.conversationId);
+    }
+    batchDeleteRefs.push(d.ref);
+  }
+
+  // 5. Convites bilaterais
+  const [invOut, invIn] = await Promise.all([
+    getDocs(query(collection(db, 'conversationInvites'), where('fromUid', '==', uid), limit(300))),
+    getDocs(query(collection(db, 'conversationInvites'), where('toUid', '==', uid), limit(300))),
+  ]);
+  invOut.forEach((d) => batchDeleteRefs.push(d.ref));
+  invIn.forEach((d) => batchDeleteRefs.push(d.ref));
+
+  // 6. Conversas bilaterais + suas mensagens (preservando truman-maezinha intacta)
+  const [convsA, convsB] = await Promise.all([
+    getDocs(query(collection(db, 'conversations'), where('participantA', '==', uid), limit(200))),
+    getDocs(query(collection(db, 'conversations'), where('participantB', '==', uid), limit(200))),
+  ]);
+  const convDocs = [...convsA.docs, ...convsB.docs];
+  for (const convDoc of convDocs) {
+    const cid = convDoc.id;
+    if (!cid.startsWith('conv_') || cid === 'truman-maezinha') continue;
+    deletedConversationIds.add(cid);
+
+    let hasMoreMsgs = true;
+    while (hasMoreMsgs) {
+      const msgSnap = await getDocs(
+        query(collection(db, 'conversations', cid, 'messages'), limit(350))
+      );
+      if (msgSnap.empty) {
+        hasMoreMsgs = false;
+      } else {
+        await commitBatchDeletionsInChunks(
+          db,
+          msgSnap.docs.map((m) => m.ref)
+        );
+        if (msgSnap.size < 350) {
+          hasMoreMsgs = false;
+        }
+      }
+    }
+    batchDeleteRefs.push(convDoc.ref);
+  }
+
+  // 6b. Links de convite gerados pela conta
+  const refLinksSnap = await getDocs(
+    query(collection(db, 'referralLinks'), where('referrerUid', '==', uid), limit(20))
+  ).catch(() => null);
+  if (refLinksSnap) {
+    refLinksSnap.forEach((d) => batchDeleteRefs.push(d.ref));
+  }
+
+  // Executa todas as deleções de relacionamento e histórico antes da remoção final da raiz da conta
+  await commitBatchDeletionsInChunks(db, batchDeleteRefs);
+
+  // 7. Deleção final atômica de userRateLimits, datingProfiles, referralStats, referralAttributions, phoneLookup, userProfiles e users/{uid}
+  const finalBatch = writeBatch(db);
+  const optionalRefs: DocumentReference[] = [
+    doc(db, 'userRateLimits', uid),
+    doc(db, 'datingProfiles', uid),
+    doc(db, 'referralStats', uid),
+    doc(db, 'referralAttributions', uid),
+    doc(db, 'growthTelemetry', uid),
+    ...(phoneHash ? [doc(db, 'phoneLookup', phoneHash)] : []),
+    ...(talk2tmId ? [doc(db, 'userProfiles', talk2tmId)] : []),
+  ];
+  const existenceSnaps = await Promise.all(
+    optionalRefs.map((r) => getDoc(r).catch(() => null))
+  );
+  existenceSnaps.forEach((snap, idx) => {
+    if (snap && snap.exists()) {
+      finalBatch.delete(optionalRefs[idx]);
+    }
+  });
+  if (userSnap.exists()) {
+    finalBatch.delete(userRef);
+  }
+  await finalBatch.commit();
+
+  // 7b. Remove eventual fotografia Dating no Firebase Storage (antes de apagar o utilizador no Auth)
+  await deleteDatingPhotoFromStorage(uid);
+
+  // 8. Elimina o registo no Firebase Auth
+  await user.delete();
+  syncAuthState(null);
+  await signOut(auth).catch(() => {});
+
+  // 9. Limpa cofre local e IndexedDB exclusivamente para esta conta
+  const deletedList = Array.from(deletedConversationIds);
+  removeAccountFromLocalVault(uid, deletedList);
+  await clearAccountScopedIndexedDBData(deletedList);
+
+  return { deletedConversationIds: deletedList };
+}
+

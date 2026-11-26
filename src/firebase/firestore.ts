@@ -34,6 +34,7 @@ import {
 } from 'firebase/firestore';
 import { Conversation, ConversationInvite, ConversationMessage, Message, PhoneDirectoryEntry, Room, UserProfile } from '../types';
 import { t } from '../i18n';
+import { addBlockedUidLocally, isLocallyBlockedPair, recordInviteRateLimitAttempt } from '../safety';
 import { AllowedUser, USER_AUTH_CREDENTIALS } from '../config';
 import { maxIsoDate, selectLatestMessages } from '../utils/unread';
 import { hashPhoneNumber, normalizePhoneNumber } from '../utils/phone';
@@ -144,6 +145,10 @@ export function isAuthValidAndNonAnonymous(): boolean {
 
 export function getFirebaseAuth(): Auth | null {
   return firebaseAuth;
+}
+
+export function getFirebaseApp(): FirebaseApp | null {
+  return firebaseApp;
 }
 
 export function getFirebaseDB(): Firestore | null {
@@ -1126,6 +1131,27 @@ async function sendInviteToTargetProfile(
   if (targetProfile.uid === fromUser.uid) {
     throw new Error(t('err.cannotInviteSelf'));
   }
+
+  if (isLocallyBlockedPair(fromUser.uid, targetProfile.uid)) {
+    throw new Error(t('safety.errBlockedInteraction'));
+  }
+
+  try {
+    const [b1, b2] = await Promise.all([
+      getDoc(doc(db, 'userBlocks', `${fromUser.uid}_${targetProfile.uid}`)),
+      getDoc(doc(db, 'userBlocks', `${targetProfile.uid}_${fromUser.uid}`)),
+    ]);
+    if (b1.exists() || b2.exists()) {
+      addBlockedUidLocally(fromUser.uid, targetProfile.uid);
+      throw new Error(t('safety.errBlockedInteraction'));
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === t('safety.errBlockedInteraction')) {
+      throw err;
+    }
+  }
+
+  await recordInviteRateLimitAttempt(fromUser.uid);
 
   const sortedUids = [fromUser.uid, targetProfile.uid].sort();
   const conversationId = `conv_${sortedUids[0]}_${sortedUids[1]}`;

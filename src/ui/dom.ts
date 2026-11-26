@@ -1,8 +1,42 @@
-import { ConnectionState, Conversation, ConversationInvite, Message, Room, UserSession } from '../types';
-import { AppSettings, normalizeAppearanceMode, normalizeSettingsLanguage } from '../config';
+import {
+  ConnectionState,
+  Conversation,
+  ConversationInvite,
+  DatingDiscoveryFilters,
+  DatingDiscoveryResult,
+  DatingEvaluationDecision,
+  DatingLikeResult,
+  DatingMatch,
+  DatingProfile,
+  DatingProfileInput,
+  Message,
+  ReferralMetricsSummary,
+  ReportReason,
+  ReportSourceType,
+  Room,
+  UserSession,
+} from '../types';
+import { getDatingMatchPartner, getUnseenDatingMatches } from '../dating';
+import {
+  buildWhatsAppReferralShareUrl,
+  computeConversionRatePercent,
+  getPendingReferralCode,
+} from '../referral';
+import { VALID_REPORT_REASONS } from '../safety';
+import {
+  AppSettings,
+  normalizeAppearanceMode,
+  normalizeNotificationSettings,
+  normalizeSettingsLanguage,
+} from '../config';
+import {
+  getWebNotificationPermission,
+  requestWebNotificationPermission,
+} from '../notifications';
 import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
 import { MobileCalculator, isAdminRouteSequence } from './calculator';
 import { Talk2TMLockScreen } from './lockscreen';
+import { DatingPanel } from './dating-panel';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
 import { getCountryDisplayName, PhoneCountry, PhoneNormalizationResult } from '../utils/phone';
@@ -62,6 +96,42 @@ export interface UIEvents {
   onCancelInvite?: (inviteId: string) => Promise<void>;
   onOpenConversation?: (conversationId: string) => Promise<void>;
   onShowConnectHub?: () => void;
+  onLoadDatingWorkspace?: () => Promise<{
+    profile: DatingProfile | null;
+    filters: DatingDiscoveryFilters;
+    discovery: DatingDiscoveryResult | null;
+    matches?: DatingMatch[];
+  }>;
+  onSaveDatingProfile?: (input: DatingProfileInput) => Promise<{
+    profile: DatingProfile;
+    discovery: DatingDiscoveryResult | null;
+  }>;
+  onSetDatingVisibility?: (opts: { discoverable?: boolean; paused?: boolean }) => Promise<DatingProfile>;
+  onDiscoverDating?: (
+    filters: DatingDiscoveryFilters,
+    cursorUpdatedAt?: string
+  ) => Promise<DatingDiscoveryResult>;
+  onEvaluateDatingProfile?: (targetUid: string, decision: DatingEvaluationDecision) => Promise<void>;
+  onLikeDatingCandidate?: (candidate: DatingProfile) => Promise<DatingLikeResult>;
+  onOpenDatingMatchChat?: (match: DatingMatch) => Promise<void>;
+  onUnmatchDating?: (matchId: string) => Promise<void>;
+  onMarkDatingMatchSeen?: (match: DatingMatch) => Promise<void>;
+  onReportTarget?: (params: {
+    targetUid: string;
+    targetTalk2tmId?: string;
+    targetDisplayName?: string;
+    sourceType: ReportSourceType;
+    channelId?: string;
+    itemRefId?: string;
+    reason: ReportReason;
+    details?: string;
+    evidenceSnapshot: string;
+  }) => Promise<void>;
+  onBlockUser?: (targetUid: string, targetName: string) => Promise<void>;
+  onDeleteOwnAccount?: (currentPin: string) => Promise<void>;
+  onUploadDatingPhoto?: (blob: Blob) => Promise<DatingProfile>;
+  onRemoveDatingPhoto?: () => Promise<DatingProfile>;
+  onTrackReferralShare?: (referralCode: string) => Promise<number>;
 }
 
 export class ChatUI {
@@ -95,8 +165,21 @@ export class ChatUI {
   private passRecoverBtnEl!: HTMLButtonElement;
   private backToLockBtnEl!: HTMLButtonElement;
 
+  // Página pública leve de convite (?ref=CODE)
+  private landingViewEl!: HTMLElement;
+  private landingKickerEl!: HTMLElement;
+  private landingTitleEl!: HTMLElement;
+  private landingSubtitleEl!: HTMLElement;
+  private landingBullet1El!: HTMLElement;
+  private landingBullet2El!: HTMLElement;
+  private landingBullet3El!: HTMLElement;
+  private landingCtaBtnEl!: HTMLButtonElement;
+  private landingSecondaryBtnEl!: HTMLButtonElement;
+  private activeReferralInvite: { code: string; referrerDisplayName?: string } | null = null;
+
   // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação + E-mail Opcional)
   private onboardingViewEl!: HTMLElement;
+  private onboardingRefBannerEl!: HTMLElement;
   private onboardingTitleEl!: HTMLElement;
   private onboardingSubtitleEl!: HTMLElement;
   private onboardingFormEl!: HTMLFormElement;
@@ -177,6 +260,13 @@ export class ChatUI {
   // Hub de Conexões Bilaterais (Descoberta por telefone exato, sem expor TM-XXXX-XXXX)
   private connectionsBtnEl!: HTMLButtonElement;
   private connectViewEl!: HTMLElement;
+  private connectTabConnectionsBtnEl!: HTMLButtonElement;
+  private connectTabDatingBtnEl!: HTMLButtonElement;
+  private connectHubCardsWrapEl!: HTMLElement;
+  private datingPanel!: DatingPanel;
+  private activeConnectTab: 'connections' | 'dating' = 'connections';
+  private lastDatingUid: string | null = null;
+  private unseenDatingMatchCount = 0;
   private connectSelfTitleEl!: HTMLElement;
   private connectSelfNameEl!: HTMLElement;
   private connectSelfPhoneEl!: HTMLElement;
@@ -200,6 +290,22 @@ export class ChatUI {
   private connectNextPinInput!: HTMLInputElement;
   private connectNextPinConfInput!: HTMLInputElement;
   private connectSavePinBtnEl!: HTMLButtonElement;
+  private connectDeleteBtnEl!: HTMLButtonElement;
+  private connectDeletePanelEl!: HTMLElement;
+  private connectDeleteWarningEl!: HTMLElement;
+  private connectDeletePinInput!: HTMLInputElement;
+  private connectDeleteCheckbox!: HTMLInputElement;
+  private connectDeleteCheckLabelEl!: HTMLElement;
+  private connectDeleteSubmitBtnEl!: HTMLButtonElement;
+  private isDeleteConfirmPending = false;
+  private deleteConfirmTimerId: ReturnType<typeof setTimeout> | null = null;
+  private connectRefTitleEl!: HTMLElement;
+  private connectRefDescEl!: HTMLElement;
+  private connectRefUrlEl!: HTMLElement;
+  private connectRefStatsEl!: HTMLElement;
+  private connectRefWhatsappLinkEl!: HTMLAnchorElement;
+  private connectRefCopyBtnEl!: HTMLButtonElement;
+  private lastReferralSummary: ReferralMetricsSummary | null = null;
   private connectInviteTitleEl!: HTMLElement;
   private connectTargetField!: PhoneInputField;
   private connectTargetPreviewEl!: HTMLElement;
@@ -220,6 +326,12 @@ export class ChatUI {
 
   // Tela de Chat
   private chatViewEl!: HTMLElement;
+  private chatBlockBtnEl!: HTMLButtonElement;
+  private isChatBlockConfirmPending = false;
+  private chatBlockConfirmTimerId: ReturnType<typeof setTimeout> | null = null;
+  private currentChatPartnerUid: string | null = null;
+  private currentChatPartnerName = '';
+  private isChatBlocked = false;
   private msgListEl!: HTMLElement;
   private msgInputEl!: HTMLInputElement;
   private sendBtnEl!: HTMLButtonElement;
@@ -251,7 +363,37 @@ export class ChatUI {
   private inactivitySelectEl!: HTMLSelectElement;
   private appearanceSelectEl!: HTMLSelectElement;
   private languageSelectEl!: HTMLSelectElement;
+  private settingsPushLabelEl!: HTMLElement;
+  private pushEnabledCheckboxEl!: HTMLInputElement;
+  private settingsPushEnableTextEl!: HTMLElement;
+  private pushMatchCheckboxEl!: HTMLInputElement;
+  private settingsPushMatchTextEl!: HTMLElement;
+  private pushMessageCheckboxEl!: HTMLInputElement;
+  private settingsPushMessageTextEl!: HTMLElement;
+  private settingsPushHintEl!: HTMLElement;
+  private settingsPushStatusEl!: HTMLElement;
+  private settingsPushPermissionBtnEl!: HTMLButtonElement;
   private inactivityNoticeEl!: HTMLElement;
+
+  // Modal inline de Denúncia (Reports)
+  private reportModalEl!: HTMLElement;
+  private reportModalTitleEl!: HTMLElement;
+  private reportTargetLabelEl!: HTMLElement;
+  private reportReasonLabelEl!: HTMLElement;
+  private reportReasonSelectEl!: HTMLSelectElement;
+  private reportDetailsInputEl!: HTMLTextAreaElement;
+  private reportErrorEl!: HTMLElement;
+  private reportSubmitBtnEl!: HTMLButtonElement;
+  private reportCancelBtnEl!: HTMLButtonElement;
+  private activeReportContext: {
+    targetUid: string;
+    targetTalk2tmId?: string;
+    targetDisplayName?: string;
+    sourceType: ReportSourceType;
+    channelId?: string;
+    itemRefId?: string;
+    evidenceSnapshot: string;
+  } | null = null;
 
   private renderedMessageIds: Set<string> = new Set();
   private renderedMessages: Map<string, { msg: Message; isSelf: boolean }> = new Map();
@@ -388,19 +530,23 @@ export class ChatUI {
     this.mainEl.className = 'ttm-main';
 
     this.buildPassEntryView();
+    this.buildReferralLandingView();
     this.buildOnboardingView();
     this.buildRecoveryView();
     this.buildConnectView();
     this.buildChatView();
     this.buildSettingsModal();
+    this.buildReportModal();
 
     this.mainEl.appendChild(this.passViewEl);
+    this.mainEl.appendChild(this.landingViewEl);
     this.mainEl.appendChild(this.onboardingViewEl);
     this.mainEl.appendChild(this.recoveryViewEl);
     this.mainEl.appendChild(this.connectViewEl);
     this.mainEl.appendChild(this.chatViewEl);
     this.appWrapper.appendChild(this.mainEl);
     this.appWrapper.appendChild(this.settingsModalEl);
+    this.appWrapper.appendChild(this.reportModalEl);
 
     this.container.appendChild(this.appWrapper);
 
@@ -643,6 +789,66 @@ export class ChatUI {
    * 4. Confirmar PIN
    * + Passo 2: Definição de Chave Pessoal fácil de lembrar (regras claras, zero custos, sem SMS/e-mail).
    */
+  private buildReferralLandingView(): void {
+    this.landingViewEl = document.createElement('section');
+    this.landingViewEl.id = 'ttm-landing-view';
+    this.landingViewEl.className = 'ttm-landing-box';
+    this.landingViewEl.style.display = 'none';
+
+    const card = document.createElement('div');
+    card.className = 'ttm-landing-card';
+
+    const emblem = document.createElement('div');
+    emblem.className = 'ttm-landing-emblem';
+    emblem.innerHTML = `<svg width="42" height="42" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <rect x="4" y="4" width="56" height="56" rx="16" stroke="currentColor" stroke-width="2.5"/>
+      <path d="M18 22h28v18a4 4 0 0 1-4 4H28l-8 6v-6h-2a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4Z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+      <path d="M26 30h12M26 35h8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+    </svg>`;
+
+    this.landingKickerEl = document.createElement('div');
+    this.landingKickerEl.className = 'ttm-landing-kicker';
+
+    this.landingTitleEl = document.createElement('h1');
+    this.landingTitleEl.className = 'ttm-landing-title';
+
+    this.landingSubtitleEl = document.createElement('p');
+    this.landingSubtitleEl.className = 'ttm-landing-subtitle';
+
+    const pointsList = document.createElement('ul');
+    pointsList.className = 'ttm-landing-points';
+    this.landingBullet1El = document.createElement('li');
+    this.landingBullet2El = document.createElement('li');
+    this.landingBullet3El = document.createElement('li');
+    pointsList.appendChild(this.landingBullet1El);
+    pointsList.appendChild(this.landingBullet2El);
+    pointsList.appendChild(this.landingBullet3El);
+
+    this.landingCtaBtnEl = document.createElement('button');
+    this.landingCtaBtnEl.type = 'button';
+    this.landingCtaBtnEl.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.landingCtaBtnEl.addEventListener('click', () => {
+      this.showOnboardingView();
+    });
+
+    this.landingSecondaryBtnEl = document.createElement('button');
+    this.landingSecondaryBtnEl.type = 'button';
+    this.landingSecondaryBtnEl.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    this.landingSecondaryBtnEl.addEventListener('click', () => {
+      this.showLockView();
+    });
+
+    card.appendChild(emblem);
+    card.appendChild(this.landingKickerEl);
+    card.appendChild(this.landingTitleEl);
+    card.appendChild(this.landingSubtitleEl);
+    card.appendChild(pointsList);
+    card.appendChild(this.landingCtaBtnEl);
+    card.appendChild(this.landingSecondaryBtnEl);
+    this.landingViewEl.appendChild(card);
+    this.updateReferralLandingLocale();
+  }
+
   private buildOnboardingView(): void {
     this.onboardingViewEl = document.createElement('div');
     this.onboardingViewEl.id = 'ttm-onboarding-view';
@@ -661,6 +867,10 @@ export class ChatUI {
     subtitleEl.className = 'ttm-subtitle';
     subtitleEl.textContent = t('onboarding.subtitle');
     this.onboardingSubtitleEl = subtitleEl;
+
+    this.onboardingRefBannerEl = document.createElement('div');
+    this.onboardingRefBannerEl.className = 'ttm-onboarding-ref-banner';
+    this.onboardingRefBannerEl.style.display = 'none';
 
     this.onboardingFormEl = document.createElement('form');
     this.onboardingFormEl.className = 'ttm-form';
@@ -1034,6 +1244,7 @@ export class ChatUI {
 
     cardEl.appendChild(titleEl);
     cardEl.appendChild(subtitleEl);
+    cardEl.appendChild(this.onboardingRefBannerEl);
     cardEl.appendChild(this.onboardingFormEl);
     cardEl.appendChild(this.recoveryStepBoxEl);
     this.onboardingViewEl.appendChild(cardEl);
@@ -1482,6 +1693,32 @@ export class ChatUI {
     this.connectViewEl.className = 'ttm-connect-box';
     this.connectViewEl.style.display = 'none';
 
+    const tabBar = document.createElement('div');
+    tabBar.className = 'ttm-connect-tabs';
+
+    this.connectTabConnectionsBtnEl = document.createElement('button');
+    this.connectTabConnectionsBtnEl.type = 'button';
+    this.connectTabConnectionsBtnEl.className = 'ttm-connect-tab is-active';
+    this.connectTabConnectionsBtnEl.textContent = t('dating.tabConnections');
+    this.connectTabConnectionsBtnEl.addEventListener('click', () => {
+      this.setConnectHubTab('connections');
+    });
+
+    this.connectTabDatingBtnEl = document.createElement('button');
+    this.connectTabDatingBtnEl.type = 'button';
+    this.connectTabDatingBtnEl.className = 'ttm-connect-tab';
+    this.connectTabDatingBtnEl.textContent = t('dating.tabDating');
+    this.connectTabDatingBtnEl.addEventListener('click', () => {
+      this.setConnectHubTab('dating');
+    });
+
+    tabBar.appendChild(this.connectTabConnectionsBtnEl);
+    tabBar.appendChild(this.connectTabDatingBtnEl);
+    this.connectViewEl.appendChild(tabBar);
+
+    this.connectHubCardsWrapEl = document.createElement('div');
+    this.connectHubCardsWrapEl.className = 'ttm-connect-cards-wrap';
+
     // Cartão 1: Minha Conta & Segurança Local
     const selfCard = document.createElement('div');
     selfCard.className = 'ttm-connect-card';
@@ -1531,9 +1768,17 @@ export class ChatUI {
     changePinBtn.textContent = t('connect.changePinBtn');
     this.connectChangePinBtnEl = changePinBtn;
 
+    const deleteAccountBtn = document.createElement('button');
+    deleteAccountBtn.type = 'button';
+    deleteAccountBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
+    deleteAccountBtn.textContent = t('safety.deleteAccountBtn');
+    deleteAccountBtn.title = t('safety.deleteAccountTitle');
+    this.connectDeleteBtnEl = deleteAccountBtn;
+
     selfActions.appendChild(rotateCodeBtn);
     selfActions.appendChild(recoveryEmailBtn);
     selfActions.appendChild(changePinBtn);
+    selfActions.appendChild(deleteAccountBtn);
     selfRow.appendChild(selfMeta);
     selfRow.appendChild(selfActions);
 
@@ -1792,11 +2037,100 @@ export class ChatUI {
     pinForm.appendChild(savePinBtn);
     this.connectPinPanelEl.appendChild(pinForm);
 
+    // Painel inline: Eliminação Real da Conta (Hard Delete)
+    this.connectDeletePanelEl = document.createElement('div');
+    this.connectDeletePanelEl.className = 'ttm-inline-security-panel ttm-danger-panel';
+    this.connectDeletePanelEl.style.display = 'none';
+
+    const deleteWarnEl = document.createElement('div');
+    deleteWarnEl.className = 'ttm-field-hint ttm-danger-hint';
+    deleteWarnEl.textContent = t('safety.deleteAccountWarning');
+    this.connectDeleteWarningEl = deleteWarnEl;
+
+    const deleteForm = document.createElement('form');
+    deleteForm.className = 'ttm-form';
+
+    const deletePinInput = document.createElement('input');
+    deletePinInput.type = 'password';
+    deletePinInput.inputMode = 'numeric';
+    deletePinInput.maxLength = 8;
+    deletePinInput.autocomplete = 'off';
+    deletePinInput.placeholder = t('safety.deleteAccountPinPlaceholder');
+    deletePinInput.className = 'ttm-connect-input ttm-connect-input-phone';
+    this.connectDeletePinInput = deletePinInput;
+
+    const deleteCheckRow = document.createElement('label');
+    deleteCheckRow.className = 'ttm-dating-check-row';
+    const deleteCheck = document.createElement('input');
+    deleteCheck.type = 'checkbox';
+    this.connectDeleteCheckbox = deleteCheck;
+    const deleteCheckLabel = document.createElement('span');
+    deleteCheckLabel.textContent = t('safety.deleteAccountCheckLabel');
+    this.connectDeleteCheckLabelEl = deleteCheckLabel;
+    deleteCheckRow.appendChild(deleteCheck);
+    deleteCheckRow.appendChild(deleteCheckLabel);
+
+    const deleteSubmitBtn = document.createElement('button');
+    deleteSubmitBtn.type = 'submit';
+    deleteSubmitBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
+    deleteSubmitBtn.textContent = t('safety.deleteAccountSubmitBtn');
+    this.connectDeleteSubmitBtnEl = deleteSubmitBtn;
+
+    deleteForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const pin = deletePinInput.value.trim();
+      if (!/^\d{4,8}$/.test(pin)) {
+        this.showConnectFeedback(t('connect.enterCurrentPin'), true);
+        return;
+      }
+      if (!deleteCheck.checked) {
+        this.showConnectFeedback(t('safety.deleteAccountCheckRequired'), true);
+        return;
+      }
+      if (!this.isDeleteConfirmPending) {
+        this.isDeleteConfirmPending = true;
+        deleteSubmitBtn.classList.add('is-confirming');
+        deleteSubmitBtn.textContent = t('safety.deleteAccountConfirmBtn');
+        if (this.deleteConfirmTimerId) clearTimeout(this.deleteConfirmTimerId);
+        this.deleteConfirmTimerId = setTimeout(() => {
+          this.resetDeleteAccountConfirmState();
+        }, 4000);
+        return;
+      }
+      if (this.deleteConfirmTimerId) {
+        clearTimeout(this.deleteConfirmTimerId);
+        this.deleteConfirmTimerId = null;
+      }
+      this.isDeleteConfirmPending = false;
+      deleteSubmitBtn.classList.remove('is-confirming');
+      if (!this.events.onDeleteOwnAccount) return;
+      deleteSubmitBtn.disabled = true;
+      deleteSubmitBtn.textContent = t('safety.deleteAccountSubmittingBtn');
+      try {
+        await this.events.onDeleteOwnAccount(pin);
+        deletePinInput.value = '';
+        deleteCheck.checked = false;
+      } catch (err) {
+        this.showConnectFeedback(this.extractReadableError(err), true);
+      } finally {
+        deleteSubmitBtn.disabled = false;
+        deleteSubmitBtn.textContent = t('safety.deleteAccountSubmitBtn');
+      }
+    });
+
+    deleteForm.appendChild(deletePinInput);
+    deleteForm.appendChild(deleteCheckRow);
+    deleteForm.appendChild(deleteSubmitBtn);
+    this.connectDeletePanelEl.appendChild(deleteWarnEl);
+    this.connectDeletePanelEl.appendChild(deleteForm);
+
     rotateCodeBtn.addEventListener('click', () => {
       const visible = this.connectRecoveryPanelEl.style.display === 'flex';
       this.connectRecoveryPanelEl.style.display = visible ? 'none' : 'flex';
       this.connectEmailPanelEl.style.display = 'none';
       this.connectPinPanelEl.style.display = 'none';
+      this.connectDeletePanelEl.style.display = 'none';
+      this.resetDeleteAccountConfirmState();
       rotResultEl.style.display = 'none';
       rotCopyBtn.style.display = 'none';
     });
@@ -1806,6 +2140,8 @@ export class ChatUI {
       this.connectEmailPanelEl.style.display = visible ? 'none' : 'flex';
       this.connectRecoveryPanelEl.style.display = 'none';
       this.connectPinPanelEl.style.display = 'none';
+      this.connectDeletePanelEl.style.display = 'none';
+      this.resetDeleteAccountConfirmState();
     });
 
     changePinBtn.addEventListener('click', () => {
@@ -1813,6 +2149,19 @@ export class ChatUI {
       this.connectPinPanelEl.style.display = visible ? 'none' : 'flex';
       this.connectRecoveryPanelEl.style.display = 'none';
       this.connectEmailPanelEl.style.display = 'none';
+      this.connectDeletePanelEl.style.display = 'none';
+      this.resetDeleteAccountConfirmState();
+    });
+
+    deleteAccountBtn.addEventListener('click', () => {
+      const visible = this.connectDeletePanelEl.style.display === 'flex';
+      this.connectDeletePanelEl.style.display = visible ? 'none' : 'flex';
+      this.connectRecoveryPanelEl.style.display = 'none';
+      this.connectEmailPanelEl.style.display = 'none';
+      this.connectPinPanelEl.style.display = 'none';
+      if (visible) {
+        this.resetDeleteAccountConfirmState();
+      }
     });
 
     selfCard.appendChild(selfTitle);
@@ -1820,6 +2169,7 @@ export class ChatUI {
     selfCard.appendChild(this.connectRecoveryPanelEl);
     selfCard.appendChild(this.connectEmailPanelEl);
     selfCard.appendChild(this.connectPinPanelEl);
+    selfCard.appendChild(this.connectDeletePanelEl);
 
     // Cartão 2: Procurar contacto por telefone exato e convidar
     const inviteCard = document.createElement('div');
@@ -1930,11 +2280,163 @@ export class ChatUI {
     convCard.appendChild(convTitle);
     convCard.appendChild(this.conversationsListEl);
 
-    this.connectViewEl.appendChild(selfCard);
-    this.connectViewEl.appendChild(inviteCard);
-    this.connectViewEl.appendChild(incomingCard);
-    this.connectViewEl.appendChild(outgoingCard);
-    this.connectViewEl.appendChild(convCard);
+    // Cartão 1.5: Partilha de Convite Individual & WhatsApp
+    const refCard = document.createElement('div');
+    refCard.className = 'ttm-connect-card ttm-referral-card';
+
+    this.connectRefTitleEl = document.createElement('div');
+    this.connectRefTitleEl.className = 'ttm-connect-section-title';
+    this.connectRefTitleEl.textContent = t('referral.cardTitle');
+
+    this.connectRefDescEl = document.createElement('div');
+    this.connectRefDescEl.className = 'ttm-field-hint';
+    this.connectRefDescEl.textContent = t('referral.cardDesc');
+
+    this.connectRefUrlEl = document.createElement('div');
+    this.connectRefUrlEl.className = 'ttm-referral-url';
+    this.connectRefUrlEl.textContent = '—';
+
+    this.connectRefStatsEl = document.createElement('div');
+    this.connectRefStatsEl.className = 'ttm-referral-stats';
+    this.connectRefStatsEl.textContent = t('referral.statsLine', {
+      shared: 0,
+      converted: 0,
+      rate: 0,
+    });
+
+    const refActionsRow = document.createElement('div');
+    refActionsRow.className = 'ttm-referral-actions';
+
+    this.connectRefWhatsappLinkEl = document.createElement('a');
+    this.connectRefWhatsappLinkEl.className = 'ttm-btn ttm-btn-whatsapp';
+    this.connectRefWhatsappLinkEl.target = '_blank';
+    this.connectRefWhatsappLinkEl.rel = 'noopener noreferrer';
+    this.connectRefWhatsappLinkEl.href = 'https://wa.me/';
+    this.connectRefWhatsappLinkEl.textContent = t('referral.whatsappBtn');
+    this.connectRefWhatsappLinkEl.addEventListener('click', () => {
+      const code = this.lastReferralSummary?.referralCode;
+      if (code && this.events.onTrackReferralShare) {
+        void this.events.onTrackReferralShare(code).then((nextShared) => {
+          if (this.lastReferralSummary) {
+            this.updateReferralMetrics({
+              ...this.lastReferralSummary,
+              invitesSharedCount: nextShared,
+            });
+          }
+        }).catch(() => {});
+      }
+    });
+
+    this.connectRefCopyBtnEl = document.createElement('button');
+    this.connectRefCopyBtnEl.type = 'button';
+    this.connectRefCopyBtnEl.className = 'ttm-btn ttm-btn-secondary';
+    this.connectRefCopyBtnEl.textContent = t('referral.copyLinkBtn');
+    this.connectRefCopyBtnEl.addEventListener('click', async () => {
+      const url = this.lastReferralSummary?.inviteUrl;
+      if (!url) return;
+      await navigator.clipboard?.writeText(url).catch(() => {});
+      this.showConnectFeedback(t('referral.linkCopied'));
+      const code = this.lastReferralSummary?.referralCode;
+      if (code && this.events.onTrackReferralShare) {
+        void this.events.onTrackReferralShare(code).then((nextShared) => {
+          if (this.lastReferralSummary) {
+            this.updateReferralMetrics({
+              ...this.lastReferralSummary,
+              invitesSharedCount: nextShared,
+            });
+          }
+        }).catch(() => {});
+      }
+    });
+
+    refActionsRow.appendChild(this.connectRefWhatsappLinkEl);
+    refActionsRow.appendChild(this.connectRefCopyBtnEl);
+
+    refCard.appendChild(this.connectRefTitleEl);
+    refCard.appendChild(this.connectRefDescEl);
+    refCard.appendChild(this.connectRefUrlEl);
+    refCard.appendChild(this.connectRefStatsEl);
+    refCard.appendChild(refActionsRow);
+
+    this.connectHubCardsWrapEl.appendChild(selfCard);
+    this.connectHubCardsWrapEl.appendChild(refCard);
+    this.connectHubCardsWrapEl.appendChild(inviteCard);
+    this.connectHubCardsWrapEl.appendChild(incomingCard);
+    this.connectHubCardsWrapEl.appendChild(outgoingCard);
+    this.connectHubCardsWrapEl.appendChild(convCard);
+
+    this.datingPanel = new DatingPanel({
+      onLoadWorkspace: this.events.onLoadDatingWorkspace,
+      onSaveProfile: this.events.onSaveDatingProfile,
+      onSetVisibility: this.events.onSetDatingVisibility,
+      onDiscover: this.events.onDiscoverDating,
+      onEvaluate: this.events.onEvaluateDatingProfile,
+      onLike: this.events.onLikeDatingCandidate,
+      onOpenMatchChat: this.events.onOpenDatingMatchChat,
+      onUnmatch: this.events.onUnmatchDating,
+      onMarkMatchSeen: this.events.onMarkDatingMatchSeen,
+      onUploadPhoto: this.events.onUploadDatingPhoto,
+      onRemovePhoto: this.events.onRemoveDatingPhoto,
+      onReportCandidate: (candidate) => {
+        this.openReportModal({
+          targetUid: candidate.uid,
+          targetTalk2tmId: candidate.talk2tmId,
+          targetDisplayName: candidate.displayName,
+          sourceType: 'dating_profile',
+          itemRefId: candidate.uid,
+          evidenceSnapshot: `${candidate.displayName} (${candidate.age}, ${candidate.city}): ${candidate.bio}`,
+        });
+      },
+      onReportMatch: (match) => {
+        const myUid = this.currentSession?.userId || '';
+        const partner = getDatingMatchPartner(match, myUid);
+        this.openReportModal({
+          targetUid: partner.uid,
+          targetTalk2tmId: partner.talk2tmId,
+          targetDisplayName: partner.displayName,
+          sourceType: 'dating_match',
+          channelId: match.conversationId,
+          itemRefId: match.matchId,
+          evidenceSnapshot: `Match ${match.matchId} (${partner.displayName || partner.uid})`,
+        });
+      },
+      onBlockUser: this.events.onBlockUser,
+    });
+    this.datingPanel.rootEl.style.display = 'none';
+
+    this.connectViewEl.appendChild(this.connectHubCardsWrapEl);
+    this.connectViewEl.appendChild(this.datingPanel.rootEl);
+  }
+
+  private syncDatingTabLabel(): void {
+    if (!this.connectTabDatingBtnEl) return;
+    this.connectTabDatingBtnEl.textContent =
+      this.unseenDatingMatchCount > 0
+        ? t('dating.matchTabBadge', { count: this.unseenDatingMatchCount })
+        : t('dating.tabDating');
+    this.connectTabDatingBtnEl.classList.toggle('has-badge', this.unseenDatingMatchCount > 0);
+  }
+
+  public getActiveConnectTab(): 'connections' | 'dating' {
+    return this.activeConnectTab;
+  }
+
+  public updateDatingMatches(matches: DatingMatch[], myUid: string): void {
+    this.unseenDatingMatchCount = myUid ? getUnseenDatingMatches(matches, myUid).length : 0;
+    this.syncDatingTabLabel();
+    this.datingPanel?.updateMatches(matches);
+  }
+
+  private setConnectHubTab(tab: 'connections' | 'dating'): void {
+    this.activeConnectTab = tab;
+    const isDating = tab === 'dating';
+    this.connectTabConnectionsBtnEl.classList.toggle('is-active', !isDating);
+    this.connectTabDatingBtnEl.classList.toggle('is-active', isDating);
+    this.connectHubCardsWrapEl.style.display = isDating ? 'none' : 'flex';
+    this.datingPanel.rootEl.style.display = isDating ? 'flex' : 'none';
+    if (isDating && this.currentSession?.talk2tmId) {
+      void this.datingPanel.loadForSession(this.currentSession);
+    }
   }
 
   private extractReadableError(err: unknown): string {
@@ -1995,8 +2497,19 @@ export class ChatUI {
       }
     });
 
+    this.chatBlockBtnEl = document.createElement('button');
+    this.chatBlockBtnEl.type = 'button';
+    this.chatBlockBtnEl.className = 'ttm-topbar-link ttm-topbar-danger';
+    this.chatBlockBtnEl.textContent = t('safety.blockUserBtn');
+    this.chatBlockBtnEl.title = t('safety.blockUserTitle');
+    this.chatBlockBtnEl.style.display = 'none';
+    this.chatBlockBtnEl.addEventListener('click', () => {
+      void this.handleChatBlockClick();
+    });
+
     topBarActions.appendChild(this.loadOlderBtn);
     topBarActions.appendChild(this.selectModeBtn);
+    topBarActions.appendChild(this.chatBlockBtnEl);
 
     this.inactivityNoticeEl = document.createElement('span');
     this.inactivityNoticeEl.className = 'ttm-lock-badge';
@@ -2202,6 +2715,83 @@ export class ChatUI {
     languageGroup.appendChild(languageLabel);
     languageGroup.appendChild(this.languageSelectEl);
 
+    // Configuração 5: Notificações Web Push Discretas (sem dados sensíveis no ecrã bloqueado)
+    const pushGroup = document.createElement('div');
+    pushGroup.className = 'ttm-setting-group';
+
+    const pushLabel = document.createElement('label');
+    pushLabel.className = 'ttm-setting-label';
+    pushLabel.textContent = t('settings.pushLabel');
+    this.settingsPushLabelEl = pushLabel;
+
+    const pushMasterRow = document.createElement('label');
+    pushMasterRow.className = 'ttm-setting-check-row';
+    this.pushEnabledCheckboxEl = document.createElement('input');
+    this.pushEnabledCheckboxEl.type = 'checkbox';
+    this.settingsPushEnableTextEl = document.createElement('span');
+    this.settingsPushEnableTextEl.textContent = t('settings.pushMasterToggle');
+    pushMasterRow.appendChild(this.pushEnabledCheckboxEl);
+    pushMasterRow.appendChild(this.settingsPushEnableTextEl);
+
+    const pushSubRow = document.createElement('div');
+    pushSubRow.className = 'ttm-setting-subchecks';
+
+    const pushMatchLabel = document.createElement('label');
+    pushMatchLabel.className = 'ttm-setting-check-row';
+    this.pushMatchCheckboxEl = document.createElement('input');
+    this.pushMatchCheckboxEl.type = 'checkbox';
+    this.settingsPushMatchTextEl = document.createElement('span');
+    this.settingsPushMatchTextEl.textContent = t('settings.pushMatchToggle');
+    pushMatchLabel.appendChild(this.pushMatchCheckboxEl);
+    pushMatchLabel.appendChild(this.settingsPushMatchTextEl);
+
+    const pushMsgLabel = document.createElement('label');
+    pushMsgLabel.className = 'ttm-setting-check-row';
+    this.pushMessageCheckboxEl = document.createElement('input');
+    this.pushMessageCheckboxEl.type = 'checkbox';
+    this.settingsPushMessageTextEl = document.createElement('span');
+    this.settingsPushMessageTextEl.textContent = t('settings.pushMessageToggle');
+    pushMsgLabel.appendChild(this.pushMessageCheckboxEl);
+    pushMsgLabel.appendChild(this.settingsPushMessageTextEl);
+
+    pushSubRow.appendChild(pushMatchLabel);
+    pushSubRow.appendChild(pushMsgLabel);
+
+    const permRow = document.createElement('div');
+    permRow.className = 'ttm-notif-permission-row';
+
+    this.settingsPushStatusEl = document.createElement('span');
+    this.settingsPushStatusEl.className = 'ttm-field-hint';
+
+    this.settingsPushPermissionBtnEl = document.createElement('button');
+    this.settingsPushPermissionBtnEl.type = 'button';
+    this.settingsPushPermissionBtnEl.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    this.settingsPushPermissionBtnEl.textContent = t('settings.pushAllowBtn');
+    this.settingsPushPermissionBtnEl.addEventListener('click', () => {
+      void this.handleRequestPushPermissionClick();
+    });
+
+    permRow.appendChild(this.settingsPushStatusEl);
+    permRow.appendChild(this.settingsPushPermissionBtnEl);
+
+    this.settingsPushHintEl = document.createElement('div');
+    this.settingsPushHintEl.className = 'ttm-field-hint';
+    this.settingsPushHintEl.textContent = t('settings.pushHint');
+
+    this.pushEnabledCheckboxEl.addEventListener('change', () => {
+      if (this.pushEnabledCheckboxEl.checked && getWebNotificationPermission() === 'default') {
+        void this.handleRequestPushPermissionClick();
+      } else {
+        this.syncNotificationControlsUI();
+      }
+    });
+
+    pushGroup.appendChild(pushLabel);
+    pushGroup.appendChild(pushMasterRow);
+    pushGroup.appendChild(pushSubRow);
+    pushGroup.appendChild(permRow);
+    pushGroup.appendChild(this.settingsPushHintEl);
+
     this.populateSettingsSelects();
 
     // Botões de Ação do Modal
@@ -2218,6 +2808,9 @@ export class ChatUI {
         inactivityLockSeconds: Number(this.inactivitySelectEl.value),
         appearance: normalizeAppearanceMode(this.appearanceSelectEl.value),
         language: normalizeSettingsLanguage(this.languageSelectEl.value),
+        pushEnabled: this.pushEnabledCheckboxEl.checked,
+        pushMatchEnabled: this.pushMatchCheckboxEl.checked,
+        pushMessageEnabled: this.pushMessageCheckboxEl.checked,
         version: 2,
       };
       this.events.onUpdateSettings(this.settings);
@@ -2244,8 +2837,50 @@ export class ChatUI {
     modalBox.appendChild(inactivityGroup);
     modalBox.appendChild(appearanceGroup);
     modalBox.appendChild(languageGroup);
+    modalBox.appendChild(pushGroup);
     modalBox.appendChild(modalActions);
     this.settingsModalEl.appendChild(modalBox);
+  }
+
+  private async handleRequestPushPermissionClick(): Promise<void> {
+    this.settingsPushPermissionBtnEl.disabled = true;
+    const perm = await requestWebNotificationPermission();
+    if (perm === 'granted') {
+      this.pushEnabledCheckboxEl.checked = true;
+      this.showTemporaryNotice(t('settings.pushPermissionGrantedNotice'));
+    } else if (perm === 'denied') {
+      this.pushEnabledCheckboxEl.checked = false;
+      this.showTemporaryNotice(t('settings.pushPermissionDeniedNotice'));
+    }
+    this.syncNotificationControlsUI();
+  }
+
+  private syncNotificationControlsUI(): void {
+    const perm = getWebNotificationPermission();
+    const masterOn = this.pushEnabledCheckboxEl.checked;
+    this.pushMatchCheckboxEl.disabled = !masterOn;
+    this.pushMessageCheckboxEl.disabled = !masterOn;
+
+    if (perm === 'unsupported') {
+      this.settingsPushStatusEl.textContent = t('settings.pushStatusUnsupported');
+      this.settingsPushPermissionBtnEl.style.display = 'none';
+      this.pushEnabledCheckboxEl.disabled = true;
+      return;
+    }
+
+    this.pushEnabledCheckboxEl.disabled = false;
+    if (perm === 'granted') {
+      this.settingsPushStatusEl.textContent = t('settings.pushStatusGranted');
+      this.settingsPushPermissionBtnEl.style.display = 'none';
+    } else if (perm === 'denied') {
+      this.settingsPushStatusEl.textContent = t('settings.pushStatusDenied');
+      this.settingsPushPermissionBtnEl.style.display = 'none';
+    } else {
+      this.settingsPushStatusEl.textContent = t('settings.pushStatusDefault');
+      this.settingsPushPermissionBtnEl.style.display = 'inline-flex';
+      this.settingsPushPermissionBtnEl.disabled = false;
+      this.settingsPushPermissionBtnEl.textContent = t('settings.pushAllowBtn');
+    }
   }
 
   private populateSettingsSelects(): void {
@@ -2332,11 +2967,207 @@ export class ChatUI {
     this.inactivitySelectEl.value = String(this.settings.inactivityLockSeconds);
     this.appearanceSelectEl.value = normalizeAppearanceMode(this.settings.appearance);
     this.languageSelectEl.value = normalizeSettingsLanguage(this.settings.language);
+    const notif = normalizeNotificationSettings(this.settings);
+    this.pushEnabledCheckboxEl.checked = notif.pushEnabled;
+    this.pushMatchCheckboxEl.checked = notif.pushMatchEnabled;
+    this.pushMessageCheckboxEl.checked = notif.pushMessageEnabled;
+    this.syncNotificationControlsUI();
     this.settingsModalEl.style.display = 'flex';
   }
 
   public closeSettingsModal(): void {
     this.settingsModalEl.style.display = 'none';
+  }
+
+  private buildReportModal(): void {
+    this.reportModalEl = document.createElement('div');
+    this.reportModalEl.id = 'ttm-report-modal';
+    this.reportModalEl.className = 'ttm-modal-backdrop';
+    this.reportModalEl.style.display = 'none';
+
+    const box = document.createElement('form');
+    box.className = 'ttm-modal-box';
+
+    this.reportModalTitleEl = document.createElement('h2');
+    this.reportModalTitleEl.className = 'ttm-modal-title';
+    this.reportModalTitleEl.textContent = t('safety.reportModalTitle');
+
+    this.reportTargetLabelEl = document.createElement('div');
+    this.reportTargetLabelEl.className = 'ttm-field-hint';
+
+    const reasonGroup = document.createElement('div');
+    reasonGroup.className = 'ttm-setting-group';
+    this.reportReasonLabelEl = document.createElement('label');
+    this.reportReasonLabelEl.className = 'ttm-setting-label';
+    this.reportReasonLabelEl.textContent = t('safety.reportReasonLabel');
+    this.reportReasonSelectEl = document.createElement('select');
+    this.reportReasonSelectEl.className = 'ttm-select';
+    this.populateReportReasonSelect();
+    reasonGroup.appendChild(this.reportReasonLabelEl);
+    reasonGroup.appendChild(this.reportReasonSelectEl);
+
+    this.reportDetailsInputEl = document.createElement('textarea');
+    this.reportDetailsInputEl.rows = 3;
+    this.reportDetailsInputEl.maxLength = 300;
+    this.reportDetailsInputEl.className = 'ttm-dating-textarea';
+    this.reportDetailsInputEl.placeholder = t('safety.reportDetailsPlaceholder');
+
+    this.reportErrorEl = document.createElement('div');
+    this.reportErrorEl.className = 'ttm-connect-feedback is-error';
+
+    const actions = document.createElement('div');
+    actions.className = 'ttm-modal-actions';
+
+    this.reportSubmitBtnEl = document.createElement('button');
+    this.reportSubmitBtnEl.type = 'submit';
+    this.reportSubmitBtnEl.className = 'ttm-btn ttm-btn-primary';
+    this.reportSubmitBtnEl.textContent = t('safety.reportSubmitBtn');
+
+    this.reportCancelBtnEl = document.createElement('button');
+    this.reportCancelBtnEl.type = 'button';
+    this.reportCancelBtnEl.className = 'ttm-btn ttm-btn-secondary';
+    this.reportCancelBtnEl.textContent = t('common.cancel');
+    this.reportCancelBtnEl.addEventListener('click', () => {
+      this.closeReportModal();
+    });
+
+    box.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const ctx = this.activeReportContext;
+      if (!ctx || !this.events.onReportTarget) return;
+      this.reportErrorEl.textContent = '';
+      this.reportSubmitBtnEl.disabled = true;
+      this.reportSubmitBtnEl.textContent = t('safety.reportSubmittingBtn');
+      try {
+        await this.events.onReportTarget({
+          ...ctx,
+          reason: this.reportReasonSelectEl.value as ReportReason,
+          details: this.reportDetailsInputEl.value,
+        });
+        this.closeReportModal();
+        this.showTemporaryNotice(t('safety.reportSentNotice'));
+      } catch (err) {
+        this.reportErrorEl.textContent = this.extractReadableError(err);
+      } finally {
+        this.reportSubmitBtnEl.disabled = false;
+        this.reportSubmitBtnEl.textContent = t('safety.reportSubmitBtn');
+      }
+    });
+
+    actions.appendChild(this.reportSubmitBtnEl);
+    actions.appendChild(this.reportCancelBtnEl);
+
+    box.appendChild(this.reportModalTitleEl);
+    box.appendChild(this.reportTargetLabelEl);
+    box.appendChild(reasonGroup);
+    box.appendChild(this.reportDetailsInputEl);
+    box.appendChild(this.reportErrorEl);
+    box.appendChild(actions);
+    this.reportModalEl.appendChild(box);
+  }
+
+  private populateReportReasonSelect(): void {
+    if (!this.reportReasonSelectEl) return;
+    const prev = this.reportReasonSelectEl.value || 'harassment';
+    this.reportReasonSelectEl.innerHTML = '';
+    for (const reason of VALID_REPORT_REASONS) {
+      const opt = document.createElement('option');
+      opt.value = reason;
+      opt.textContent = t(`safety.reportReason.${reason}`);
+      this.reportReasonSelectEl.appendChild(opt);
+    }
+    this.reportReasonSelectEl.value = prev;
+  }
+
+  public openReportModal(context: {
+    targetUid: string;
+    targetTalk2tmId?: string;
+    targetDisplayName?: string;
+    sourceType: ReportSourceType;
+    channelId?: string;
+    itemRefId?: string;
+    evidenceSnapshot: string;
+  }): void {
+    this.activeReportContext = context;
+    this.populateReportReasonSelect();
+    this.reportTargetLabelEl.textContent = t('safety.reportTargetPrefix', {
+      target: context.targetDisplayName || t('connect.defaultContact'),
+    });
+    this.reportDetailsInputEl.value = '';
+    this.reportErrorEl.textContent = '';
+    this.reportSubmitBtnEl.disabled = false;
+    this.reportSubmitBtnEl.textContent = t('safety.reportSubmitBtn');
+    this.reportModalEl.style.display = 'flex';
+  }
+
+  public closeReportModal(): void {
+    this.activeReportContext = null;
+    if (this.reportModalEl) {
+      this.reportModalEl.style.display = 'none';
+    }
+  }
+
+  private resetDeleteAccountConfirmState(): void {
+    if (this.deleteConfirmTimerId) {
+      clearTimeout(this.deleteConfirmTimerId);
+      this.deleteConfirmTimerId = null;
+    }
+    this.isDeleteConfirmPending = false;
+    if (this.connectDeleteSubmitBtnEl) {
+      this.connectDeleteSubmitBtnEl.classList.remove('is-confirming');
+      this.connectDeleteSubmitBtnEl.textContent = t('safety.deleteAccountSubmitBtn');
+    }
+  }
+
+  private resetChatBlockConfirmState(): void {
+    if (this.chatBlockConfirmTimerId) {
+      clearTimeout(this.chatBlockConfirmTimerId);
+      this.chatBlockConfirmTimerId = null;
+    }
+    this.isChatBlockConfirmPending = false;
+    if (this.chatBlockBtnEl) {
+      this.chatBlockBtnEl.classList.remove('is-confirming');
+      this.chatBlockBtnEl.textContent = t('safety.blockUserBtn');
+    }
+  }
+
+  private async handleChatBlockClick(): Promise<void> {
+    if (!this.currentChatPartnerUid || !this.events.onBlockUser) return;
+    if (!this.isChatBlockConfirmPending) {
+      this.isChatBlockConfirmPending = true;
+      this.chatBlockBtnEl.classList.add('is-confirming');
+      this.chatBlockBtnEl.textContent = t('safety.blockUserConfirmBtn');
+      if (this.chatBlockConfirmTimerId) clearTimeout(this.chatBlockConfirmTimerId);
+      this.chatBlockConfirmTimerId = setTimeout(() => {
+        this.resetChatBlockConfirmState();
+      }, 4000);
+      return;
+    }
+
+    const targetUid = this.currentChatPartnerUid;
+    const targetName = this.currentChatPartnerName;
+    this.resetChatBlockConfirmState();
+    this.chatBlockBtnEl.disabled = true;
+    try {
+      await this.events.onBlockUser(targetUid, targetName);
+    } catch (err) {
+      this.showTemporaryNotice(this.extractReadableError(err));
+    } finally {
+      this.chatBlockBtnEl.disabled = false;
+    }
+  }
+
+  public setChatBlockedState(blocked: boolean): void {
+    this.isChatBlocked = blocked;
+    if (this.msgInputEl) {
+      this.msgInputEl.disabled = blocked;
+      this.msgInputEl.placeholder = blocked
+        ? t('safety.blockedChatPlaceholder')
+        : t('chat.msgPlaceholder');
+    }
+    if (this.sendBtnEl) {
+      this.sendBtnEl.disabled = blocked;
+    }
   }
 
   private updateInactivityBadge(): void {
@@ -2403,17 +3234,74 @@ export class ChatUI {
     }
   }
 
+  private updateReferralLandingLocale(): void {
+    if (!this.landingViewEl) return;
+    const inviterName = this.activeReferralInvite?.referrerDisplayName?.trim();
+    this.landingKickerEl.textContent = inviterName
+      ? t('landing.kickerNamed', { name: inviterName })
+      : t('landing.kickerGeneric');
+    this.landingTitleEl.textContent = t('landing.title');
+    this.landingSubtitleEl.textContent = t('landing.subtitle');
+    this.landingBullet1El.textContent = t('landing.point1');
+    this.landingBullet2El.textContent = t('landing.point2');
+    this.landingBullet3El.textContent = t('landing.point3');
+    this.landingCtaBtnEl.textContent = t('landing.acceptCta');
+    this.landingSecondaryBtnEl.textContent = t('landing.alreadyMemberBtn');
+  }
+
+  public showReferralLandingView(invite: { code: string; referrerDisplayName?: string }): void {
+    this.activeReferralInvite = invite;
+    this.hideAllPrimaryViews();
+    this.updateReferralLandingLocale();
+    this.landingViewEl.style.display = 'flex';
+  }
+
+  private syncOnboardingReferralBanner(): void {
+    if (!this.onboardingRefBannerEl) return;
+    const code = getPendingReferralCode();
+    if (code) {
+      this.onboardingRefBannerEl.textContent = t('referral.onboardingApplied', { code });
+      this.onboardingRefBannerEl.style.display = 'block';
+    } else {
+      this.onboardingRefBannerEl.textContent = '';
+      this.onboardingRefBannerEl.style.display = 'none';
+    }
+  }
+
+  public updateReferralMetrics(summary: ReferralMetricsSummary): void {
+    this.lastReferralSummary = summary;
+    if (!this.connectRefUrlEl) return;
+    this.connectRefUrlEl.textContent = summary.inviteUrl;
+    const shareText = t('referral.whatsappShareText', { url: summary.inviteUrl });
+    this.connectRefWhatsappLinkEl.href = buildWhatsAppReferralShareUrl(shareText);
+    const rate = computeConversionRatePercent(summary.invitesSharedCount, summary.convertedCount);
+    this.connectRefStatsEl.textContent = t('referral.statsLine', {
+      shared: summary.invitesSharedCount,
+      converted: summary.convertedCount,
+      rate,
+    });
+  }
+
   public hideAllPrimaryViews(): void {
     this.exitSelectionMode();
     this.closeSettingsModal();
+    this.closeReportModal();
+    this.resetChatBlockConfirmState();
+    this.resetDeleteAccountConfirmState();
     this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
+    this.datingPanel?.reset();
+    this.lastDatingUid = null;
+    this.activeConnectTab = 'connections';
+    this.unseenDatingMatchCount = 0;
+    this.syncDatingTabLabel();
   }
 
   public showLockView(): void {
@@ -2431,14 +3319,21 @@ export class ChatUI {
 
   public showPassEntryView(): void {
     this.closeSettingsModal();
+    this.closeReportModal();
     this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.passViewEl.style.display = 'flex';
+    this.datingPanel?.reset();
+    this.lastDatingUid = null;
+    this.activeConnectTab = 'connections';
+    this.unseenDatingMatchCount = 0;
+    this.syncDatingTabLabel();
     if (this.backToLockBtnEl) {
       this.backToLockBtnEl.textContent =
         normalizeAppearanceMode(this.settings.appearance) === 'calculator'
@@ -2460,16 +3355,19 @@ export class ChatUI {
 
   public showOnboardingView(): void {
     this.closeSettingsModal();
+    this.closeReportModal();
     this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'flex';
     this.onboardingFormEl.style.display = 'flex';
     this.onboardingSubtitleEl.style.display = '';
+    this.syncOnboardingReferralBanner();
     this.recoveryStepBoxEl.style.display = 'none';
     this.pendingOnboardingDraft = null;
     this.onboardingNameInput.value = '';
@@ -2510,10 +3408,12 @@ export class ChatUI {
 
   public showRecoveryView(): void {
     this.closeSettingsModal();
+    this.closeReportModal();
     this.lockScreen.hide();
     this.calculator.hide();
     this.headerEl.style.display = 'none';
     this.passViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
@@ -2590,12 +3490,24 @@ export class ChatUI {
   }
 
   public showConnectView(session: UserSession): void {
+    const switchedAccount = this.lastDatingUid !== session.userId;
+    if (switchedAccount) {
+      this.datingPanel.reset();
+      this.lastDatingUid = session.userId;
+      this.activeConnectTab = 'connections';
+      this.unseenDatingMatchCount = 0;
+      this.syncDatingTabLabel();
+    }
     this.currentSession = session;
     this.exitSelectionMode();
     this.closeSettingsModal();
+    this.closeReportModal();
+    this.resetChatBlockConfirmState();
+    this.setChatBlockedState(false);
     this.lockScreen.hide();
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.chatViewEl.style.display = 'none';
@@ -2604,10 +3516,15 @@ export class ChatUI {
     this.connectRecoveryPanelEl.style.display = 'none';
     this.connectEmailPanelEl.style.display = 'none';
     this.connectPinPanelEl.style.display = 'none';
+    this.connectDeletePanelEl.style.display = 'none';
+    this.connectDeletePinInput.value = '';
+    this.connectDeleteCheckbox.checked = false;
+    this.resetDeleteAccountConfirmState();
     this.connectEmailInput.value = session.recoveryEmail || session.pendingRecoveryEmail || '';
     this.connectFeedbackEl.textContent = '';
     this.connectFeedbackEl.classList.remove('is-error');
     this.applyConnectSessionMeta(session);
+    this.setConnectHubTab(this.activeConnectTab);
   }
 
   public isConnectViewActive(): boolean {
@@ -2816,9 +3733,16 @@ export class ChatUI {
   public showChatView(session: UserSession, room?: Room): void {
     this.currentSession = session;
     this.closeSettingsModal();
+    this.closeReportModal();
+    this.resetChatBlockConfirmState();
+    this.setChatBlockedState(false);
+    this.currentChatPartnerUid = null;
+    this.currentChatPartnerName = '';
+    this.chatBlockBtnEl.style.display = 'none';
     this.lockScreen.hide();
     this.calculator.hide();
     this.passViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
     this.onboardingViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'none';
     this.connectViewEl.style.display = 'none';
@@ -2838,7 +3762,9 @@ export class ChatUI {
       );
     }
     setTimeout(() => {
-      this.msgInputEl.focus();
+      if (!this.isChatBlocked) {
+        this.msgInputEl.focus();
+      }
     }, 100);
   }
 
@@ -2911,11 +3837,14 @@ export class ChatUI {
     this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-flex' : 'none';
 
     let partnerName = '';
+    let partnerUid: string | null = null;
     if (session.conversationId) {
       if (room.participantA === session.userId) {
         partnerName = room.participantBName || '';
+        partnerUid = room.participantB || null;
       } else if (room.participantB === session.userId) {
         partnerName = room.participantAName || '';
+        partnerUid = room.participantA || null;
       } else {
         partnerName = room.participantAName === session.displayName
           ? (room.participantBName || '')
@@ -2924,6 +3853,13 @@ export class ChatUI {
     } else {
       const isTruman = session.displayName === 'Truman';
       partnerName = isTruman ? 'Mãezinha' : 'Truman';
+    }
+
+    this.currentChatPartnerUid = partnerUid;
+    this.currentChatPartnerName = partnerName;
+    if (this.chatBlockBtnEl) {
+      this.chatBlockBtnEl.style.display =
+        session.conversationId && partnerUid ? 'inline-block' : 'none';
     }
 
     const isConnected = Boolean(room.participantB && room.participantB !== '');
@@ -3085,12 +4021,17 @@ export class ChatUI {
       this.deleteSingleMessage(msg.messageId);
     });
 
+    const reportBtn = this.createMessageReportButton(msg, isSelf);
+
     rowEl.appendChild(checkSpan);
     rowEl.appendChild(timeSpan);
     rowEl.appendChild(senderSpan);
     rowEl.appendChild(textSpan);
     if (isSelf) {
       rowEl.appendChild(statusSpan);
+    }
+    if (reportBtn) {
+      rowEl.appendChild(reportBtn);
     }
     rowEl.appendChild(deleteBtn);
 
@@ -3190,12 +4131,17 @@ export class ChatUI {
         this.deleteSingleMessage(msg.messageId);
       });
 
+      const reportBtn = this.createMessageReportButton(msg, isSelf);
+
       rowEl.appendChild(checkSpan);
       rowEl.appendChild(timeSpan);
       rowEl.appendChild(senderSpan);
       rowEl.appendChild(textSpan);
       if (isSelf) {
         rowEl.appendChild(statusSpan);
+      }
+      if (reportBtn) {
+        rowEl.appendChild(reportBtn);
       }
       rowEl.appendChild(deleteBtn);
 
@@ -3208,6 +4154,33 @@ export class ChatUI {
     this.msgListEl.insertBefore(fragment, this.msgListEl.firstChild);
     this.syncDateSeparators();
     this.msgListEl.scrollTop = this.msgListEl.scrollHeight - previousHeight;
+  }
+
+  private createMessageReportButton(msg: Message, isSelf: boolean): HTMLButtonElement | null {
+    const channelId = msg.conversationId || this.currentSession?.conversationId;
+    if (isSelf || !channelId || !this.currentSession?.talk2tmId || !msg.senderId) {
+      return null;
+    }
+    const reportBtn = document.createElement('button');
+    reportBtn.type = 'button';
+    reportBtn.className = 'ttm-msg-report';
+    reportBtn.textContent = '⚑';
+    reportBtn.title = t('safety.reportMsgTitle');
+    reportBtn.setAttribute('aria-label', t('safety.reportMsgAria'));
+    reportBtn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.openReportModal({
+        targetUid: msg.senderId!,
+        targetTalk2tmId: msg.senderTalk2tmId,
+        targetDisplayName: msg.sender,
+        sourceType: 'chat_message',
+        channelId,
+        itemRefId: msg.messageId,
+        evidenceSnapshot: `${msg.sender}: ${msg.text}`,
+      });
+    });
+    return reportBtn;
   }
 
   /**
@@ -3725,7 +4698,10 @@ export class ChatUI {
     this.recoveryOobSubmitBtn.textContent = t('recovery.oobSaveBtn');
     this.recoveryOobCancelBtnEl.textContent = t('common.cancel');
 
-    // Hub Bilateral
+    // Hub Bilateral & Dating (+18)
+    this.connectTabConnectionsBtnEl.textContent = t('dating.tabConnections');
+    this.syncDatingTabLabel();
+    this.datingPanel.refreshLocale();
     this.connectSelfTitleEl.textContent = t('connect.myAccount');
     this.connectRotateCodeBtnEl.textContent = t('connect.recoveryKeyBtn');
     this.connectRotateCodeBtnEl.title = t('connect.recoveryKeyTitle');
@@ -3745,6 +4721,29 @@ export class ChatUI {
     this.connectNextPinInput.placeholder = t('connect.newPinPlaceholder');
     this.connectNextPinConfInput.placeholder = t('connect.confirmNewPinPlaceholder');
     this.connectSavePinBtnEl.textContent = t('connect.savePinBtn');
+    this.connectDeleteBtnEl.textContent = t('safety.deleteAccountBtn');
+    this.connectDeleteBtnEl.title = t('safety.deleteAccountTitle');
+    this.connectDeleteWarningEl.textContent = t('safety.deleteAccountWarning');
+    this.connectDeletePinInput.placeholder = t('safety.deleteAccountPinPlaceholder');
+    this.connectDeleteCheckLabelEl.textContent = t('safety.deleteAccountCheckLabel');
+    this.connectDeleteSubmitBtnEl.textContent = this.isDeleteConfirmPending
+      ? t('safety.deleteAccountConfirmBtn')
+      : t('safety.deleteAccountSubmitBtn');
+    this.updateReferralLandingLocale();
+    this.syncOnboardingReferralBanner();
+    this.connectRefTitleEl.textContent = t('referral.cardTitle');
+    this.connectRefDescEl.textContent = t('referral.cardDesc');
+    this.connectRefWhatsappLinkEl.textContent = t('referral.whatsappBtn');
+    this.connectRefCopyBtnEl.textContent = t('referral.copyLinkBtn');
+    if (this.lastReferralSummary) {
+      this.updateReferralMetrics(this.lastReferralSummary);
+    } else {
+      this.connectRefStatsEl.textContent = t('referral.statsLine', {
+        shared: 0,
+        converted: 0,
+        rate: 0,
+      });
+    }
     this.connectInviteTitleEl.textContent = t('connect.inviteTitle');
     this.connectTargetField.input.placeholder = t('connect.inviteTargetPlaceholder');
     this.connectTargetField.refreshLocale();
@@ -3776,8 +4775,14 @@ export class ChatUI {
       ? t('chat.exitSelection')
       : t('chat.selectAll');
     this.selectModeBtn.title = t('chat.selectAllTitle');
+    this.chatBlockBtnEl.textContent = this.isChatBlockConfirmPending
+      ? t('safety.blockUserConfirmBtn')
+      : t('safety.blockUserBtn');
+    this.chatBlockBtnEl.title = t('safety.blockUserTitle');
     this.updateInactivityBadge();
-    this.msgInputEl.placeholder = t('chat.msgPlaceholder');
+    this.msgInputEl.placeholder = this.isChatBlocked
+      ? t('safety.blockedChatPlaceholder')
+      : t('chat.msgPlaceholder');
     this.sendBtnEl.textContent = t('chat.sendBtn');
     this.selectAllBtnEl.title = t('chat.toggleSelectAllTitle');
     this.cancelSelectionBtnEl.textContent = t('common.cancel');
@@ -3806,6 +4811,11 @@ export class ChatUI {
         statusSpan.setAttribute('data-status', st.dataStatus);
         if (st.title) statusSpan.setAttribute('title', st.title);
       }
+      const reportBtn = row.querySelector('.ttm-msg-report') as HTMLButtonElement | null;
+      if (reportBtn) {
+        reportBtn.title = t('safety.reportMsgTitle');
+        reportBtn.setAttribute('aria-label', t('safety.reportMsgAria'));
+      }
       const delBtn = row.querySelector('.ttm-msg-del') as HTMLButtonElement | null;
       if (delBtn) {
         delBtn.title = t('chat.deleteSingleTitle');
@@ -3820,9 +4830,28 @@ export class ChatUI {
     this.settingsInactivityLabelEl.textContent = t('settings.inactivityLabel');
     this.settingsAppearanceLabelEl.textContent = t('settings.appearanceLabel');
     this.settingsLanguageLabelEl.textContent = t('settings.languageLabel');
+    this.settingsPushLabelEl.textContent = t('settings.pushLabel');
+    this.settingsPushEnableTextEl.textContent = t('settings.pushMasterToggle');
+    this.settingsPushMatchTextEl.textContent = t('settings.pushMatchToggle');
+    this.settingsPushMessageTextEl.textContent = t('settings.pushMessageToggle');
+    this.settingsPushHintEl.textContent = t('settings.pushHint');
+    this.syncNotificationControlsUI();
     this.settingsSaveBtnEl.textContent = t('settings.saveBtn');
     this.settingsCancelBtnEl.textContent = t('common.close');
     this.populateSettingsSelects();
+
+    // Modal de denúncia
+    this.reportModalTitleEl.textContent = t('safety.reportModalTitle');
+    this.reportReasonLabelEl.textContent = t('safety.reportReasonLabel');
+    this.reportDetailsInputEl.placeholder = t('safety.reportDetailsPlaceholder');
+    this.reportSubmitBtnEl.textContent = t('safety.reportSubmitBtn');
+    this.reportCancelBtnEl.textContent = t('common.cancel');
+    this.populateReportReasonSelect();
+    if (this.activeReportContext) {
+      this.reportTargetLabelEl.textContent = t('safety.reportTargetPrefix', {
+        target: this.activeReportContext.targetDisplayName || t('connect.defaultContact'),
+      });
+    }
   }
 
   public deleteSingleMessage(messageId: string): void {

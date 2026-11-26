@@ -64,6 +64,9 @@ export interface AppSettings {
   inactivityLockSeconds: number; // 0 = desativado, 60 = 1 min, 300 = 5 min (padrão), etc.
   appearance?: AppAppearanceMode; // 'talk2tm' (padrão) ou 'calculator' (modo discreto local)
   language?: LanguagePreference; // 'auto' (padrão) ou 'pt' | 'en' | 'fr' | 'es' (apenas neste dispositivo)
+  pushEnabled?: boolean; // Notificações Web Push discretas neste dispositivo (opt-in)
+  pushMatchEnabled?: boolean; // Alertas genéricos de novo Match
+  pushMessageEnabled?: boolean; // Alertas genéricos de nova atividade/mensagem
   version?: number;
 }
 
@@ -72,6 +75,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   inactivityLockSeconds: 300, // Padrão pré-definido de 5 minutos (300 segundos sem teclar bloqueia)
   appearance: 'talk2tm', // Entrada padrão direta Talk2TM
   language: 'auto', // Detecção automática do idioma do dispositivo por padrão
+  pushEnabled: false,
+  pushMatchEnabled: true,
+  pushMessageEnabled: true,
   version: 2,
 };
 
@@ -86,11 +92,24 @@ export function normalizeSettingsLanguage(value: unknown): LanguagePreference {
   return 'auto';
 }
 
+export function normalizeNotificationSettings(settings: Partial<AppSettings> | null | undefined): {
+  pushEnabled: boolean;
+  pushMatchEnabled: boolean;
+  pushMessageEnabled: boolean;
+} {
+  return {
+    pushEnabled: settings?.pushEnabled === true,
+    pushMatchEnabled: settings?.pushMatchEnabled !== false,
+    pushMessageEnabled: settings?.pushMessageEnabled !== false,
+  };
+}
+
 export function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem('ttm_settings');
     if (raw) {
       const parsed = JSON.parse(raw);
+      const notif = normalizeNotificationSettings(parsed);
       // Migração automática transparente apenas para versões legadas (< 2):
       // Garante que instalações antigas com 5s legado migrem para o padrão seguro de 5 minutos (300s),
       // mas preserva qualquer escolha explícita em segundos ou minutos feita após a v2.
@@ -100,6 +119,7 @@ export function loadSettings(): AppSettings {
           inactivityLockSeconds: DEFAULT_SETTINGS.inactivityLockSeconds,
           appearance: normalizeAppearanceMode(parsed.appearance),
           language: normalizeSettingsLanguage(parsed.language),
+          ...notif,
           version: 2,
         };
         saveSettings(migrated);
@@ -111,6 +131,7 @@ export function loadSettings(): AppSettings {
         inactivityLockSeconds: typeof parsed.inactivityLockSeconds === 'number' ? parsed.inactivityLockSeconds : DEFAULT_SETTINGS.inactivityLockSeconds,
         appearance: normalizeAppearanceMode(parsed.appearance),
         language: normalizeSettingsLanguage(parsed.language),
+        ...notif,
         version: 2,
       };
     }
@@ -124,10 +145,12 @@ export function loadSettings(): AppSettings {
 
 export function saveSettings(settings: AppSettings): void {
   try {
+    const notif = normalizeNotificationSettings(settings);
     const payload: AppSettings = {
       ...settings,
       appearance: normalizeAppearanceMode(settings.appearance),
       language: normalizeSettingsLanguage(settings.language),
+      ...notif,
       version: settings.version ?? DEFAULT_SETTINGS.version,
     };
     localStorage.setItem('ttm_settings', JSON.stringify(payload));

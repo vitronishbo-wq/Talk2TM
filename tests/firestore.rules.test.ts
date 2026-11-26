@@ -1426,6 +1426,1197 @@ async function runEmulatorRulesTests(): Promise<void> {
       );
     });
 
+    // -----------------------------------------------------------------------
+    // Cenário 20: Talk2TM Dating Fase 1 (`datingProfiles` & `evaluations`)
+    // -----------------------------------------------------------------------
+    await testCase('20. Dating Fase 1: +18 obrigatório, sem PII, visibilidade, anti-auto-dessuspensão e evaluations isoladas', async () => {
+      const validProfileA = {
+        uid: uidA,
+        talk2tmId: talkIdA,
+        displayName: 'Ana',
+        age: 25,
+        gender: 'woman',
+        seeking: 'men',
+        countryCode: 'AO',
+        city: 'Luanda',
+        cityKey: 'luanda',
+        bio: 'Minimalismo e boas conversas.',
+        intent: 'serious',
+        adultConfirmed: true,
+        termsAcceptedAt: nowIso,
+        termsVersion: '2026-11',
+        discoverable: true,
+        paused: false,
+        suspended: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      // Bloqueia menor de 18 anos, falta de adultConfirmed, bio > 160 chars, PII ou suspended: true na criação
+      await assertFails(setDoc(doc(dbA, 'datingProfiles', uidA), { ...validProfileA, age: 17 }));
+      await assertFails(setDoc(doc(dbA, 'datingProfiles', uidA), { ...validProfileA, adultConfirmed: false }));
+      await assertFails(setDoc(doc(dbA, 'datingProfiles', uidA), { ...validProfileA, bio: 'x'.repeat(161) }));
+      await assertFails(setDoc(doc(dbA, 'datingProfiles', uidA), { ...validProfileA, phone: '+244923456789' }));
+      await assertFails(setDoc(doc(dbA, 'datingProfiles', uidA), { ...validProfileA, suspended: true }));
+      await assertFails(setDoc(doc(dbA, 'datingProfiles', uidB), { ...validProfileA, uid: uidB, talk2tmId: talkIdB }));
+      await assertFails(getDoc(doc(dbUnauth, 'datingProfiles', uidA)));
+
+      // Criação válida por A e B
+      await assertSucceeds(setDoc(doc(dbA, 'datingProfiles', uidA), validProfileA));
+      await assertSucceeds(
+        setDoc(doc(dbB, 'datingProfiles', uidB), {
+          ...validProfileA,
+          uid: uidB,
+          talk2tmId: talkIdB,
+          displayName: 'Bruno',
+          gender: 'man',
+          seeking: 'women',
+        })
+      );
+
+      // B consegue consultar perfil activo e visível de A
+      await assertSucceeds(getDoc(doc(dbB, 'datingProfiles', uidA)));
+      const listVisible = await assertSucceeds(
+        getDocs(
+          query(
+            collection(dbB, 'datingProfiles'),
+            where('discoverable', '==', true),
+            where('paused', '==', false),
+            where('suspended', '==', false),
+            where('adultConfirmed', '==', true),
+            orderBy('updatedAt', 'desc'),
+            limit(25)
+          )
+        )
+      );
+      assert(listVisible.size >= 2, 'Utilizador activo deve listar perfis Dating públicos');
+
+      // A oculta o próprio perfil da descoberta -> B deixa de poder fazer get no perfil oculto
+      await assertSucceeds(updateDoc(doc(dbA, 'datingProfiles', uidA), { discoverable: false, updatedAt: new Date().toISOString() }));
+      await assertFails(getDoc(doc(dbB, 'datingProfiles', uidA)));
+      await assertSucceeds(getDoc(doc(dbA, 'datingProfiles', uidA)));
+
+      // A volta a tornar visível e pausa; Admin suspende A; A não pode remover a própria suspensão
+      await assertSucceeds(updateDoc(doc(dbA, 'datingProfiles', uidA), { discoverable: true, paused: true, updatedAt: new Date().toISOString() }));
+      await assertFails(getDoc(doc(dbB, 'datingProfiles', uidA)));
+      await assertSucceeds(updateDoc(doc(dbA, 'datingProfiles', uidA), { paused: false, updatedAt: new Date().toISOString() }));
+
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'datingProfiles', uidA), { suspended: true, updatedAt: new Date().toISOString() }));
+      await assertFails(updateDoc(doc(dbA, 'datingProfiles', uidA), { suspended: false, updatedAt: new Date().toISOString() }));
+      await assertFails(getDoc(doc(dbB, 'datingProfiles', uidA)));
+      await assertFails(updateDoc(doc(dbAdmin, 'datingProfiles', uidA), { bio: 'AlteradoAdmin' }));
+      await assertFails(deleteDoc(doc(dbA, 'datingProfiles', uidA)));
+      await assertSucceeds(updateDoc(doc(dbAdmin, 'datingProfiles', uidA), { suspended: false, updatedAt: new Date().toISOString() }));
+
+      // Evaluations: apenas o próprio utilizador lê/escreve, sem auto-avaliação nem remoção
+      await assertFails(
+        setDoc(doc(dbA, 'datingProfiles', uidA, 'evaluations', uidA), {
+          targetUid: uidA,
+          decision: 'pass',
+          createdAt: nowIso,
+          dayKey: '2026-11-23',
+        })
+      );
+      await assertSucceeds(
+        setDoc(doc(dbA, 'datingProfiles', uidA, 'evaluations', uidB), {
+          targetUid: uidB,
+          decision: 'pass',
+          createdAt: nowIso,
+          dayKey: '2026-11-23',
+        })
+      );
+      await assertFails(getDoc(doc(dbB, 'datingProfiles', uidA, 'evaluations', uidB)));
+      await assertFails(getDocs(collection(dbB, 'datingProfiles', uidA, 'evaluations')));
+      await assertFails(deleteDoc(doc(dbA, 'datingProfiles', uidA, 'evaluations', uidB)));
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 21: Dating Fase 2 (`datingLikes`, `datingMatches` e bloqueio pós-Unmatch)
+    // -----------------------------------------------------------------------
+    await testCase('21. Dating Fase 2: Like secreto, Match recíproco, conversa automática e bloqueio pós-Unmatch', async () => {
+      const mUidA = 'uid_match_a';
+      const mUidB = 'uid_match_b';
+      const mUidC = 'uid_match_c';
+      const mTalkA = 'TM-MATA-1111';
+      const mTalkB = 'TM-MATB-2222';
+      const mTalkC = 'TM-MATC-3333';
+
+      const mDbA = testEnv.authenticatedContext(mUidA, { email: 'm_a@talk2tm.internal' }).firestore();
+      const mDbB = testEnv.authenticatedContext(mUidB, { email: 'm_b@talk2tm.internal' }).firestore();
+      const mDbC = testEnv.authenticatedContext(mUidC, { email: 'm_c@talk2tm.internal' }).firestore();
+
+      const seedDatingAccount = async (
+        db: typeof mDbA,
+        uid: string,
+        talk2tmId: string,
+        displayName: string,
+        gender: 'woman' | 'man',
+        seeking: 'men' | 'women' | 'all'
+      ) => {
+        await assertSucceeds(setDoc(doc(db, 'users', uid), { uid, talk2tmId, createdAt: nowIso }));
+        await assertSucceeds(
+          setDoc(doc(db, 'userProfiles', talk2tmId), {
+            talk2tmId,
+            uid,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'datingProfiles', uid), {
+            uid,
+            talk2tmId,
+            displayName,
+            age: 26,
+            gender,
+            seeking,
+            countryCode: 'AO',
+            city: 'Luanda',
+            cityKey: 'luanda',
+            bio: 'Minimalismo e boas conversas.',
+            intent: 'serious',
+            adultConfirmed: true,
+            termsAcceptedAt: nowIso,
+            termsVersion: '2026-11-23',
+            discoverable: true,
+            paused: false,
+            suspended: false,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })
+        );
+      };
+
+      await seedDatingAccount(mDbA, mUidA, mTalkA, 'Alice', 'woman', 'men');
+      await seedDatingAccount(mDbB, mUidB, mTalkB, 'Bruno', 'man', 'women');
+      await seedDatingAccount(mDbC, mUidC, mTalkC, 'Carla', 'woman', 'all');
+
+      const likeABId = `${mUidA}_${mUidB}`;
+      const likeBAId = `${mUidB}_${mUidA}`;
+
+      // 1. A envia Like secreto para B -> C e B não conseguem sondar nem listar Likes recebidos antes de curtir de volta
+      await assertFails(
+        setDoc(doc(mDbA, 'datingLikes', likeBAId), {
+          likeId: likeBAId,
+          fromUid: mUidB,
+          toUid: mUidA,
+          fromTalk2tmId: mTalkB,
+          fromDisplayName: 'Bruno',
+          createdAt: nowIso,
+        })
+      );
+      const dayKey = nowIso.slice(0, 10);
+      const batchLikeAB = writeBatch(mDbA);
+      batchLikeAB.set(doc(mDbA, 'userRateLimits', mUidA), {
+        uid: mUidA,
+        dayKey,
+        likeDayKey: dayKey,
+        likeCountToday: 1,
+        reportDayKey: dayKey,
+        reportCountToday: 0,
+        inviteDayKey: dayKey,
+        inviteCountToday: 0,
+        updatedAt: nowIso,
+      });
+      batchLikeAB.set(doc(mDbA, 'datingLikes', likeABId), {
+        likeId: likeABId,
+        fromUid: mUidA,
+        toUid: mUidB,
+        fromTalk2tmId: mTalkA,
+        fromDisplayName: 'Alice',
+        createdAt: nowIso,
+      });
+      await assertSucceeds(batchLikeAB.commit());
+
+      // Zero-oracle: B não pode sondar se A já curtiu sem antes criar B->A
+      await assertFails(getDoc(doc(mDbB, 'datingLikes', likeABId)));
+      await assertFails(getDoc(doc(mDbB, 'datingLikes', `${mUidC}_${mUidB}`)));
+      await assertFails(getDoc(doc(mDbC, 'datingLikes', likeABId)));
+
+      // B não pode criar Match falso sem ter dado Like recíproco
+      const matchId = `match_${mUidA}_${mUidB}`;
+      const convId = `conv_${mUidA}_${mUidB}`;
+      await assertFails(
+        setDoc(doc(mDbB, 'datingMatches', matchId), {
+          matchId,
+          participantA: mUidA,
+          participantB: mUidB,
+          talk2tmIdA: mTalkA,
+          talk2tmIdB: mTalkB,
+          displayNameA: 'Alice',
+          displayNameB: 'Bruno',
+          matchedByUid: mUidB,
+          conversationId: convId,
+          status: 'matched',
+          seenByA: false,
+          seenByB: true,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      // 2. B curte A de volta -> agora B pode ler o Like recíproco e criar Match + Conversa via writeBatch
+      const batchLikeBA = writeBatch(mDbB);
+      batchLikeBA.set(doc(mDbB, 'userRateLimits', mUidB), {
+        uid: mUidB,
+        dayKey,
+        likeDayKey: dayKey,
+        likeCountToday: 1,
+        reportDayKey: dayKey,
+        reportCountToday: 0,
+        inviteDayKey: dayKey,
+        inviteCountToday: 0,
+        updatedAt: nowIso,
+      });
+      batchLikeBA.set(doc(mDbB, 'datingLikes', likeBAId), {
+        likeId: likeBAId,
+        fromUid: mUidB,
+        toUid: mUidA,
+        fromTalk2tmId: mTalkB,
+        fromDisplayName: 'Bruno',
+        createdAt: nowIso,
+      });
+      await assertSucceeds(batchLikeBA.commit());
+      await assertSucceeds(getDoc(doc(mDbB, 'datingLikes', likeABId)));
+
+      const batch = writeBatch(mDbB);
+      batch.set(doc(mDbB, 'datingMatches', matchId), {
+        matchId,
+        participantA: mUidA,
+        participantB: mUidB,
+        talk2tmIdA: mTalkA,
+        talk2tmIdB: mTalkB,
+        displayNameA: 'Alice',
+        displayNameB: 'Bruno',
+        matchedByUid: mUidB,
+        conversationId: convId,
+        status: 'matched',
+        seenByA: false,
+        seenByB: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+      batch.set(doc(mDbB, 'conversations', convId), {
+        conversationId: convId,
+        participantA: mUidA,
+        participantB: mUidB,
+        talk2tmIdA: mTalkA,
+        talk2tmIdB: mTalkB,
+        displayNameA: 'Alice',
+        displayNameB: 'Bruno',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        lastReadA: null,
+        lastReadB: null,
+      });
+      await assertSucceeds(batch.commit());
+
+      // Terceiro (C) não lê nem Match nem conversa; A e B conseguem trocar mensagem
+      await assertFails(getDoc(doc(mDbC, 'datingMatches', matchId)));
+      await assertSucceeds(
+        setDoc(doc(mDbA, 'conversations', convId, 'messages', 'msg_match_1'), {
+          messageId: 'msg_match_1',
+          conversationId: convId,
+          senderId: mUidA,
+          senderTalk2tmId: mTalkA,
+          text: 'Olá pelo Match!',
+          clientId: 'cli_match_1',
+          createdAt: nowIso,
+          status: 'synced',
+        })
+      );
+
+      // A marca Match como visto (não pode alterar visto de B)
+      await assertFails(updateDoc(doc(mDbA, 'datingMatches', matchId), { seenByB: false, updatedAt: nowIso }));
+      await assertSucceeds(updateDoc(doc(mDbA, 'datingMatches', matchId), { seenByA: true, updatedAt: nowIso }));
+
+      // 3. A desfaz o Match -> estado terminal 'unmatched' e bloqueio imediato de novas mensagens/edições na conversa
+      await assertSucceeds(
+        updateDoc(doc(mDbA, 'datingMatches', matchId), {
+          status: 'unmatched',
+          unmatchedByUid: mUidA,
+          unmatchedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(mDbB, 'datingMatches', matchId), {
+          status: 'matched',
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        setDoc(doc(mDbB, 'conversations', convId, 'messages', 'msg_after_unmatch'), {
+          messageId: 'msg_after_unmatch',
+          conversationId: convId,
+          senderId: mUidB,
+          senderTalk2tmId: mTalkB,
+          text: 'Mensagem após unmatch',
+          clientId: 'cli_match_2',
+          createdAt: nowIso,
+          status: 'synced',
+        })
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 22: Fase 3 — Bloqueio, Denúncias, Rate Limiting & Hard Delete
+    // -----------------------------------------------------------------------
+    await testCase('22. Fase 3: Bloqueio bilateral, Denúncias com prova congelada, Rate Limiting atômico e Hard Delete em cascata', async () => {
+      const f3UidA = 'uid_f3_aaa';
+      const f3UidB = 'uid_f3_bbb';
+      const f3UidC = 'uid_f3_ccc';
+      const f3TalkA = 'TM-F3AA-1111';
+      const f3TalkB = 'TM-F3BB-2222';
+      const f3TalkC = 'TM-F3CC-3333';
+      const f3PhoneA = 'a1'.repeat(32);
+      const f3PhoneB = 'b2'.repeat(32);
+      const f3PhoneC = 'c3'.repeat(32);
+      const f3DayKey = nowIso.slice(0, 10);
+
+      const f3DbA = testEnv.authenticatedContext(f3UidA, { email: 'f3_a@talk2tm.internal' }).firestore();
+      const f3DbB = testEnv.authenticatedContext(f3UidB, { email: 'f3_b@talk2tm.internal' }).firestore();
+      const f3DbC = testEnv.authenticatedContext(f3UidC, { email: 'f3_c@talk2tm.internal' }).firestore();
+
+      const seedF3 = async (
+        db: typeof f3DbA,
+        uid: string,
+        talk2tmId: string,
+        displayName: string,
+        phoneHash: string,
+        gender: 'woman' | 'man'
+      ) => {
+        await assertSucceeds(
+          setDoc(doc(db, 'users', uid), {
+            uid,
+            talk2tmId,
+            phoneHash,
+            phoneMasked: '+244 ••• 999',
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'userProfiles', talk2tmId), {
+            talk2tmId,
+            uid,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'phoneLookup', phoneHash), {
+            phoneHash,
+            uid,
+            talk2tmId,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'datingProfiles', uid), {
+            uid,
+            talk2tmId,
+            displayName,
+            age: 27,
+            gender,
+            seeking: 'all',
+            countryCode: 'AO',
+            city: 'Luanda',
+            cityKey: 'luanda',
+            bio: 'Perfil Fase 3 seguro.',
+            intent: 'chat',
+            adultConfirmed: true,
+            termsAcceptedAt: nowIso,
+            termsVersion: '2026-11-23',
+            discoverable: true,
+            paused: false,
+            suspended: false,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })
+        );
+      };
+
+      await seedF3(f3DbA, f3UidA, f3TalkA, 'F3Ana', f3PhoneA, 'woman');
+      await seedF3(f3DbB, f3UidB, f3TalkB, 'F3Bruno', f3PhoneB, 'man');
+      await seedF3(f3DbC, f3UidC, f3TalkC, 'F3Carla', f3PhoneC, 'woman');
+
+      // Conversa bilateral A <-> B via convite aceite
+      const f3ConvAB = `conv_${f3UidA}_${f3UidB}`;
+      await assertSucceeds(
+        setDoc(doc(f3DbA, 'conversationInvites', f3ConvAB), {
+          inviteId: f3ConvAB,
+          fromUid: f3UidA,
+          fromDisplayName: 'F3Ana',
+          fromTalk2tmId: f3TalkA,
+          toTalk2tmId: f3TalkB,
+          toUid: f3UidB,
+          conversationId: f3ConvAB,
+          status: 'pending',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+      await assertSucceeds(
+        updateDoc(doc(f3DbB, 'conversationInvites', f3ConvAB), { status: 'accepted', updatedAt: nowIso })
+      );
+      await assertSucceeds(
+        setDoc(doc(f3DbA, 'conversations', f3ConvAB), {
+          conversationId: f3ConvAB,
+          participantA: f3UidA,
+          participantB: f3UidB,
+          talk2tmIdA: f3TalkA,
+          talk2tmIdB: f3TalkB,
+          displayNameA: 'F3Ana',
+          displayNameB: 'F3Bruno',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          lastReadA: null,
+          lastReadB: null,
+        })
+      );
+      await assertSucceeds(
+        setDoc(doc(f3DbA, 'conversations', f3ConvAB, 'messages', 'msg_f3_1'), {
+          messageId: 'msg_f3_1',
+          conversationId: f3ConvAB,
+          senderId: f3UidA,
+          senderTalk2tmId: f3TalkA,
+          text: 'Olá antes do bloqueio',
+          clientId: 'cli_f3_1',
+          createdAt: nowIso,
+          status: 'synced',
+        })
+      );
+
+      // Avaliação de A sobre C (para validar deleção em cascata depois)
+      await assertSucceeds(
+        setDoc(doc(f3DbA, 'datingProfiles', f3UidA, 'evaluations', f3UidC), {
+          targetUid: f3UidC,
+          decision: 'pass',
+          createdAt: nowIso,
+          dayKey: f3DayKey,
+        })
+      );
+
+      // 1. Bloqueio de utilizadores (userBlocks)
+      const blockABId = `${f3UidA}_${f3UidB}`;
+      await assertFails(
+        setDoc(doc(f3DbA, 'userBlocks', `${f3UidA}_${f3UidA}`), {
+          blockId: `${f3UidA}_${f3UidA}`,
+          blockerUid: f3UidA,
+          blockedUid: f3UidA,
+          createdAt: nowIso,
+        })
+      );
+      await assertFails(
+        setDoc(doc(f3DbB, 'userBlocks', blockABId), {
+          blockId: blockABId,
+          blockerUid: f3UidA,
+          blockedUid: f3UidB,
+          createdAt: nowIso,
+        })
+      );
+      await assertSucceeds(
+        setDoc(doc(f3DbA, 'userBlocks', blockABId), {
+          blockId: blockABId,
+          blockerUid: f3UidA,
+          blockedUid: f3UidB,
+          blockerTalk2tmId: f3TalkA,
+          reason: 'spam',
+          createdAt: nowIso,
+        })
+      );
+      await assertFails(getDoc(doc(f3DbC, 'userBlocks', blockABId)));
+      await assertFails(getDoc(doc(dbUnauth, 'userBlocks', blockABId)));
+
+      // Após bloqueio, B não consegue enviar mensagens nem actualizar leitura em convAB, nem enviar like ou convite para A
+      await assertFails(
+        setDoc(doc(f3DbB, 'conversations', f3ConvAB, 'messages', 'msg_f3_blocked'), {
+          messageId: 'msg_f3_blocked',
+          conversationId: f3ConvAB,
+          senderId: f3UidB,
+          senderTalk2tmId: f3TalkB,
+          text: 'Mensagem bloqueada',
+          clientId: 'cli_f3_blocked',
+          createdAt: nowIso,
+          status: 'synced',
+        })
+      );
+      await assertFails(
+        updateDoc(doc(f3DbB, 'conversations', f3ConvAB), { lastReadB: nowIso, updatedAt: nowIso })
+      );
+      const batchBlockedLike = writeBatch(f3DbB);
+      batchBlockedLike.set(doc(f3DbB, 'userRateLimits', f3UidB), {
+        uid: f3UidB,
+        dayKey: f3DayKey,
+        likeDayKey: f3DayKey,
+        likeCountToday: 1,
+        reportDayKey: f3DayKey,
+        reportCountToday: 0,
+        inviteDayKey: f3DayKey,
+        inviteCountToday: 0,
+        updatedAt: nowIso,
+      });
+      batchBlockedLike.set(doc(f3DbB, 'datingLikes', `${f3UidB}_${f3UidA}`), {
+        likeId: `${f3UidB}_${f3UidA}`,
+        fromUid: f3UidB,
+        toUid: f3UidA,
+        fromTalk2tmId: f3TalkB,
+        fromDisplayName: 'F3Bruno',
+        createdAt: nowIso,
+      });
+      await assertFails(batchBlockedLike.commit());
+
+      // Bloqueio B -> C também impede C de criar novo convite para B
+      await assertSucceeds(
+        setDoc(doc(f3DbB, 'userBlocks', `${f3UidB}_${f3UidC}`), {
+          blockId: `${f3UidB}_${f3UidC}`,
+          blockerUid: f3UidB,
+          blockedUid: f3UidC,
+          createdAt: nowIso,
+        })
+      );
+      const f3ConvBC = `conv_${f3UidB}_${f3UidC}`;
+      await assertFails(
+        setDoc(doc(f3DbC, 'conversationInvites', f3ConvBC), {
+          inviteId: f3ConvBC,
+          fromUid: f3UidC,
+          fromDisplayName: 'F3Carla',
+          fromTalk2tmId: f3TalkC,
+          toTalk2tmId: f3TalkB,
+          toUid: f3UidB,
+          conversationId: f3ConvBC,
+          status: 'pending',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      // 2. Sistema de Denúncias (moderationReports) + Rate Limit Atômico
+      const repId = `rep_${f3UidA}_1`;
+      // Sem incremento atômico de userRateLimits, deve falhar
+      await assertFails(
+        setDoc(doc(f3DbA, 'moderationReports', repId), {
+          reportId: repId,
+          reporterUid: f3UidA,
+          reporterTalk2tmId: f3TalkA,
+          targetUid: f3UidB,
+          targetTalk2tmId: f3TalkB,
+          targetDisplayName: 'F3Bruno',
+          sourceType: 'chat_message',
+          channelId: f3ConvAB,
+          reason: 'harassment',
+          evidenceSnapshot: 'Mensagem ofensiva congelada',
+          status: 'pending',
+          createdAt: nowIso,
+        })
+      );
+
+      // Com batch atômico em userRateLimits, deve ter sucesso
+      const batchReport = writeBatch(f3DbA);
+      batchReport.set(doc(f3DbA, 'userRateLimits', f3UidA), {
+        uid: f3UidA,
+        dayKey: f3DayKey,
+        likeDayKey: f3DayKey,
+        likeCountToday: 0,
+        reportDayKey: f3DayKey,
+        reportCountToday: 1,
+        inviteDayKey: f3DayKey,
+        inviteCountToday: 0,
+        lastReportAtMs: Date.now(),
+        updatedAt: nowIso,
+      });
+      batchReport.set(doc(f3DbA, 'moderationReports', repId), {
+        reportId: repId,
+        reporterUid: f3UidA,
+        reporterTalk2tmId: f3TalkA,
+        targetUid: f3UidB,
+        targetTalk2tmId: f3TalkB,
+        targetDisplayName: 'F3Bruno',
+        sourceType: 'chat_message',
+        channelId: f3ConvAB,
+        reason: 'harassment',
+        evidenceSnapshot: 'Mensagem ofensiva congelada',
+        status: 'pending',
+        createdAt: nowIso,
+      });
+      await assertSucceeds(batchReport.commit());
+
+      // B (alvo), C (terceiro) e Admin não verificado não leem nem listam denúncias; denunciante não altera status
+      await assertFails(getDoc(doc(f3DbB, 'moderationReports', repId)));
+      await assertFails(getDoc(doc(f3DbC, 'moderationReports', repId)));
+      await assertFails(getDoc(doc(dbAdminUnverified, 'moderationReports', repId)));
+      await assertFails(getDocs(query(collection(f3DbB, 'moderationReports'), limit(10))));
+      await assertFails(updateDoc(doc(f3DbA, 'moderationReports', repId), { status: 'resolved' }));
+
+      // Admin verificado lista, lê, resolve denúncia (sem alterar prova congelada) e suspende alvo
+      const adminReportsSnap = await assertSucceeds(
+        getDocs(query(collection(dbAdmin, 'moderationReports'), where('status', '==', 'pending'), orderBy('createdAt', 'desc'), limit(10)))
+      );
+      assert(adminReportsSnap.size >= 1, 'Admin deve conseguir listar denúncias pendentes');
+      await assertFails(
+        updateDoc(doc(dbAdmin, 'moderationReports', repId), {
+          evidenceSnapshot: 'Adulterado',
+          status: 'resolved',
+        })
+      );
+      await assertSucceeds(
+        updateDoc(doc(dbAdmin, 'moderationReports', repId), {
+          status: 'resolved',
+          reviewedAt: nowIso,
+          reviewedByUid: 'uid_admin_master_vitronis',
+          resolutionAction: 'account_suspended',
+        })
+      );
+      const batchSuspendB = writeBatch(dbAdmin);
+      batchSuspendB.update(doc(dbAdmin, 'userProfiles', f3TalkB), { active: false });
+      batchSuspendB.update(doc(dbAdmin, 'phoneLookup', f3PhoneB), { active: false });
+      batchSuspendB.update(doc(dbAdmin, 'datingProfiles', f3UidB), { suspended: true, updatedAt: nowIso });
+      await assertSucceeds(batchSuspendB.commit());
+
+      // 3. Rate Limiting (limites diários máximos e monotonicidade)
+      await assertFails(
+        setDoc(doc(f3DbC, 'userRateLimits', f3UidC), {
+          uid: f3UidC,
+          dayKey: f3DayKey,
+          likeDayKey: f3DayKey,
+          likeCountToday: 6,
+          reportDayKey: f3DayKey,
+          reportCountToday: 0,
+          inviteDayKey: f3DayKey,
+          inviteCountToday: 0,
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(f3DbA, 'userRateLimits', f3UidA), {
+          reportCountToday: 0,
+          updatedAt: nowIso,
+        })
+      );
+
+      // Likes válidos até o limite de 5/dia (criando um like de A para C)
+      const batchLikeAC = writeBatch(f3DbA);
+      batchLikeAC.set(doc(f3DbA, 'userRateLimits', f3UidA), {
+        uid: f3UidA,
+        dayKey: f3DayKey,
+        likeDayKey: f3DayKey,
+        likeCountToday: 1,
+        reportDayKey: f3DayKey,
+        reportCountToday: 1,
+        inviteDayKey: f3DayKey,
+        inviteCountToday: 0,
+        updatedAt: nowIso,
+      });
+      batchLikeAC.set(doc(f3DbA, 'datingLikes', `${f3UidA}_${f3UidC}`), {
+        likeId: `${f3UidA}_${f3UidC}`,
+        fromUid: f3UidA,
+        toUid: f3UidC,
+        fromTalk2tmId: f3TalkA,
+        fromDisplayName: 'F3Ana',
+        createdAt: nowIso,
+      });
+      await assertSucceeds(batchLikeAC.commit());
+
+      // 4. Hard Delete em Cascata (bloqueado antes de 'deleting', protegido para legado, permitido durante 'deleting')
+      await assertFails(deleteDoc(doc(f3DbA, 'datingProfiles', f3UidA)));
+      await assertFails(deleteDoc(doc(f3DbA, 'conversations', f3ConvAB)));
+      await assertFails(
+        updateDoc(doc(dbTruman, 'users', 'uid_truman_852456'), {
+          accountStatus: 'deleting',
+          deletionRequestedAt: nowIso,
+        })
+      );
+      await assertFails(deleteDoc(doc(dbTruman, 'users', 'uid_truman_852456')));
+      await assertFails(
+        updateDoc(doc(f3DbA, 'users', f3UidA), {
+          accountStatus: 'hacked',
+          deletionRequestedAt: nowIso,
+        })
+      );
+
+      // Marca conta A como 'deleting' e executa cascata completa
+      await assertSucceeds(
+        updateDoc(doc(f3DbA, 'users', f3UidA), {
+          accountStatus: 'deleting',
+          deletionRequestedAt: nowIso,
+        })
+      );
+      const cascadeBatch = writeBatch(f3DbA);
+      cascadeBatch.delete(doc(f3DbA, 'datingProfiles', f3UidA, 'evaluations', f3UidC));
+      cascadeBatch.delete(doc(f3DbA, 'userBlocks', blockABId));
+      cascadeBatch.delete(doc(f3DbA, 'datingLikes', `${f3UidA}_${f3UidC}`));
+      cascadeBatch.delete(doc(f3DbA, 'conversations', f3ConvAB, 'messages', 'msg_f3_1'));
+      cascadeBatch.delete(doc(f3DbA, 'conversations', f3ConvAB));
+      cascadeBatch.delete(doc(f3DbA, 'conversationInvites', f3ConvAB));
+      await assertSucceeds(cascadeBatch.commit());
+
+      const finalRootBatch = writeBatch(f3DbA);
+      finalRootBatch.delete(doc(f3DbA, 'userRateLimits', f3UidA));
+      finalRootBatch.delete(doc(f3DbA, 'datingProfiles', f3UidA));
+      finalRootBatch.delete(doc(f3DbA, 'phoneLookup', f3PhoneA));
+      finalRootBatch.delete(doc(f3DbA, 'userProfiles', f3TalkA));
+      finalRootBatch.delete(doc(f3DbA, 'users', f3UidA));
+      await assertSucceeds(finalRootBatch.commit());
+
+      const deletedUserSnap = await assertSucceeds(getDoc(doc(dbAdmin, 'users', f3UidA)));
+      assert(!deletedUserSnap.exists(), 'Documento raiz users/{uid} deve desaparecer após Hard Delete');
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 23: Fase 4 — Foto Opcional WebP, Moderação Admin, Referral & Atribuição
+    // -----------------------------------------------------------------------
+    await testCase('23. Fase 4: Foto WebP, fila de moderação Admin, referralLinks e referralAttributions', async () => {
+      const f4UidA = 'uid_f4_ana';
+      const f4UidB = 'uid_f4_bruno';
+      const f4TalkA = 'TM-F4AA-1001';
+      const f4TalkB = 'TM-F4BB-2002';
+      const f4PhoneA = 'e1'.repeat(32);
+      const f4PhoneB = 'f2'.repeat(32);
+      const f4DbA = testEnv.authenticatedContext(f4UidA, { email: 'f4_a@talk2tm.internal' }).firestore();
+      const f4DbB = testEnv.authenticatedContext(f4UidB, { email: 'f4_b@talk2tm.internal' }).firestore();
+      const dbUnauth = testEnv.unauthenticatedContext().firestore();
+
+      const seedF4 = async (
+        db: typeof f4DbA,
+        uid: string,
+        talk2tmId: string,
+        displayName: string,
+        phoneHash: string,
+        gender: 'woman' | 'man'
+      ) => {
+        await assertSucceeds(
+          setDoc(doc(db, 'users', uid), {
+            uid,
+            talk2tmId,
+            phoneHash,
+            phoneMasked: '+244 ••• 000',
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'userProfiles', talk2tmId), {
+            talk2tmId,
+            uid,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'phoneLookup', phoneHash), {
+            phoneHash,
+            uid,
+            talk2tmId,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'datingProfiles', uid), {
+            uid,
+            talk2tmId,
+            displayName,
+            age: 26,
+            gender,
+            seeking: 'all',
+            countryCode: 'AO',
+            city: 'Luanda',
+            cityKey: 'luanda',
+            bio: 'Perfil Fase 4.',
+            intent: 'serious',
+            adultConfirmed: true,
+            termsAcceptedAt: nowIso,
+            termsVersion: 'dating-v1',
+            discoverable: true,
+            paused: false,
+            suspended: false,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })
+        );
+      };
+
+      await seedF4(f4DbA, f4UidA, f4TalkA, 'F4Ana', f4PhoneA, 'woman');
+      await seedF4(f4DbB, f4UidB, f4TalkB, 'F4Bruno', f4PhoneB, 'man');
+
+      const validPhotoUrl = `https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0618196986.appspot.com/o/datingPhotos%2F${f4UidA}%2Favatar.webp?alt=media`;
+      const validPhotoPath = `datingPhotos/${f4UidA}/avatar.webp`;
+
+      // 1. Dono não pode auto-aprovar sua fotografia nem apontar photoPath de outro utilizador
+      await assertFails(
+        updateDoc(doc(f4DbA, 'datingProfiles', f4UidA), {
+          photoUrl: validPhotoUrl,
+          photoPath: validPhotoPath,
+          photoStatus: 'approved',
+          photoUpdatedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(f4DbA, 'datingProfiles', f4UidA), {
+          photoUrl: validPhotoUrl,
+          photoPath: `datingPhotos/${f4UidB}/avatar.webp`,
+          photoStatus: 'pending',
+          photoUpdatedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      // Dono submete foto como 'pending'
+      await assertSucceeds(
+        updateDoc(doc(f4DbA, 'datingProfiles', f4UidA), {
+          photoUrl: validPhotoUrl,
+          photoPath: validPhotoPath,
+          photoStatus: 'pending',
+          photoUpdatedAt: nowIso,
+          photoModerationNote: null,
+          updatedAt: nowIso,
+        })
+      );
+
+      // Admin não verificado e outro utilizador não podem moderar foto
+      await assertFails(
+        updateDoc(doc(dbAdminUnverified, 'datingProfiles', f4UidA), {
+          photoStatus: 'approved',
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(f4DbB, 'datingProfiles', f4UidA), {
+          photoStatus: 'approved',
+          updatedAt: nowIso,
+        })
+      );
+
+      // Admin verificado aprova fotografia
+      await assertSucceeds(
+        updateDoc(doc(dbAdmin, 'datingProfiles', f4UidA), {
+          photoStatus: 'approved',
+          photoModerationNote: null,
+          photoUpdatedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      // Após aprovada, o dono ainda consegue atualizar sua biografia sem perder validação
+      await assertSucceeds(
+        updateDoc(doc(f4DbA, 'datingProfiles', f4UidA), {
+          bio: 'Biografia atualizada com foto já aprovada.',
+          updatedAt: nowIso,
+        })
+      );
+
+      // Admin pode rejeitar e limpar URL/Path da foto
+      await assertSucceeds(
+        updateDoc(doc(dbAdmin, 'datingProfiles', f4UidA), {
+          photoStatus: 'rejected',
+          photoUrl: null,
+          photoPath: null,
+          photoModerationNote: 'Foto rejeitada pela moderação.',
+          photoUpdatedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      // 2. ReferralLinks: get público por código sem enumeração (list bloqueada a visitantes/utilizadores)
+      const refCodeA = 'TMF4A999';
+      await assertSucceeds(
+        setDoc(doc(f4DbA, 'referralLinks', refCodeA), {
+          code: refCodeA,
+          referrerUid: f4UidA,
+          referrerDisplayName: 'F4Ana',
+          active: true,
+          createdAt: nowIso,
+        })
+      );
+      await assertSucceeds(getDoc(doc(dbUnauth, 'referralLinks', refCodeA)));
+      await assertFails(getDocs(query(collection(dbUnauth, 'referralLinks'), limit(10))));
+      await assertFails(getDocs(query(collection(f4DbB, 'referralLinks'), limit(10))));
+
+      // 3. ReferralStats: contador privado e monotónico por utilizador
+      await assertSucceeds(
+        setDoc(doc(f4DbA, 'referralStats', f4UidA), {
+          uid: f4UidA,
+          referralCode: refCodeA,
+          invitesSharedCount: 2,
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(getDoc(doc(f4DbB, 'referralStats', f4UidA)));
+      await assertFails(
+        updateDoc(doc(f4DbA, 'referralStats', f4UidA), {
+          invitesSharedCount: 1,
+          updatedAt: nowIso,
+        })
+      );
+      await assertSucceeds(
+        updateDoc(doc(f4DbA, 'referralStats', f4UidA), {
+          invitesSharedCount: 3,
+          updatedAt: nowIso,
+        })
+      );
+
+      // 4. ReferralAttributions: anti auto-indicação, imutável e vinculado a referralLinks válido
+      await assertFails(
+        setDoc(doc(f4DbA, 'referralAttributions', f4UidA), {
+          newUid: f4UidA,
+          newTalk2tmId: f4TalkA,
+          referralCode: refCodeA,
+          referrerUid: f4UidA,
+          createdAt: nowIso,
+        })
+      );
+      await assertSucceeds(
+        setDoc(doc(f4DbB, 'referralAttributions', f4UidB), {
+          newUid: f4UidB,
+          newTalk2tmId: f4TalkB,
+          referralCode: refCodeA,
+          referrerUid: f4UidA,
+          createdAt: nowIso,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(f4DbB, 'referralAttributions', f4UidB), {
+          referralCode: 'TMOTHER1',
+        })
+      );
+      // Padrinho A consegue ler sua conversão
+      const attrListA = await assertSucceeds(
+        getDocs(query(collection(f4DbA, 'referralAttributions'), where('referrerUid', '==', f4UidA), limit(10)))
+      );
+      assert(attrListA.size === 1, 'Padrinho deve listar sua própria atribuição convertida');
+
+      // 5. Hard Delete apaga referralLinks, referralStats e referralAttributions durante 'deleting'
+      await assertFails(deleteDoc(doc(f4DbA, 'referralStats', f4UidA)));
+      await assertSucceeds(
+        updateDoc(doc(f4DbA, 'users', f4UidA), {
+          accountStatus: 'deleting',
+          deletionRequestedAt: nowIso,
+        })
+      );
+      await assertSucceeds(deleteDoc(doc(f4DbA, 'referralLinks', refCodeA)));
+      await assertSucceeds(deleteDoc(doc(f4DbA, 'referralStats', f4UidA)));
+
+      await assertSucceeds(
+        updateDoc(doc(f4DbB, 'users', f4UidB), {
+          accountStatus: 'deleting',
+          deletionRequestedAt: nowIso,
+        })
+      );
+      await assertSucceeds(deleteDoc(doc(f4DbB, 'referralAttributions', f4UidB)));
+    });
+
+    // -----------------------------------------------------------------------
+    // Cenário 24: Fase 5 — Telemetria WAU (growthTelemetry), chatStarted & Métricas Admin
+    // -----------------------------------------------------------------------
+    await testCase('24. Fase 5: growthTelemetry WAU/cidade, transição chatStarted única e leitura Admin', async () => {
+      const f5UidA = 'uid_f5_alice';
+      const f5UidB = 'uid_f5_bruno';
+      const f5TalkA = 'TM-F5AA-1001';
+      const f5TalkB = 'TM-F5BB-2002';
+      const f5PhoneA = '5a'.repeat(32);
+      const f5PhoneB = '5b'.repeat(32);
+      const f5DbA = testEnv.authenticatedContext(f5UidA, { email: 'f5_a@talk2tm.internal' }).firestore();
+      const f5DbB = testEnv.authenticatedContext(f5UidB, { email: 'f5_b@talk2tm.internal' }).firestore();
+
+      const seedF5User = async (
+        db: typeof f5DbA,
+        uid: string,
+        talk2tmId: string,
+        displayName: string,
+        phoneHash: string,
+        gender: 'woman' | 'man'
+      ) => {
+        await assertSucceeds(
+          setDoc(doc(db, 'users', uid), {
+            uid,
+            talk2tmId,
+            phoneHash,
+            phoneMasked: '+244 ••• 000',
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'userProfiles', talk2tmId), {
+            talk2tmId,
+            uid,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'phoneLookup', phoneHash), {
+            phoneHash,
+            uid,
+            talk2tmId,
+            displayName,
+            active: true,
+            createdAt: nowIso,
+          })
+        );
+        await assertSucceeds(
+          setDoc(doc(db, 'datingProfiles', uid), {
+            uid,
+            talk2tmId,
+            displayName,
+            age: 27,
+            gender,
+            seeking: 'all',
+            countryCode: 'AO',
+            city: 'Luanda',
+            cityKey: 'luanda',
+            bio: 'Perfil Fase 5.',
+            intent: 'serious',
+            adultConfirmed: true,
+            termsAcceptedAt: nowIso,
+            termsVersion: 'dating-v1',
+            discoverable: true,
+            paused: false,
+            suspended: false,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })
+        );
+      };
+
+      await seedF5User(f5DbA, f5UidA, f5TalkA, 'F5Alice', f5PhoneA, 'woman');
+      await seedF5User(f5DbB, f5UidB, f5TalkB, 'F5Bruno', f5PhoneB, 'man');
+
+      // 1. growthTelemetry/{uid}: escrita pelo próprio utilizador, listagem exclusiva do Admin
+      await assertSucceeds(
+        setDoc(doc(f5DbA, 'growthTelemetry', f5UidA), {
+          uid: f5UidA,
+          lastActiveAt: nowIso,
+          lastActiveDay: '2026-11-26',
+          city: 'Luanda',
+          cityKey: 'luanda',
+          countryCode: 'AO',
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        setDoc(doc(f5DbB, 'growthTelemetry', f5UidA), {
+          uid: f5UidA,
+          lastActiveAt: nowIso,
+          lastActiveDay: '2026-11-26',
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(getDoc(doc(f5DbB, 'growthTelemetry', f5UidA)));
+      await assertFails(getDocs(query(collection(f5DbB, 'growthTelemetry'), limit(10))));
+
+      // Admin verificado consegue consultar growthTelemetry, datingMatches e referralStats para KPIs
+      await assertSucceeds(getDoc(doc(dbAdmin, 'growthTelemetry', f5UidA)));
+      await assertSucceeds(getDocs(query(collection(dbAdmin, 'growthTelemetry'), limit(10))));
+      await assertFails(getDocs(query(collection(dbAdminUnverified, 'growthTelemetry'), limit(10))));
+
+      // 2. datingMatches: criação do Match + transição única chatStarted: true pelo participante
+      const likeABBatch = writeBatch(f5DbA);
+      likeABBatch.set(doc(f5DbA, 'userRateLimits', f5UidA), {
+        uid: f5UidA,
+        likeDayKey: '2026-11-26',
+        likeCountToday: 1,
+        reportDayKey: '2026-11-26',
+        reportCountToday: 0,
+        inviteDayKey: '2026-11-26',
+        inviteCountToday: 0,
+        updatedAt: nowIso,
+      });
+      likeABBatch.set(doc(f5DbA, 'datingLikes', `${f5UidA}_${f5UidB}`), {
+        likeId: `${f5UidA}_${f5UidB}`,
+        fromUid: f5UidA,
+        toUid: f5UidB,
+        fromTalk2tmId: f5TalkA,
+        fromDisplayName: 'F5Alice',
+        createdAt: nowIso,
+      });
+      await assertSucceeds(likeABBatch.commit());
+
+      const matchId5 = `match_${f5UidA}_${f5UidB}`;
+      const convId5 = `conv_${f5UidA}_${f5UidB}`;
+      const matchBatch = writeBatch(f5DbB);
+      matchBatch.set(doc(f5DbB, 'userRateLimits', f5UidB), {
+        uid: f5UidB,
+        likeDayKey: '2026-11-26',
+        likeCountToday: 1,
+        reportDayKey: '2026-11-26',
+        reportCountToday: 0,
+        inviteDayKey: '2026-11-26',
+        inviteCountToday: 0,
+        updatedAt: nowIso,
+      });
+      matchBatch.set(doc(f5DbB, 'datingLikes', `${f5UidB}_${f5UidA}`), {
+        likeId: `${f5UidB}_${f5UidA}`,
+        fromUid: f5UidB,
+        toUid: f5UidA,
+        fromTalk2tmId: f5TalkB,
+        fromDisplayName: 'F5Bruno',
+        createdAt: nowIso,
+      });
+      matchBatch.set(doc(f5DbB, 'datingMatches', matchId5), {
+        matchId: matchId5,
+        conversationId: convId5,
+        participantA: f5UidA,
+        participantB: f5UidB,
+        talk2tmIdA: f5TalkA,
+        talk2tmIdB: f5TalkB,
+        displayNameA: 'F5Alice',
+        displayNameB: 'F5Bruno',
+        matchedByUid: f5UidB,
+        status: 'matched',
+        seenByA: false,
+        seenByB: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+      await assertSucceeds(matchBatch.commit());
+
+      // Participante marca chatStarted = true pela primeira vez
+      await assertSucceeds(
+        updateDoc(doc(f5DbA, 'datingMatches', matchId5), {
+          chatStarted: true,
+          chatStartedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+      // Não é possível reverter chatStarted para false nem sobrescrever novamente
+      await assertFails(
+        updateDoc(doc(f5DbB, 'datingMatches', matchId5), {
+          chatStarted: false,
+          chatStartedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(f5DbB, 'datingMatches', matchId5), {
+          chatStarted: true,
+          chatStartedAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      // Admin consegue listar datingMatches e referralStats; utilizador comum não consegue listar todos
+      await assertSucceeds(getDocs(query(collection(dbAdmin, 'datingMatches'), limit(10))));
+      await assertSucceeds(getDocs(query(collection(dbAdmin, 'referralStats'), limit(10))));
+      await assertFails(getDocs(query(collection(f5DbA, 'referralStats'), limit(10))));
+
+      // 3. Hard Delete apaga growthTelemetry/{uid} apenas quando accountStatus == 'deleting'
+      await assertFails(deleteDoc(doc(f5DbA, 'growthTelemetry', f5UidA)));
+      await assertSucceeds(
+        updateDoc(doc(f5DbA, 'users', f5UidA), {
+          accountStatus: 'deleting',
+          deletionRequestedAt: nowIso,
+        })
+      );
+      await assertSucceeds(deleteDoc(doc(f5DbA, 'growthTelemetry', f5UidA)));
+    });
+
     console.log(`\n\x1b[32m✔ Firebase Emulator Suite: ${passed}/${total} cenários reais aprovados com 100% de rigor.\x1b[0m`);
   } finally {
     await testEnv.cleanup();

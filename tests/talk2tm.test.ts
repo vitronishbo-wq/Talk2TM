@@ -14,6 +14,7 @@ import {
   loadSettings,
   saveSettings,
   normalizeAppearanceMode,
+  normalizeNotificationSettings,
   normalizeSettingsLanguage,
 } from '../src/config';
 import { getTalk2TMIconSvg } from '../src/ui/lockscreen';
@@ -108,8 +109,23 @@ import {
   validateOptionalRecoveryEmail,
   TALK2TM_RESET_EPOCH,
   applyLocalResetEpochIfNeeded,
+  removeAccountFromLocalVault,
   LocalIdentity,
 } from '../src/identity';
+import {
+  RATE_LIMITS,
+  clearSafetyMemoryForTests,
+  checkAndRecordMessageBurst,
+  checkAccountCreationThrottle,
+  recordAccountCreationAttempt,
+  buildNextDailyRateLimitState,
+  createEmptyRateLimitState,
+  sanitizePlainTextSnippet,
+  addBlockedUidLocally,
+  loadLocalBlockedUids,
+  isLocallyBlockedPair,
+  buildUserBlockId,
+} from '../src/safety';
 import {
   DEFAULT_COUNTRY_ISO,
   PHONE_COUNTRIES,
@@ -144,6 +160,69 @@ import {
   type SupportedLocale,
 } from '../src/i18n';
 import { en } from '../src/i18n/locales/en';
+import {
+  DATING_BIO_MAX_LENGTH,
+  DATING_DAILY_DISCOVERY_LIMIT,
+  buildDatingLikeId,
+  buildDatingMatchId,
+  buildDatingMatchPayload,
+  clearDatingMemoryFallbackForTests,
+  doesProfileMatchFilters,
+  filterActiveDatingMatches,
+  filterAndLimitDiscoveryCandidates,
+  getDailyDiscoveryQuota,
+  getDatingMatchPartner,
+  getUnmatchedConversationIds,
+  getUnseenDatingMatches,
+  isGenderCompatible,
+  loadLocalDatingMatches,
+  loadSavedDatingFilters,
+  loadSavedDatingProfile,
+  normalizeCityKey,
+  recordLocalEvaluation,
+  saveLocalDatingFilters,
+  saveLocalDatingMatches,
+  saveLocalDatingProfile,
+  shouldDisplayCandidatePhoto,
+  validateDatingFilters,
+  validateDatingProfileInput,
+} from '../src/dating';
+import {
+  DATING_PHOTO_MAX_DIMENSION,
+  DATING_PHOTO_MIN_DIMENSION,
+  buildDatingPhotoStoragePath,
+  computeTargetPhotoDimensions,
+  isSupportedPhotoMimeType,
+} from '../src/media/photo';
+import {
+  buildCanonicalReferralUrl,
+  buildWhatsAppReferralShareUrl,
+  clearPendingReferralCode,
+  clearReferralMemoryForTests,
+  computeConversionRatePercent,
+  deriveDeterministicReferralCode,
+  extractReferralCodeFromSearch,
+  getPendingReferralCode,
+  isValidReferralCode,
+  loadCachedReferralMetrics,
+  normalizeReferralCode,
+  saveCachedReferralMetrics,
+  savePendingReferralCode,
+} from '../src/referral';
+import {
+  buildDiscreetNotificationPayload,
+  clearNotificationMemoryStateForTests,
+  isNotificationKindEnabled,
+  markDiscreetNotificationSent,
+  shouldNotifyDiscreetly,
+} from '../src/notifications';
+import {
+  computeGrowthMetricsSummary,
+  getActivityPingStorageKey,
+  getLocalDateDayKey,
+  getWeekWindowStartIso,
+} from '../src/growth';
+import type { DatingMatch, DatingProfile } from '../src/types';
 
 function assert(condition: boolean, description: string): void {
   if (!condition) {
@@ -1345,9 +1424,10 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       usersSection.includes('allow get: if isUser(uid) || isAdmin();') &&
       usersSection.includes('allow list: if false;') &&
       usersSection.includes('allow create: if isUser(uid)') &&
-      usersSection.includes('allow update: if false;') &&
+      usersSection.includes("request.resource.data.accountStatus == 'deleting'") &&
+      usersSection.includes('!isProtectedLegacyUid(uid)') &&
       usersSection.includes('isValidTalk2tmId(request.resource.data.talk2tmId)'),
-      'users/{uid} deve permitir leitura get apenas ao próprio UID ou Admin explícito e bloquear list/update após criação'
+      'users/{uid} deve permitir leitura get apenas ao próprio UID ou Admin explícito, bloquear list e restringir update ao fluxo de eliminação protegendo legado'
     );
   });
 
@@ -1401,9 +1481,9 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(
       phoneSection.includes('allow get: if isAuthenticated() && isValidPhoneHash(phoneHash);') &&
       phoneSection.includes('allow list: if false;') &&
-      phoneSection.includes('allow delete: if false;') &&
+      phoneSection.includes('isAccountDeletionInProgress(request.auth.uid)') &&
       phoneSection.includes('get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmId)).data.uid == request.auth.uid'),
-      'phoneLookup/{phoneHash} deve permitir apenas get autenticado, proibir list/delete e exigir vínculo real com userProfiles/users'
+      'phoneLookup/{phoneHash} deve permitir apenas get autenticado, proibir list, restringir delete à cascata Hard Delete e exigir vínculo real com userProfiles/users'
     );
   });
 
@@ -1598,7 +1678,10 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     assert(rulesSrc.includes('function isProtectedLegacyUid(uid)'), 'firestore.rules deve proteger UIDs legados Truman/Mãezinha');
     assert(rulesSrc.includes('allow list: if isAdmin();'), 'Apenas Admin pode listar userProfiles');
 
-    const invitesBlock = rulesSrc.slice(rulesSrc.indexOf('match /conversationInvites/{inviteId}'));
+    const invitesBlock = rulesSrc.slice(
+      rulesSrc.indexOf('match /conversationInvites/{inviteId}'),
+      rulesSrc.indexOf('// DATING FASE 1:')
+    );
     assert(!invitesBlock.includes('isAdmin()'), 'conversationInvites não pode conceder leitura ou escrita ao Admin');
 
     const convBlock = rulesSrc.slice(
@@ -1847,6 +1930,809 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     setAppLocaleSync(prevLoc);
   });
 
+  // 67. Talk2TM Dating Fase 1: Validação +18, Bio <= 160, Filtros, Exclusões e Quota Diária (5/dia)
+  check('Talk2TM Dating Fase 1: validação +18, compatibilidade mútua, filtros, exclusões e limite de 5 sugestões/dia', () => {
+    clearDatingMemoryFallbackForTests();
+
+    const baseInput = {
+      displayName: '  Ana Clara  ',
+      age: 26,
+      gender: 'woman' as const,
+      seeking: 'men' as const,
+      countryCode: 'ao',
+      city: '  São Paulo  ',
+      bio: ' Gosto de café\ne conversas tranquilas. ',
+      intent: 'serious' as const,
+      adultConfirmed: true,
+      termsAccepted: true,
+    };
+
+    // Bloqueio estrito de menores (<18) e checkboxes obrigatórias
+    assert(
+      validateDatingProfileInput({ ...baseInput, age: 17 }).valid === false,
+      'Menor de 18 anos deve ser bloqueado na criação de perfil Dating'
+    );
+    assert(
+      validateDatingProfileInput({ ...baseInput, adultConfirmed: false }).valid === false,
+      'Confirmação explícita +18 deve ser obrigatória'
+    );
+    assert(
+      validateDatingProfileInput({ ...baseInput, termsAccepted: false }).valid === false,
+      'Aceitação dos Termos e Política de Privacidade deve ser obrigatória'
+    );
+    assert(
+      validateDatingProfileInput({ ...baseInput, bio: 'a'.repeat(DATING_BIO_MAX_LENGTH + 1) }).valid === false,
+      'Biografia acima de 160 caracteres deve ser rejeitada'
+    );
+
+    const validRes = validateDatingProfileInput(baseInput);
+    assert(validRes.valid === true && Boolean(validRes.normalized), 'Perfil +18 válido deve passar na validação');
+    assert(validRes.normalized?.countryCode === 'AO', 'País deve normalizar para ISO-2 maiúsculo');
+    assert(validRes.normalized?.cityKey === 'sao paulo', `cityKey deve normalizar sem acentos (atual: ${validRes.normalized?.cityKey})`);
+    assert(validRes.normalized?.bio === 'Gosto de café e conversas tranquilas.', 'Biografia deve limpar quebras e espaços extras');
+
+    // Compatibilidade mútua de género x preferência
+    assert(isGenderCompatible('woman', 'men', 'man', 'women') === true, 'Mulher buscando homens x Homem buscando mulheres deve ser compatível');
+    assert(isGenderCompatible('woman', 'men', 'man', 'men') === false, 'Preferência unilateral incompatível deve ser excluída');
+    assert(isGenderCompatible('non_binary', 'all', 'woman', 'all') === true, 'Não-binário x Todos bilateral deve ser compatível');
+    assert(isGenderCompatible('woman', 'men', 'non_binary', 'all') === false, 'Preferência estrita por homens exclui perfil non_binary');
+
+    // Filtros e exclusões (ocultos, pausados, suspensos, bloqueados, avaliados, menor de idade)
+    const makeCandidate = (overrides: Partial<DatingProfile>): DatingProfile => ({
+      uid: 'cand_1',
+      talk2tmId: 'TM-CAND-0001',
+      displayName: 'Bruno',
+      age: 28,
+      gender: 'man',
+      seeking: 'women',
+      countryCode: 'AO',
+      city: 'Luanda',
+      cityKey: normalizeCityKey('Luanda'),
+      bio: 'Engenheiro civil e leitor.',
+      intent: 'meet_people',
+      adultConfirmed: true,
+      termsAcceptedAt: '2026-11-23T10:00:00.000Z',
+      termsVersion: '2026-11',
+      discoverable: true,
+      paused: false,
+      suspended: false,
+      createdAt: '2026-11-23T10:00:00.000Z',
+      updatedAt: '2026-11-23T10:00:00.000Z',
+      ...overrides,
+    });
+
+    const filters = validateDatingFilters({ minAge: 35, maxAge: 22, seeking: 'men', countryCode: 'AO', city: 'Luanda' });
+    assert(filters.minAge === 35 && filters.maxAge === 35, 'maxAge deve ser ajustado para >= minAge');
+
+    const wideFilters = validateDatingFilters({ minAge: 20, maxAge: 40, seeking: 'men', countryCode: 'AO', city: 'luánda' });
+    const viewer = {
+      uid: 'viewer_1',
+      gender: 'woman' as const,
+      blockedUids: new Set(['cand_blocked']),
+      evaluatedUids: new Set(['cand_seen']),
+    };
+
+    const rawCandidates: DatingProfile[] = [
+      makeCandidate({ uid: 'viewer_1' }),
+      makeCandidate({ uid: 'cand_hidden', discoverable: false }),
+      makeCandidate({ uid: 'cand_paused', paused: true }),
+      makeCandidate({ uid: 'cand_suspended', suspended: true }),
+      makeCandidate({ uid: 'cand_minor', age: 17 }),
+      makeCandidate({ uid: 'cand_unconfirmed', adultConfirmed: false }),
+      makeCandidate({ uid: 'cand_blocked' }),
+      makeCandidate({ uid: 'cand_seen' }),
+      makeCandidate({ uid: 'cand_wrong_city', city: 'Benguela', cityKey: 'benguela' }),
+      makeCandidate({ uid: 'cand_wrong_seek', seeking: 'men' }),
+      ...Array.from({ length: 7 }, (_, i) => makeCandidate({ uid: `cand_ok_${i + 1}`, displayName: `Candidato ${i + 1}` })),
+    ];
+
+    assert(doesProfileMatchFilters(rawCandidates[1], viewer, wideFilters) === false, 'Perfil oculto deve ser excluído');
+    const limited = filterAndLimitDiscoveryCandidates({
+      rawCandidates,
+      viewer,
+      filters: wideFilters,
+      remainingToday: DATING_DAILY_DISCOVERY_LIMIT,
+    });
+    assert(
+      limited.length === 5 && limited.every((c) => c.uid.startsWith('cand_ok_')),
+      `Descoberta deve retornar apenas candidatos elegíveis limitados a 5/dia (atual: ${limited.length})`
+    );
+
+    // Quota diária local (5/dia) e persistência local de perfil/filtros
+    const todayKey = '2026-11-23';
+    const yesterdayKey = '2026-11-22';
+    recordLocalEvaluation('viewer_1', 'old_eval', 'pass', yesterdayKey);
+    for (let i = 1; i <= 3; i++) {
+      recordLocalEvaluation('viewer_1', `today_eval_${i}`, 'pass', todayKey);
+    }
+    const q = getDailyDiscoveryQuota('viewer_1', todayKey);
+    assert(q.usedToday === 3 && q.remainingToday === 2, 'Quota diária deve contar apenas avaliações de hoje e deixar 2 restantes');
+    assert(q.evaluatedUids.has('old_eval') && q.evaluatedUids.has('today_eval_3'), 'evaluatedUids deve excluir avaliados de dias anteriores e de hoje');
+
+    const ownProfile = makeCandidate({ uid: 'viewer_1', gender: 'woman', seeking: 'men' });
+    saveLocalDatingProfile(ownProfile);
+    assert(loadSavedDatingProfile('viewer_1')?.displayName === ownProfile.displayName, 'Cache local de perfil Dating deve restaurar corretamente');
+    saveLocalDatingFilters('viewer_1', wideFilters);
+    assert(loadSavedDatingFilters('viewer_1').city === 'luánda', 'Cache local de filtros Dating deve restaurar corretamente');
+
+    // Preservação do Talk2TM e ausência de GPS contínuo
+    const datingSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/dating.ts'), 'utf8');
+    const panelSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/dating-panel.ts'), 'utf8');
+    const domSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/dom.ts'), 'utf8');
+    assert(!datingSrc.includes('geolocation') && !panelSrc.includes('geolocation'), 'Módulo Dating não deve usar GPS contínuo');
+    assert(domSrc.includes("this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-flex' : 'none'"), 'Contas legadas Truman/Mãezinha não devem exibir Hub/Dating');
+    clearDatingMemoryFallbackForTests();
+  });
+
+  // 68. Dating Fase 2: Like secreto, Match exclusivamente recíproco, conversa bilateral automática e Desfazer Match
+  check('Dating Fase 2: IDs determinísticos, Match recíproco, notificações não vistas, Unmatch e preservação legada', () => {
+    clearDatingMemoryFallbackForTests();
+
+    assert(buildDatingLikeId('uid_a', 'uid_b') === 'uid_a_uid_b', 'Like ID deve ser direcional fromUid_toUid');
+    assert(buildDatingLikeId('uid_a', 'uid_b') !== buildDatingLikeId('uid_b', 'uid_a'), 'Likes opostos devem ter IDs distintos');
+
+    const mId1 = buildDatingMatchId('uid_z_1', 'uid_a_2');
+    const mId2 = buildDatingMatchId('uid_a_2', 'uid_z_1');
+    assert(mId1 === mId2 && mId1 === 'match_uid_a_2_uid_z_1', 'Match ID deve ser determinístico, ordenado e estável com underscores');
+
+    const profileA: DatingProfile = {
+      uid: 'uid_z_9',
+      talk2tmId: 'TM-ZZZZ-9999',
+      displayName: 'Zeca',
+      age: 30,
+      gender: 'man',
+      seeking: 'women',
+      countryCode: 'AO',
+      city: 'Luanda',
+      cityKey: 'luanda',
+      bio: 'Conversar com calma',
+      intent: 'serious',
+      adultConfirmed: true,
+      termsAcceptedAt: '2026-11-23T00:00:00.000Z',
+      termsVersion: '2026-11-23',
+      discoverable: true,
+      paused: false,
+      suspended: false,
+      createdAt: '2026-11-23T00:00:00.000Z',
+      updatedAt: '2026-11-23T00:00:00.000Z',
+    };
+    const profileB: DatingProfile = {
+      ...profileA,
+      uid: 'uid_a_1',
+      talk2tmId: 'TM-AAAA-1111',
+      displayName: 'Ana',
+      gender: 'woman',
+      seeking: 'men',
+    };
+
+    // Viewer é profileA (uid_z_9 -> fica como participantB), candidato é profileB (uid_a_1 -> participantA)
+    const { match, conversation } = buildDatingMatchPayload({
+      viewerProfile: profileA,
+      candidate: profileB,
+      nowIso: '2026-11-23T12:00:00.000Z',
+    });
+
+    assert(match.matchId === 'match_uid_a_1_uid_z_9', 'Match payload deve ordenar participantA < participantB');
+    assert(match.conversationId === 'conv_uid_a_1_uid_z_9', 'Conversa automática deve seguir padrão conv_<A>_<B>');
+    assert(conversation.conversationId === match.conversationId, 'Conversation e Match devem compartilhar exatamente o mesmo conversationId');
+    assert(match.participantA === 'uid_a_1' && match.participantB === 'uid_z_9', 'Participantes devem estar em ordem canónica');
+    assert(match.seenByA === false && match.seenByB === true, 'Quem acabou de dar o Like recíproco (viewer = B) já viu o Match; A fica por ver');
+
+    const partnerForA = getDatingMatchPartner(match, 'uid_a_1');
+    assert(partnerForA.uid === 'uid_z_9' && partnerForA.displayName === 'Zeca', 'Parceiro de A deve ser Zeca');
+
+    const unmatchedMatch: DatingMatch = {
+      ...match,
+      matchId: 'match_uid_a_1_uid_x_2',
+      participantB: 'uid_x_2',
+      conversationId: 'conv_uid_a_1_uid_x_2',
+      status: 'unmatched',
+      unmatchedByUid: 'uid_a_1',
+      unmatchedAt: '2026-11-23T13:00:00.000Z',
+    };
+
+    const allMatches = [match, unmatchedMatch];
+    assert(filterActiveDatingMatches(allMatches, 'uid_a_1').length === 1, 'Apenas matches activos devem aparecer na lista');
+    assert(getUnseenDatingMatches(allMatches, 'uid_a_1').length === 1, 'A deve receber 1 notificação de novo Match');
+    assert(getUnseenDatingMatches(allMatches, 'uid_z_9').length === 0, 'Zeca que disparou o Match não deve ter badge pendente');
+    assert(getUnmatchedConversationIds(allMatches).has('conv_uid_a_1_uid_x_2'), 'Conversa de Match desfeito deve ser ocultada do Hub');
+
+    saveLocalDatingMatches('uid_a_1', allMatches);
+    assert(loadLocalDatingMatches('uid_a_1').length === 2, 'Cache local de Matches deve persistir e restaurar corretamente');
+
+    // Regras estáticas de preservação do Talk2TM + segurança Zero-Oracle
+    const rulesSrc = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
+    assert(rulesSrc.includes('match /datingLikes/{likeId}') && rulesSrc.includes('resource != null'), 'Regras de datingLikes devem exigir resource != null para zero-oracle');
+    assert(rulesSrc.includes('match /datingMatches/{matchId}') && rulesSrc.includes('isDatingMatchUnmatched'), 'Regras devem bloquear escrita em conversas após Unmatch');
+    assert(PASSWORDS.TRUMAN === '852456' && PASSWORDS.MAEZINHA === '135790', 'PINs legados Truman/Mãezinha devem permanecer intactos');
+
+    clearDatingMemoryFallbackForTests();
+  });
+
+  // 69. Fase 3: Segurança, Anti-Spam (Rate Limiting), Bloqueios Locais e Auditoria de Moderação
+  check('Fase 3: Bloqueio local, anti-rajada de mensagens, rate limits diários, sanitização de denúncia e moderação sem PII', () => {
+    clearSafetyMemoryForTests();
+
+    // 1. Mock isolado de localStorage
+    const fakeStore: Record<string, string> = {};
+    const origLS = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k: string) => fakeStore[k] ?? null,
+      setItem: (k: string, v: string) => { fakeStore[k] = v; },
+      removeItem: (k: string) => { delete fakeStore[k]; },
+      clear: () => {
+        for (const k of Object.keys(fakeStore)) delete fakeStore[k];
+      },
+      key: (i: number) => Object.keys(fakeStore)[i] ?? null,
+      get length() {
+        return Object.keys(fakeStore).length;
+      },
+    } as unknown as Storage;
+
+    try {
+      // Bloqueio local bilateral e ID composto
+      assert(buildUserBlockId(' uid_a ', ' uid_b ') === 'uid_a_uid_b', 'buildUserBlockId deve compor uidA_uidB');
+      addBlockedUidLocally('uid_a', 'uid_b');
+      assert(loadLocalBlockedUids('uid_a').includes('uid_b'), 'addBlockedUidLocally deve persistir alvo bloqueado');
+      assert(isLocallyBlockedPair('uid_a', 'uid_b') && isLocallyBlockedPair('uid_b', 'uid_a'), 'Bloqueio deve ser simétrico na deteção do par');
+      assert(!isLocallyBlockedPair('uid_a', 'uid_c'), 'Terceiro não bloqueado não deve ser afetado');
+
+      // Sanitização da prova congelada da denúncia
+      const cleanEvidence = sanitizePlainTextSnippet('  <script>oi</script>\n  texto   abusivo  ', 20);
+      assert(!cleanEvidence.includes('<') && !cleanEvidence.includes('>') && cleanEvidence.length <= 20, 'sanitizePlainTextSnippet deve remover tags e respeitar limite');
+
+      // Anti-rajada interativa de mensagens (<= 12 por 15s + cooldown de duplicada 1.5s)
+      const baseTs = 1_700_000_000_000;
+      checkAndRecordMessageBurst('uid_spam', 'mensagem repetida', baseTs);
+      let dupBlocked = false;
+      try {
+        checkAndRecordMessageBurst('uid_spam', 'mensagem repetida', baseTs + 500);
+      } catch {
+        dupBlocked = true;
+      }
+      assert(dupBlocked, 'Mensagem idêntica enviada antes de 1.5s deve ser travada');
+
+      clearSafetyMemoryForTests();
+      for (let i = 1; i <= RATE_LIMITS.MESSAGE_BURST_MAX; i++) {
+        checkAndRecordMessageBurst('uid_burst', `msg_${i}`, baseTs + i * 100);
+      }
+      let burstBlocked = false;
+      try {
+        checkAndRecordMessageBurst('uid_burst', 'msg_overflow', baseTs + 2_000);
+      } catch {
+        burstBlocked = true;
+      }
+      assert(burstBlocked, '13ª mensagem na janela de 15s deve ser travada');
+
+      // Garante estaticamente que syncPendingOutbox em src/app.ts não aplica trava interativa de rajada
+      const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/app.ts'), 'utf8');
+      const syncOutboxIdx = appSrc.indexOf('async syncPendingOutbox');
+      const syncOutboxEnd = appSrc.indexOf('async handleSendMessage');
+      const syncOutboxBlock = syncOutboxIdx >= 0 && syncOutboxEnd > syncOutboxIdx
+        ? appSrc.slice(syncOutboxIdx, syncOutboxEnd)
+        : '';
+      assert(
+        syncOutboxIdx >= 0 && !syncOutboxBlock.includes('checkAndRecordMessageBurst'),
+        'syncPendingOutbox offline não deve sofrer bloqueio de anti-rajada'
+      );
+
+      // Limite de criação de contas (<= 3/hora)
+      checkAccountCreationThrottle(baseTs);
+      recordAccountCreationAttempt(baseTs);
+      recordAccountCreationAttempt(baseTs + 10_000);
+      recordAccountCreationAttempt(baseTs + 20_000);
+      let signupBlocked = false;
+      try {
+        checkAccountCreationThrottle(baseTs + 30_000);
+      } catch {
+        signupBlocked = true;
+      }
+      assert(signupBlocked, '4ª tentativa de criação de conta na mesma hora deve ser bloqueada');
+
+      // Limites diários atómicos (likes <= 5, reports <= 10 + 4s cooldown, invites <= 25 + 3s cooldown) e reset no dia seguinte
+      const day1 = new Date('2026-11-25T10:00:00.000Z');
+      let st = createEmptyRateLimitState('uid_rl', day1);
+      for (let i = 0; i < RATE_LIMITS.DAILY_LIKES_MAX; i++) {
+        st = buildNextDailyRateLimitState(st, 'like', new Date(day1.getTime() + i * 1_000));
+      }
+      assert(st.likeCountToday === 5, 'Likes diários devem atingir exactamente 5');
+      let likeBlocked = false;
+      try {
+        buildNextDailyRateLimitState(st, 'like', new Date(day1.getTime() + 10_000));
+      } catch {
+        likeBlocked = true;
+      }
+      assert(likeBlocked, '6º like no mesmo dia deve lançar erro de limite');
+
+      // Cooldown de denúncia (4s) e limite diário (10)
+      st = buildNextDailyRateLimitState(st, 'report', new Date(day1.getTime() + 20_000));
+      let reportCooldownHit = false;
+      try {
+        buildNextDailyRateLimitState(st, 'report', new Date(day1.getTime() + 21_000));
+      } catch {
+        reportCooldownHit = true;
+      }
+      assert(reportCooldownHit, 'Denúncia antes de 4s deve accionar cooldown');
+
+      // Novo dia reinicia contadores
+      const day2 = new Date('2026-11-26T09:00:00.000Z');
+      const stNextDay = buildNextDailyRateLimitState(st, 'like', day2);
+      assert(stNextDay.likeCountToday === 1 && stNextDay.reportCountToday === 0, 'Novo dia deve reiniciar contadores diários');
+
+      // Moderação Admin mantém estritamente o isolamento de privacidade exigido no Teste 61
+      const adminFbSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/firebase/admin.ts'), 'utf8');
+      const adminUiSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/admin.ts'), 'utf8');
+      assert(
+        adminFbSrc.includes("'moderationReports'") &&
+        !adminFbSrc.includes("'conversations'") &&
+        !adminFbSrc.includes("'messages'") &&
+        !adminUiSrc.includes('vitronis.hbo'),
+        'Admin de moderação deve consultar moderationReports sem aceder a conversas/mensagens nem expor credenciais'
+      );
+    } finally {
+      clearSafetyMemoryForTests();
+      globalThis.localStorage = origLS;
+    }
+  });
+
+  // 66. Fase 4: Fotografia Opcional (WebP) & Moderação de Visibilidade na Descoberta
+  check('Fase 4: Fotografia WebP (dimensões 300-420px, MIME) e visibilidade estrita por aprovação', () => {
+    const landscape = computeTargetPhotoDimensions(1600, 800, DATING_PHOTO_MAX_DIMENSION);
+    assert(landscape.width === 420 && landscape.height === 210, 'Imagem horizontal deve escalar preservando proporção no teto de 420px');
+
+    const portrait = computeTargetPhotoDimensions(900, 1800, DATING_PHOTO_MAX_DIMENSION);
+    assert(portrait.width === 210 && portrait.height === 420, 'Imagem vertical deve escalar preservando proporção no teto de 420px');
+
+    const small = computeTargetPhotoDimensions(280, 200, DATING_PHOTO_MAX_DIMENSION);
+    assert(small.width === 280 && small.height === 200, 'Imagem já menor que o teto não deve sofrer upscale');
+
+    const minClamped = computeTargetPhotoDimensions(1000, 1000, 120);
+    assert(minClamped.width === DATING_PHOTO_MIN_DIMENSION && minClamped.height === DATING_PHOTO_MIN_DIMENSION, 'Teto mínimo deve respeitar 300px');
+
+    assert(isSupportedPhotoMimeType('image/jpeg'), 'JPEG deve ser aceite');
+    assert(isSupportedPhotoMimeType('image/png'), 'PNG deve ser aceite');
+    assert(isSupportedPhotoMimeType('image/webp'), 'WebP deve ser aceite');
+    assert(!isSupportedPhotoMimeType('image/gif'), 'GIF animado não deve ser aceite');
+    assert(!isSupportedPhotoMimeType('image/svg+xml'), 'SVG não deve ser aceite por segurança XSS');
+    assert(!isSupportedPhotoMimeType(''), 'MIME vazio deve ser rejeitado');
+
+    assert(
+      buildDatingPhotoStoragePath('uid_foto_1') === 'datingPhotos/uid_foto_1/avatar.webp',
+      'Caminho no Storage deve usar avatar.webp único por utilizador'
+    );
+
+    const baseCandidate: DatingProfile = {
+      uid: 'uid_cand_photo',
+      talk2tmId: 'TM-FOTO-1111',
+      displayName: 'Sofia',
+      age: 26,
+      gender: 'woman',
+      seeking: 'all',
+      countryCode: 'AO',
+      city: 'Luanda',
+      cityKey: 'luanda',
+      bio: 'Perfil minimalista.',
+      intent: 'serious',
+      adultConfirmed: true,
+      termsAcceptedAt: '2026-11-26T00:00:00.000Z',
+      termsVersion: 'dating-v1',
+      discoverable: true,
+      paused: false,
+      suspended: false,
+      createdAt: '2026-11-26T00:00:00.000Z',
+      updatedAt: '2026-11-26T00:00:00.000Z',
+    };
+
+    assert(!shouldDisplayCandidatePhoto(baseCandidate), 'Candidato sem foto não deve renderizar imagem');
+    assert(
+      !shouldDisplayCandidatePhoto({
+        ...baseCandidate,
+        photoUrl: 'https://firebasestorage.googleapis.com/v0/b/test/o/avatar.webp',
+        photoStatus: 'pending',
+      }),
+      'Foto pendente nunca pode aparecer no cartão público de descoberta'
+    );
+    assert(
+      !shouldDisplayCandidatePhoto({
+        ...baseCandidate,
+        photoUrl: 'https://firebasestorage.googleapis.com/v0/b/test/o/avatar.webp',
+        photoStatus: 'rejected',
+      }),
+      'Foto rejeitada nunca pode aparecer no cartão público'
+    );
+    assert(
+      !shouldDisplayCandidatePhoto({
+        ...baseCandidate,
+        photoUrl: 'http://insecure.example.com/a.webp',
+        photoStatus: 'approved',
+      }),
+      'URL não HTTPS deve ser rejeitada'
+    );
+    assert(
+      shouldDisplayCandidatePhoto({
+        ...baseCandidate,
+        photoUrl: 'https://firebasestorage.googleapis.com/v0/b/test/o/avatar.webp',
+        photoStatus: 'approved',
+      }),
+      'Foto aprovada com HTTPS deve aparecer na descoberta'
+    );
+  });
+
+  // 67. Fase 4: Mecânica de Convites (Referral), Landing Pública, WhatsApp & Painel Admin de Fotos
+  check('Fase 4: Referral code, URL canónica, WhatsApp share, métricas, cache local e fila Admin Fotos', () => {
+    const origLS = globalThis.localStorage;
+    const fakeStore: Record<string, string> = {};
+    globalThis.localStorage = {
+      getItem: (k: string) => (Object.prototype.hasOwnProperty.call(fakeStore, k) ? fakeStore[k] : null),
+      setItem: (k: string, v: string) => {
+        fakeStore[k] = String(v);
+      },
+      removeItem: (k: string) => {
+        delete fakeStore[k];
+      },
+      clear: () => {
+        Object.keys(fakeStore).forEach((k) => delete fakeStore[k]);
+      },
+      key: (idx: number) => Object.keys(fakeStore)[idx] ?? null,
+      get length() {
+        return Object.keys(fakeStore).length;
+      },
+    } as unknown as Storage;
+
+    try {
+      assert(normalizeReferralCode(' tmab3456 ') === 'TMAB3456', 'normalizeReferralCode deve limpar espaços e maiúsculas');
+      assert(normalizeReferralCode('ab') === null, 'Código abaixo de 6 chars deve ser inválido');
+      assert(isValidReferralCode('TMXY9988'), 'Código alfanumérico 8 chars deve ser válido');
+
+      assert(
+        extractReferralCodeFromSearch('?utm=share&ref=tm9988ab') === 'TM9988AB',
+        'extractReferralCodeFromSearch deve extrair parâmetro ref válido'
+      );
+      assert(extractReferralCodeFromSearch('?ref=x') === null, 'extractReferralCodeFromSearch deve ignorar código inválido');
+
+      const codeA1 = deriveDeterministicReferralCode('uid_ref_alpha');
+      const codeA2 = deriveDeterministicReferralCode('uid_ref_alpha');
+      const codeB = deriveDeterministicReferralCode('uid_ref_beta');
+      assert(codeA1 === codeA2 && codeA1.startsWith('TM') && isValidReferralCode(codeA1), 'Código derivado deve ser determinístico');
+      assert(codeA1 !== codeB, 'UIDs distintos devem derivar códigos distintos');
+
+      const canonical = buildCanonicalReferralUrl('https://talk2tm.web.app/', codeA1);
+      assert(canonical === `https://talk2tm.web.app/?ref=${codeA1}`, 'URL canónica deve apontar para /?ref=CODE');
+
+      const waUrl = buildWhatsAppReferralShareUrl(`Convite Talk2TM: ${canonical}`);
+      assert(waUrl.startsWith('https://wa.me/?text=') && waUrl.includes(encodeURIComponent(canonical)), 'Link WhatsApp deve codificar texto e URL');
+
+      assert(computeConversionRatePercent(0, 0) === 0, 'Taxa 0/0 deve ser 0%');
+      assert(computeConversionRatePercent(10, 4) === 40, 'Taxa 4/10 deve ser 40%');
+      assert(computeConversionRatePercent(0, 2) === 100, 'Taxa com conversões orgânicas diretas não pode exceder 100%');
+
+      assert(savePendingReferralCode('tm123456') === 'TM123456', 'savePendingReferralCode deve normalizar e guardar');
+      assert(getPendingReferralCode() === 'TM123456', 'getPendingReferralCode deve recuperar código pendente');
+      clearPendingReferralCode();
+      assert(getPendingReferralCode() === null, 'clearPendingReferralCode deve limpar código após registo');
+
+      saveCachedReferralMetrics('uid_ref_alpha', {
+        referralCode: codeA1,
+        inviteUrl: canonical,
+        whatsappUrl: waUrl,
+        invitesSharedCount: 5,
+        convertedCount: 2,
+      });
+      const cachedMetrics = loadCachedReferralMetrics('uid_ref_alpha');
+      assert(cachedMetrics?.invitesSharedCount === 5 && cachedMetrics?.convertedCount === 2, 'Cache local de referral deve persistir contadores');
+
+      removeAccountFromLocalVault('uid_ref_alpha', []);
+      assert(fakeStore['talk2tm_ref_summary_v1_uid_ref_alpha'] === undefined, 'Hard Delete deve limpar resumo de referral do utilizador');
+
+      const adminFbSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/firebase/admin.ts'), 'utf8');
+      const adminUiSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/admin.ts'), 'utf8');
+      assert(
+        adminUiSrc.includes('Fotos') &&
+        adminFbSrc.includes("'datingProfiles'") &&
+        !adminFbSrc.includes("'conversations'") &&
+        !adminFbSrc.includes("'messages'") &&
+        !adminUiSrc.includes('vitronis.hbo'),
+        'Painel Admin deve incluir fila Fotos preservando isolamento total do Teste 61'
+      );
+    } finally {
+      clearReferralMemoryForTests();
+      globalThis.localStorage = origLS;
+    }
+  });
+
+  // 68. Fase 5: Notificações Web Push Discretas & Dashboard de Métricas (Admin)
+  check('Fase 5: Web Push discreto sem PII, preferências locais, telemetria WAU/cidade e KPIs Admin', () => {
+    clearNotificationMemoryStateForTests();
+    const origLS = globalThis.localStorage;
+    const fakeStore: Record<string, string> = {};
+    globalThis.localStorage = {
+      getItem: (k: string) => (Object.prototype.hasOwnProperty.call(fakeStore, k) ? fakeStore[k] : null),
+      setItem: (k: string, v: string) => {
+        fakeStore[k] = String(v);
+      },
+      removeItem: (k: string) => {
+        delete fakeStore[k];
+      },
+      clear: () => {
+        Object.keys(fakeStore).forEach((k) => delete fakeStore[k]);
+      },
+      key: (idx: number) => Object.keys(fakeStore)[idx] ?? null,
+      get length() {
+        return Object.keys(fakeStore).length;
+      },
+    } as unknown as Storage;
+
+    try {
+      // 1. Preferências padrão e normalização
+      const defaultNotifs = normalizeNotificationSettings(undefined);
+      assert(
+        defaultNotifs.pushEnabled === false &&
+          defaultNotifs.pushMatchEnabled === true &&
+          defaultNotifs.pushMessageEnabled === true,
+        'Web Push deve iniciar desativado por omissão com sub-tipos prontos para ativar'
+      );
+
+      saveSettings({
+        sessionTimeoutMinutes: 5,
+        inactivityLockSeconds: 300,
+        appearance: 'talk2tm',
+        language: 'pt',
+        pushEnabled: true,
+        pushMatchEnabled: true,
+        pushMessageEnabled: false,
+      });
+      const loadedPrefs = loadSettings();
+      assert(
+        loadedPrefs.pushEnabled === true &&
+          loadedPrefs.pushMatchEnabled === true &&
+          loadedPrefs.pushMessageEnabled === false,
+        'Preferências locais de notificação devem persistir em ttm_settings'
+      );
+
+      assert(
+        isNotificationKindEnabled(loadedPrefs, 'match') === true &&
+          isNotificationKindEnabled(loadedPrefs, 'message') === false,
+        'Filtro por tipo de notificação deve respeitar preferências granulares'
+      );
+
+      // 2. Payload estritamente genérico sem exposição de dados sensíveis
+      const msgPayload = buildDiscreetNotificationPayload('message', {
+        messageBody: 'Nova atividade na conta',
+        matchBody: 'Novo Match',
+      });
+      const matchPayload = buildDiscreetNotificationPayload('match', {
+        messageBody: 'Nova atividade na conta',
+        matchBody: 'Novo Match',
+      });
+      assert(
+        msgPayload.title === 'Talk2TM' &&
+          msgPayload.body === 'Nova atividade na conta' &&
+          msgPayload.tag === 'talk2tm-activity',
+        'Alerta de mensagem deve mostrar apenas texto genérico sem conteúdo nem remetente'
+      );
+      assert(
+        matchPayload.title === 'Talk2TM' &&
+          matchPayload.body === 'Novo Match' &&
+          matchPayload.tag === 'talk2tm-match',
+        'Alerta de Match deve mostrar apenas texto genérico "Novo Match"'
+      );
+
+      // 3. Portões de disparo (permissão, primeiro plano, deduplicação e cooldown)
+      const fullOnSettings = {
+        pushEnabled: true,
+        pushMatchEnabled: true,
+        pushMessageEnabled: true,
+      };
+      const baseNow = 1_700_000_000_000;
+      assert(
+        shouldNotifyDiscreetly({
+          kind: 'message',
+          settings: fullOnSettings,
+          permission: 'denied',
+          eventKey: 'm_1',
+          nowMs: baseNow,
+        }) === false,
+        'Permissão negada nunca deve disparar notificação'
+      );
+      assert(
+        shouldNotifyDiscreetly({
+          kind: 'message',
+          settings: fullOnSettings,
+          permission: 'granted',
+          eventKey: 'm_1',
+          nowMs: baseNow,
+          isAppForegroundContext: true,
+        }) === false,
+        'Contexto em primeiro plano visível deve suprimir alerta duplicado'
+      );
+      assert(
+        shouldNotifyDiscreetly({
+          kind: 'message',
+          settings: fullOnSettings,
+          permission: 'granted',
+          eventKey: 'm_1',
+          nowMs: baseNow,
+          isAppForegroundContext: false,
+        }) === true,
+        'Evento elegível com permissão concedida deve permitir alerta discreto'
+      );
+
+      markDiscreetNotificationSent('message', 'm_1', baseNow);
+      assert(
+        shouldNotifyDiscreetly({
+          kind: 'message',
+          settings: fullOnSettings,
+          permission: 'granted',
+          eventKey: 'm_1',
+          nowMs: baseNow + 60_000,
+        }) === false,
+        'Mesmo eventKey não deve notificar duas vezes'
+      );
+      assert(
+        shouldNotifyDiscreetly({
+          kind: 'message',
+          settings: fullOnSettings,
+          permission: 'granted',
+          eventKey: 'm_2',
+          nowMs: baseNow + 2_000,
+          cooldownMs: 12_000,
+        }) === false,
+        'Cooldown de anti-spam deve travar alertas consecutivos imediatos'
+      );
+      assert(
+        shouldNotifyDiscreetly({
+          kind: 'message',
+          settings: fullOnSettings,
+          permission: 'granted',
+          eventKey: 'm_2',
+          nowMs: baseNow + 15_000,
+          cooldownMs: 12_000,
+        }) === true,
+        'Novo evento após cooldown deve voltar a notificar'
+      );
+
+      // 4. Service Worker push handler + clique seguro
+      const swSrc = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
+      assert(
+        swSrc.includes("addEventListener('push'") &&
+          swSrc.includes("addEventListener('notificationclick'") &&
+          swSrc.includes('Nova atividade na conta') &&
+          swSrc.includes('Novo Match') &&
+          swSrc.includes('talk2tm-activity') &&
+          swSrc.includes('talk2tm-match'),
+        'Service Worker deve tratar eventos push/notificationclick apenas com texto genérico seguro'
+      );
+
+      // 5. Telemetria WAU & Agregação de Métricas Admin (excluindo legado Truman/Mãezinha)
+      const refNowMs = Date.parse('2026-11-26T12:00:00.000Z');
+      const dayKey = getLocalDateDayKey(new Date(refNowMs));
+      const weekStart = getWeekWindowStartIso(refNowMs);
+      assert(dayKey === '2026-11-26', 'getLocalDateDayKey deve retornar YYYY-MM-DD em UTC');
+      assert(weekStart.startsWith('2026-11-19'), 'Janela semanal WAU deve cobrir últimos 7 dias');
+
+      fakeStore[getActivityPingStorageKey('uid_u1')] = JSON.stringify({ dayKey, atMs: refNowMs });
+      removeAccountFromLocalVault('uid_u1', []);
+      assert(
+        fakeStore[getActivityPingStorageKey('uid_u1')] === undefined,
+        'Hard Delete deve remover chave local de telemetria de atividade'
+      );
+
+      const makeDatingProf = (uid: string, city: string, countryCode = 'AO', paused = false, suspended = false): DatingProfile => ({
+        uid,
+        talk2tmId: `TM-${uid.toUpperCase()}`,
+        displayName: uid,
+        age: 26,
+        gender: 'woman',
+        seeking: 'all',
+        countryCode,
+        city,
+        cityKey: city.toLowerCase(),
+        bio: 'Perfil teste',
+        intent: 'serious',
+        adultConfirmed: true,
+        termsAcceptedAt: '2026-11-20T00:00:00.000Z',
+        termsVersion: 'dating-v1',
+        discoverable: true,
+        paused,
+        suspended,
+        createdAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-01T00:00:00.000Z',
+      });
+
+      const makeMatchRec = (id: string, a: string, b: string, status: 'matched' | 'unmatched', chatStarted: boolean): DatingMatch => ({
+        matchId: id,
+        conversationId: `conv_${a}_${b}`,
+        participantA: a,
+        participantB: b,
+        talk2tmIdA: `TM-${a}`,
+        talk2tmIdB: `TM-${b}`,
+        displayNameA: a,
+        displayNameB: b,
+        matchedByUid: b,
+        status,
+        seenByA: true,
+        seenByB: true,
+        chatStarted,
+        chatStartedAt: chatStarted ? '2026-11-25T10:00:00.000Z' : undefined,
+        createdAt: '2026-11-25T09:00:00.000Z',
+        updatedAt: '2026-11-25T10:00:00.000Z',
+      });
+
+      const metrics = computeGrowthMetricsSummary({
+        nowMs: refNowMs,
+        userProfiles: [
+          { uid: 'uid_truman_852456', talk2tmId: 'TM-TRUM-0001', displayName: 'Truman', active: true, createdAt: '2026-01-01T00:00:00.000Z' },
+          { uid: 'uid_u1', talk2tmId: 'TM-U111-0001', displayName: 'Ana', active: true, createdAt: '2026-11-01T00:00:00.000Z' },
+          { uid: 'uid_u2', talk2tmId: 'TM-U222-0002', displayName: 'Bruno', active: true, createdAt: '2026-11-02T00:00:00.000Z' },
+          { uid: 'uid_u3', talk2tmId: 'TM-U333-0003', displayName: 'Carla', active: true, createdAt: '2026-11-03T00:00:00.000Z' },
+          { uid: 'uid_u4', talk2tmId: 'TM-U444-0004', displayName: 'Diogo', active: true, createdAt: '2026-11-04T00:00:00.000Z' },
+          { uid: 'uid_susp', talk2tmId: 'TM-SUSP-0005', displayName: 'Susp', active: false, createdAt: '2026-11-05T00:00:00.000Z' },
+        ],
+        referralLinks: [
+          { code: 'TMREF111', referrerUid: 'uid_u1', referrerDisplayName: 'Ana', active: true, createdAt: '2026-11-01T00:00:00.000Z' },
+        ],
+        referralStats: [
+          { uid: 'uid_u1', referralCode: 'TMREF111', invitesSharedCount: 5, updatedAt: '2026-11-25T00:00:00.000Z' },
+        ],
+        referralAttributions: [
+          { newUid: 'uid_u2', newTalk2tmId: 'TM-U222-0002', referralCode: 'TMREF111', referrerUid: 'uid_u1', createdAt: '2026-11-02T00:00:00.000Z' },
+          { newUid: 'uid_u3', newTalk2tmId: 'TM-U333-0003', referralCode: 'TMREF111', referrerUid: 'uid_u1', createdAt: '2026-11-03T00:00:00.000Z' },
+        ],
+        datingProfiles: [
+          makeDatingProf('uid_u1', 'Luanda', 'AO'),
+          makeDatingProf('uid_u2', 'Luanda', 'AO'),
+          makeDatingProf('uid_u3', 'Lisboa', 'PT'),
+          makeDatingProf('uid_susp', 'Porto', 'PT', false, true),
+        ],
+        datingMatches: [
+          makeMatchRec('m1', 'uid_u1', 'uid_u2', 'matched', true),
+          makeMatchRec('m2', 'uid_u2', 'uid_u3', 'matched', false),
+        ],
+        growthTelemetry: [
+          { uid: 'uid_u1', lastActiveAt: '2026-11-25T15:00:00.000Z', lastActiveDay: '2026-11-25', city: 'Luanda', cityKey: 'luanda', countryCode: 'AO', updatedAt: '2026-11-25T15:00:00.000Z' },
+          { uid: 'uid_u2', lastActiveAt: '2026-11-24T12:00:00.000Z', lastActiveDay: '2026-11-24', updatedAt: '2026-11-24T12:00:00.000Z' },
+          { uid: 'uid_u3', lastActiveAt: '2026-11-10T10:00:00.000Z', lastActiveDay: '2026-11-10', updatedAt: '2026-11-10T10:00:00.000Z' },
+          { uid: 'uid_u4', lastActiveAt: '2026-11-26T09:00:00.000Z', lastActiveDay: '2026-11-26', city: 'Benguela', cityKey: 'benguela', countryCode: 'AO', updatedAt: '2026-11-26T09:00:00.000Z' },
+          { uid: 'uid_truman_852456', lastActiveAt: '2026-11-26T10:00:00.000Z', lastActiveDay: '2026-11-26', updatedAt: '2026-11-26T10:00:00.000Z' },
+        ],
+      });
+
+      assert(metrics.totalActiveUsers === 4, `Deve contar 4 utilizadores ativos não-legados (atual: ${metrics.totalActiveUsers})`);
+      assert(metrics.totalDatingProfiles === 3, 'Deve contar 3 perfis Dating ativos (excluindo suspenso)');
+      assert(metrics.referralConvertedUsers === 2, 'Registos por convite devem ser 2');
+      assert(metrics.referralConversionSharePercent === 50, 'Quota de registos por convite deve ser 50% (2/4)');
+      assert(metrics.referralLinkConversionRatePercent === 40, 'Taxa de conversão do link deve ser 40% (2/5)');
+      assert(metrics.avgMatchesPerUser === 1.33, `Média de matches por utilizador deve ser 1.33 (4/3; atual: ${metrics.avgMatchesPerUser})`);
+      assert(metrics.postMatchConversationRatePercent === 50, '% de conversas iniciadas após match deve ser 50% (1/2)');
+      assert(metrics.weeklyActiveUsers === 3, `WAU deve contabilizar exatamente 3 ativos nos últimos 7 dias (atual: ${metrics.weeklyActiveUsers})`);
+      assert(metrics.weeklyRetentionPercent === 75, 'Retenção semanal deve ser 75% (3/4)');
+      assert(
+        metrics.cityDistribution.length === 3 &&
+          metrics.cityDistribution[0].city === 'Luanda' &&
+          metrics.cityDistribution[0].activeCount === 2 &&
+          metrics.cityDistribution[0].sharePercent === 50,
+        'Distribuição geográfica deve ordenar Luanda (2 ativos · 50%) em primeiro lugar sem PII'
+      );
+
+      // 6. Auditoria de isolamento do Dashboard Admin Métricas (Teste 61 preserva zero leitura de chats)
+      const adminFbSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/firebase/admin.ts'), 'utf8');
+      const adminUiSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/admin.ts'), 'utf8');
+      assert(
+        adminUiSrc.includes('Métricas') &&
+          adminFbSrc.includes('fetchAdminGrowthMetrics') &&
+          adminFbSrc.includes("'growthTelemetry'") &&
+          !adminFbSrc.includes("'conversations'") &&
+          !adminFbSrc.includes("'messages'") &&
+          !adminUiSrc.includes('Convidados') &&
+          !adminUiSrc.includes('vitronis.hbo'),
+        'Dashboard Admin Métricas deve respeitar isolamento estrito sem acesso a conversas/mensagens nem credenciais'
+      );
+    } finally {
+      clearNotificationMemoryStateForTests();
+      globalThis.localStorage = origLS;
+    }
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
@@ -2088,6 +2974,77 @@ export async function runAsyncZeroCostTests(): Promise<{ passed: number; total: 
     // Garante cobertura offline no Service Worker para chunks JS de idioma
     const swSrc = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
     assert(swSrc.includes('/assets/') && swSrc.includes('caches.open'), 'Service Worker deve armazenar chunks modulares em cache offline');
+  });
+
+  // 64. Hard Delete cirúrgico do cofre local: remove apenas conta apagada preservando conta secundária e legado Truman/Mãezinha
+  await checkAsync('Fase 3 Hard Delete: removeAccountFromLocalVault apaga apenas conta eliminada e preserva legado/outras contas', async () => {
+    const fakeStore: Record<string, string> = {};
+    const mockStorage = {
+      getItem: (k: string) => fakeStore[k] ?? null,
+      setItem: (k: string, v: string) => { fakeStore[k] = v; },
+      removeItem: (k: string) => { delete fakeStore[k]; },
+    };
+
+    const sA = await sealAuthSecretWithPin('secret_del_a', '1470');
+    const sB = await sealAuthSecretWithPin('secret_keep_b', '2580');
+
+    upsertLocalIdentity(
+      {
+        uid: 'uid_del_a',
+        talk2tmId: 'TM-DELA-1111',
+        displayName: 'ContaApagar',
+        internalEmail: 'dela@talk2tm.internal',
+        phoneHash: 'd'.repeat(64),
+        phoneMasked: '+244 ••• 111',
+        ...sA,
+        createdAt: '2026-11-24T00:00:00.000Z',
+      },
+      true,
+      mockStorage
+    );
+    upsertLocalIdentity(
+      {
+        uid: 'uid_keep_b',
+        talk2tmId: 'TM-KEEP-2222',
+        displayName: 'ContaFica',
+        internalEmail: 'keepb@talk2tm.internal',
+        phoneHash: 'e'.repeat(64),
+        phoneMasked: '+244 ••• 222',
+        ...sB,
+        createdAt: '2026-11-24T00:00:00.000Z',
+      },
+      false,
+      mockStorage
+    );
+
+    // Preenche chaves específicas da conta apagada e chaves legadas protegidas
+    fakeStore['talk2tm_session'] = JSON.stringify({ userId: 'uid_del_a', channelId: 'conv_uid_del_a_uid_keep_b' });
+    fakeStore['talk2tm_monitor_v1'] = JSON.stringify({ userId: 'uid_del_a', channelId: 'conv_uid_del_a_uid_keep_b' });
+    fakeStore['talk2tm_dating_profile_v1_uid_del_a'] = '{"uid":"uid_del_a"}';
+    fakeStore['talk2tm_blocks_v1_uid_del_a'] = '["uid_keep_b"]';
+    fakeStore['talk2tm_ratelimit_v1_uid_del_a'] = '{"uid":"uid_del_a"}';
+    fakeStore['talk2tm_hidden_conv_uid_del_a_uid_keep_b'] = '["m1"]';
+    fakeStore['talk2tm_hidden_truman-maezinha'] = '["leg_1"]';
+    fakeStore['ttm_last_read_truman-maezinha_Truman'] = '2026-11-25T00:00:00.000Z';
+
+    removeAccountFromLocalVault('uid_del_a', ['conv_uid_del_a_uid_keep_b', 'truman-maezinha'], mockStorage);
+
+    const remaining = await findLocalIdentityByPin('2580', mockStorage);
+    const removed = await findLocalIdentityByPin('1470', mockStorage);
+    assert(removed === null, 'Conta apagada deve desaparecer do cofre local');
+    assert(remaining?.uid === 'uid_keep_b', 'Conta secundária no mesmo dispositivo deve permanecer intacta');
+    assert(fakeStore['talk2tm_session'] === undefined, 'Sessão da conta apagada deve ser removida');
+    assert(fakeStore['talk2tm_monitor_v1'] === undefined, 'Monitor da conta apagada deve ser removido');
+    assert(fakeStore['talk2tm_dating_profile_v1_uid_del_a'] === undefined, 'Cache Dating da conta apagada deve ser removido');
+    assert(fakeStore['talk2tm_blocks_v1_uid_del_a'] === undefined, 'Cache de bloqueios da conta apagada deve ser removido');
+    assert(fakeStore['talk2tm_ratelimit_v1_uid_del_a'] === undefined, 'Cache de rate limit da conta apagada deve ser removido');
+    assert(fakeStore['talk2tm_hidden_conv_uid_del_a_uid_keep_b'] === undefined, 'Ocultos da conversa apagada devem ser removidos');
+    assert(fakeStore['talk2tm_hidden_truman-maezinha'] === '["leg_1"]', 'Dados da sala legada truman-maezinha nunca podem ser apagados');
+    assert(fakeStore['ttm_last_read_truman-maezinha_Truman'] === '2026-11-25T00:00:00.000Z', 'Leitura legada Truman nunca pode ser apagada');
+
+    // Tentativa directa em UID legado protegido não altera nada
+    removeAccountFromLocalVault('uid_truman_852456', ['truman-maezinha'], mockStorage);
+    assert(fakeStore['talk2tm_hidden_truman-maezinha'] === '["leg_1"]', 'UID legado protegido é imutável no Hard Delete');
   });
 
   console.log(`\x1b[32m✔ Talk2TM Zero-Cost Async: ${passed}/${total} testes assíncronos executados com 100% de aprovação.\x1b[0m`);

@@ -292,6 +292,217 @@
         }
       },
       "required": ["messageId", "conversationId", "senderId", "senderTalk2tmId", "text", "clientId", "createdAt"]
+    },
+    "DatingProfile": {
+      "title": "DatingProfile",
+      "description": "Perfil público adulto (+18) para descoberta finita no Talk2TM Dating, sem exposição de telefone ou e-mail.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "talk2tmId": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "age": { "type": "integer" },
+        "gender": { "type": "string", "enum": ["woman", "man", "non_binary"] },
+        "seeking": { "type": "string", "enum": ["women", "men", "all"] },
+        "countryCode": { "type": "string", "minLength": 2, "maxLength": 2, "pattern": "^[A-Z]{2}$" },
+        "city": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "cityKey": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "bio": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "intent": { "type": "string", "enum": ["serious", "meet_people", "chat"] },
+        "adultConfirmed": { "type": "boolean" },
+        "termsAcceptedAt": { "type": "string", "format": "date-time" },
+        "termsVersion": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "discoverable": { "type": "boolean" },
+        "paused": { "type": "boolean" },
+        "suspended": { "type": "boolean" },
+        "photoUrl": { "type": ["string", "null"], "maxLength": 600 },
+        "photoPath": { "type": ["string", "null"], "maxLength": 200 },
+        "photoStatus": { "type": "string", "enum": ["none", "pending", "approved", "rejected"] },
+        "photoUpdatedAt": { "type": ["string", "null"], "format": "date-time" },
+        "photoModerationNote": { "type": ["string", "null"], "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid", "talk2tmId", "displayName", "age", "gender", "seeking",
+        "countryCode", "city", "cityKey", "bio", "intent",
+        "adultConfirmed", "termsAcceptedAt", "termsVersion",
+        "discoverable", "paused", "suspended", "createdAt", "updatedAt"
+      ]
+    },
+    "DatingEvaluation": {
+      "title": "DatingEvaluation",
+      "description": "Registo privado de perfis avaliados ou bloqueados para exclusão na descoberta diária.",
+      "type": "object",
+      "properties": {
+        "targetUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "decision": { "type": "string", "enum": ["seen", "pass", "like", "blocked"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "dayKey": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+      },
+      "required": ["targetUid", "decision", "createdAt", "dayKey"]
+    },
+    "DatingLike": {
+      "title": "DatingLike",
+      "description": "Interesse secreto unilateral (Like) visível apenas ao remetente até reciprocidade.",
+      "type": "object",
+      "properties": {
+        "likeId": { "type": "string", "minLength": 3, "maxLength": 260, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fromUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "toUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "fromTalk2tmId": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "fromDisplayName": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["likeId", "fromUid", "toUid", "fromTalk2tmId", "fromDisplayName", "createdAt"]
+    },
+    "DatingMatch": {
+      "title": "DatingMatch",
+      "description": "Match exclusivamente recíproco entre dois perfis adultos com ligação automática a conversa 1:1.",
+      "type": "object",
+      "properties": {
+        "matchId": { "type": "string", "minLength": 7, "maxLength": 266, "pattern": "^match_[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "minLength": 6, "maxLength": 265, "pattern": "^conv_[a-zA-Z0-9_\\-]+$" },
+        "participantA": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "participantB": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "talk2tmIdA": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "talk2tmIdB": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "displayNameA": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "displayNameB": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "matchedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "enum": ["matched", "unmatched"] },
+        "seenByA": { "type": "boolean" },
+        "seenByB": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "chatStarted": { "type": "boolean" },
+        "chatStartedAt": { "type": "string", "format": "date-time" },
+        "unmatchedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "unmatchedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "matchId", "conversationId", "participantA", "participantB",
+        "talk2tmIdA", "talk2tmIdB", "displayNameA", "displayNameB",
+        "matchedByUid", "status", "seenByA", "seenByB", "createdAt", "updatedAt"
+      ]
+    },
+    "UserBlock": {
+      "title": "UserBlock",
+      "description": "Bloqueio direto entre utilizadores que filtra descoberta, anula matches/likes e bloqueia envio de mensagens.",
+      "type": "object",
+      "properties": {
+        "blockId": { "type": "string", "minLength": 3, "maxLength": 266, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "blockerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "blockedUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "blockerTalk2tmId": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "reason": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["blockId", "blockerUid", "blockedUid", "createdAt"]
+    },
+    "ModerationReport": {
+      "title": "ModerationReport",
+      "description": "Denúncia de perfil ou mensagem específica com prova textual congelada para moderação administrativa.",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "minLength": 4, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reporterTalk2tmId": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "targetUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targetTalk2tmId": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "targetDisplayName": { "type": "string", "maxLength": 30 },
+        "sourceType": { "type": "string", "enum": ["dating_profile", "dating_match", "chat_message", "connection"] },
+        "channelId": { "type": "string", "maxLength": 140 },
+        "itemRefId": { "type": "string", "maxLength": 140 },
+        "reason": { "type": "string", "enum": ["spam", "harassment", "fake_profile", "underage", "scam", "other"] },
+        "details": { "type": "string", "maxLength": 300 },
+        "evidenceSnapshot": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "status": { "type": "string", "enum": ["pending", "resolved", "dismissed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "resolutionAction": { "type": "string", "enum": ["none", "account_suspended", "dismissed"] },
+        "resolutionNote": { "type": "string", "maxLength": 200 }
+      },
+      "required": [
+        "reportId", "reporterUid", "reporterTalk2tmId", "targetUid",
+        "sourceType", "reason", "evidenceSnapshot", "status", "createdAt"
+      ]
+    },
+    "UserRateLimit": {
+      "title": "UserRateLimit",
+      "description": "Estado anti-spam diário por UID para limitar likes, denúncias e convites no Firestore.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "dayKey": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "likeDayKey": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "likeCountToday": { "type": "integer" },
+        "reportDayKey": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "reportCountToday": { "type": "integer" },
+        "inviteDayKey": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "inviteCountToday": { "type": "integer" },
+        "lastReportAtMs": { "type": "number" },
+        "lastInviteAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid", "dayKey", "likeDayKey", "likeCountToday",
+        "reportDayKey", "reportCountToday", "inviteDayKey", "inviteCountToday", "updatedAt"
+      ]
+    },
+    "ReferralLink": {
+      "title": "ReferralLink",
+      "description": "Código único público de convite sem exposição de PII (telefone/e-mail/TM-ID).",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z0-9]{6,12}$" },
+        "referrerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "referrerDisplayName": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "referrerUid", "referrerDisplayName", "active", "createdAt"]
+    },
+    "ReferralStats": {
+      "title": "ReferralStats",
+      "description": "Contador privado do padrinho para partilhas de link de convite.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "referralCode": { "type": "string", "pattern": "^[A-Z0-9]{6,12}$" },
+        "invitesSharedCount": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "referralCode", "invitesSharedCount", "updatedAt"]
+    },
+    "ReferralAttribution": {
+      "title": "ReferralAttribution",
+      "description": "Atribuição imutável de novo registo ao utilizador padrinho.",
+      "type": "object",
+      "properties": {
+        "newUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "newTalk2tmId": { "type": "string", "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$" },
+        "referralCode": { "type": "string", "pattern": "^[A-Z0-9]{6,12}$" },
+        "referrerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["newUid", "newTalk2tmId", "referralCode", "referrerUid", "createdAt"]
+    },
+    "GrowthTelemetry": {
+      "title": "GrowthTelemetry",
+      "description": "Sinal agregado mínimo de atividade semanal (WAU) e distribuição geográfica por cidade sem PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "lastActiveAt": { "type": "string", "format": "date-time" },
+        "lastActiveDay": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "city": { "type": ["string", "null"], "maxLength": 60 },
+        "cityKey": { "type": ["string", "null"], "maxLength": 60 },
+        "countryCode": { "type": ["string", "null"], "maxLength": 4 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "lastActiveAt", "lastActiveDay", "updatedAt"]
     }
   },
   "firestore": {
@@ -322,6 +533,50 @@
     "/conversations/{conversationId}/messages/{messageId}": {
       "schema": "ConversationMessage",
       "description": "Mensagens estritas vinculadas aos dois participantes da conversa."
+    },
+    "/datingProfiles/{profileUid}": {
+      "schema": "DatingProfile",
+      "description": "Perfis públicos adultos (+18) para descoberta finita e filtrada sem PII."
+    },
+    "/datingProfiles/{profileUid}/evaluations/{targetUid}": {
+      "schema": "DatingEvaluation",
+      "description": "Subcoleção privada do utilizador com avaliações diárias e exclusões."
+    },
+    "/datingLikes/{likeId}": {
+      "schema": "DatingLike",
+      "description": "Likes secretos indexados por fromUid_toUid para impedir enumeração unilateral."
+    },
+    "/datingMatches/{matchId}": {
+      "schema": "DatingMatch",
+      "description": "Matches recíprocos com suporte a notificação vista, conversa bilateral automática e desfazer Match."
+    },
+    "/userBlocks/{blockId}": {
+      "schema": "UserBlock",
+      "description": "Bloqueios bilaterais indexados por blockerUid_blockedUid para filtragem e proteção no Firestore."
+    },
+    "/moderationReports/{reportId}": {
+      "schema": "ModerationReport",
+      "description": "Denúncias submetidas por utilizadores para análise e ação administrativa no painel oculto."
+    },
+    "/userRateLimits/{uid}": {
+      "schema": "UserRateLimit",
+      "description": "Contadores diários anti-spam validados em regras de segurança do Firestore."
+    },
+    "/referralLinks/{code}": {
+      "schema": "ReferralLink",
+      "description": "Links públicos individuais de convite para página de aterragem."
+    },
+    "/referralStats/{uid}": {
+      "schema": "ReferralStats",
+      "description": "Estatísticas privadas do padrinho para convites partilhados."
+    },
+    "/referralAttributions/{newUid}": {
+      "schema": "ReferralAttribution",
+      "description": "Vínculo imutável entre novo registo convertido e padrinho."
+    },
+    "/growthTelemetry/{uid}": {
+      "schema": "GrowthTelemetry",
+      "description": "Telemetria mínima privada/administrativa de atividade semanal e cidade ativa sem PII."
     }
   }
 }

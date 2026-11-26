@@ -606,3 +606,58 @@ export async function clearBilateralLocalStores(): Promise<void> {
     // Falha silenciosa se IndexedDB indisponível
   }
 }
+
+/**
+ * Remove do IndexedDB exclusivamente as conversas e mensagens associadas à conta eliminada,
+ * preservando integralmente truman-maezinha e conversas de outras contas no aparelho.
+ */
+export async function clearAccountScopedIndexedDBData(conversationIds: string[]): Promise<void> {
+  if (typeof indexedDB === 'undefined') return;
+  const scopedIds = new Set(
+    (conversationIds || [])
+      .map((id) => (id || '').trim())
+      .filter((id) => Boolean(id) && id !== 'truman-maezinha' && id.startsWith('conv_'))
+  );
+  if (scopedIds.size === 0) return;
+
+  try {
+    const db = await getLocalDB();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(['conversations', 'messages', 'outbox', 'hidden_messages'], 'readwrite');
+      const convStore = tx.objectStore('conversations');
+      scopedIds.forEach((cid) => {
+        try {
+          convStore.delete(cid);
+        } catch {
+          // ignora erro pontual
+        }
+      });
+
+      const pruneScopedCursor = (storeName: 'messages' | 'outbox' | 'hidden_messages') => {
+        const store = tx.objectStore(storeName);
+        const req = store.openCursor();
+        req.onsuccess = (event) => {
+          const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cursor) return;
+          const val = cursor.value as { room?: string; conversationId?: string } | undefined;
+          const channel = val?.conversationId || val?.room || '';
+          if (scopedIds.has(channel)) {
+            cursor.delete();
+          }
+          cursor.continue();
+        };
+      };
+
+      pruneScopedCursor('messages');
+      pruneScopedCursor('outbox');
+      pruneScopedCursor('hidden_messages');
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch {
+    // Falha silenciosa se IndexedDB indisponível
+  }
+}
+

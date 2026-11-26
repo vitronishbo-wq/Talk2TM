@@ -37,8 +37,28 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { getFirebaseAppOptions } from './firestore';
-import { AdminStatusFilter, AdminUserRow, PhoneDirectoryEntry, UserAccount, UserProfile } from '../types';
+import {
+  AdminGrowthMetricsSnapshot,
+  AdminPhotoFilter,
+  AdminPhotoQueueItem,
+  AdminReportFilter,
+  AdminStatusFilter,
+  AdminUserRow,
+  DatingMatch,
+  DatingProfile,
+  GrowthTelemetryRecord,
+  ModerationReport,
+  PhoneDirectoryEntry,
+  ReferralAttribution,
+  ReferralLink,
+  ReferralStats,
+  ReportStatus,
+  UserAccount,
+  UserProfile,
+} from '../types';
 import { hashPhoneNumber, normalizePhoneNumber } from '../utils/phone';
+import { deleteDatingPhotoFromStorage } from '../media/photo';
+import { computeGrowthMetricsSummary } from '../growth';
 
 const ADMIN_APP_NAME = 'talk2tm-admin';
 const DEFAULT_PLAN_NAME = 'Base Orgânico';
@@ -48,6 +68,18 @@ export const ADMIN_PAGE_SIZE = 20;
 
 export interface AdminUsersPageResult {
   rows: AdminUserRow[];
+  lastCursor: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+}
+
+export interface AdminModerationReportsPageResult {
+  rows: ModerationReport[];
+  lastCursor: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+}
+
+export interface AdminDatingPhotosPageResult {
+  rows: AdminPhotoQueueItem[];
   lastCursor: QueryDocumentSnapshot<DocumentData> | null;
   hasMore: boolean;
 }
@@ -322,3 +354,306 @@ export async function setAdminUserActiveState(params: {
   }
   await batch.commit();
 }
+
+/**
+ * Consulta paginada de denúncias (/moderationReports) ordenada por createdAt desc.
+ */
+export async function fetchAdminModerationReportsPage(params: {
+  filter: AdminReportFilter;
+  cursor?: QueryDocumentSnapshot<DocumentData> | null;
+  pageSize?: number;
+}): Promise<AdminModerationReportsPageResult> {
+  const { auth, db } = await ensureIsolatedAdminClient();
+  if (!auth.currentUser) {
+    throw new Error('Sessão administrativa não autenticada.');
+  }
+
+  const pageSize = Math.min(Math.max(params.pageSize || ADMIN_PAGE_SIZE, 1), ADMIN_PAGE_SIZE);
+  const colRef = collection(db, 'moderationReports');
+
+  const constraints = [];
+  if (params.filter !== 'all') {
+    constraints.push(where('status', '==', params.filter));
+  }
+  constraints.push(orderBy('createdAt', 'desc'));
+  if (params.cursor) {
+    constraints.push(startAfter(params.cursor));
+  }
+  constraints.push(limit(pageSize));
+
+  const snap = await getDocs(query(colRef, ...constraints));
+  const rawDocs = snap.docs;
+  const rows = rawDocs.map((d) => d.data() as ModerationReport);
+  const lastCursor = rawDocs.length > 0 ? rawDocs[rawDocs.length - 1] : null;
+
+  return {
+    rows,
+    lastCursor,
+    hasMore: rawDocs.length === pageSize,
+  };
+}
+
+/**
+ * Atualiza o estado de uma denúncia (resolvida / dispensada / pendente) com registo de revisão.
+ */
+export async function reviewAdminModerationReport(params: {
+  reportId: string;
+  status: ReportStatus;
+  resolutionAction: 'none' | 'account_suspended' | 'dismissed';
+  resolutionNote?: string;
+}): Promise<void> {
+  const { auth, db } = await ensureIsolatedAdminClient();
+  if (!auth.currentUser) {
+    throw new Error('Sessão administrativa não autenticada.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'moderationReports', params.reportId), {
+    status: params.status,
+    reviewedAt: nowIso,
+    reviewedByUid: auth.currentUser.uid,
+    resolutionAction: params.resolutionAction,
+    ...(params.resolutionNote ? { resolutionNote: params.resolutionNote.slice(0, 200) } : {}),
+  });
+  await batch.commit();
+}
+
+/**
+ * Suspende a conta reportada (userProfiles + phoneLookup + datingProfiles se existir)
+ * e resolve a denúncia associada numa única escrita atómica.
+ */
+export async function suspendReportedAccountAndResolve(params: {
+  targetUid: string;
+  reportId?: string;
+  resolutionNote?: string;
+}): Promise<void> {
+  const { auth, db } = await ensureIsolatedAdminClient();
+  if (!auth.currentUser) {
+    throw new Error('Sessão administrativa não autenticada.');
+  }
+  if (PROTECTED_LEGACY_UIDS.has(params.targetUid)) {
+    throw new Error('Contas protegidas do sistema não podem ser suspensas.');
+  }
+
+  const userSnap = await getDoc(doc(db, 'users', params.targetUid));
+  const account = userSnap.exists() ? (userSnap.data() as UserAccount) : null;
+  const datingSnap = await getDoc(doc(db, 'datingProfiles', params.targetUid)).catch(() => null);
+
+  const nowIso = new Date().toISOString();
+  const batch = writeBatch(db);
+
+  if (account?.talk2tmId) {
+    batch.update(doc(db, 'userProfiles', account.talk2tmId), { active: false });
+  }
+  if (account?.phoneHash) {
+    batch.update(doc(db, 'phoneLookup', account.phoneHash), { active: false });
+  }
+  if (datingSnap?.exists()) {
+    batch.update(doc(db, 'datingProfiles', params.targetUid), {
+      suspended: true,
+      updatedAt: nowIso,
+    });
+  }
+  if (params.reportId) {
+    batch.update(doc(db, 'moderationReports', params.reportId), {
+      status: 'resolved',
+      reviewedAt: nowIso,
+      reviewedByUid: auth.currentUser.uid,
+      resolutionAction: 'account_suspended',
+      resolutionNote: (params.resolutionNote || 'Conta suspensa por moderação.').slice(0, 200),
+    });
+  }
+
+  await batch.commit();
+}
+
+function mapDatingProfileToPhotoQueueItem(
+  profile: DatingProfile,
+  reportMeta?: { reason: string; evidence: string }
+): AdminPhotoQueueItem {
+  return {
+    uid: profile.uid,
+    talk2tmId: profile.talk2tmId,
+    displayName: profile.displayName || 'Perfil',
+    age: profile.age || 18,
+    city: profile.city || '',
+    countryCode: profile.countryCode || '',
+    photoUrl: profile.photoUrl || null,
+    photoPath: profile.photoPath || null,
+    photoStatus: profile.photoStatus || 'none',
+    photoUpdatedAt: profile.photoUpdatedAt || profile.updatedAt || '',
+    photoModerationNote: profile.photoModerationNote || null,
+    suspended: profile.suspended === true,
+    reportReason: reportMeta?.reason,
+    reportEvidence: reportMeta?.evidence,
+  };
+}
+
+/**
+ * Consulta paginada da fila de aprovação de fotografias do Dating
+ * (pendentes, denunciadas via moderationReports, rejeitadas ou aprovadas).
+ */
+export async function fetchAdminDatingPhotosPage(params: {
+  filter: AdminPhotoFilter;
+  cursor?: QueryDocumentSnapshot<DocumentData> | null;
+  pageSize?: number;
+}): Promise<AdminDatingPhotosPageResult> {
+  const { auth, db } = await ensureIsolatedAdminClient();
+  if (!auth.currentUser) {
+    throw new Error('Sessão administrativa não autenticada.');
+  }
+
+  const pageSize = Math.min(Math.max(params.pageSize || ADMIN_PAGE_SIZE, 1), ADMIN_PAGE_SIZE);
+
+  if (params.filter === 'reported') {
+    const constraints = [
+      where('status', '==', 'pending'),
+      orderBy('createdAt', 'desc'),
+      ...(params.cursor ? [startAfter(params.cursor)] : []),
+      limit(pageSize),
+    ];
+    const repSnap = await getDocs(query(collection(db, 'moderationReports'), ...constraints));
+    const rawDocs = repSnap.docs;
+    const byTarget = new Map<string, { reason: string; evidence: string }>();
+
+    for (const d of rawDocs) {
+      const rep = d.data() as ModerationReport;
+      if (
+        (rep.sourceType === 'dating_profile' || rep.sourceType === 'dating_match') &&
+        rep.targetUid &&
+        !PROTECTED_LEGACY_UIDS.has(rep.targetUid) &&
+        !byTarget.has(rep.targetUid)
+      ) {
+        byTarget.set(rep.targetUid, {
+          reason: rep.reason,
+          evidence: rep.evidenceSnapshot,
+        });
+      }
+    }
+
+    const hydrated = await Promise.all(
+      Array.from(byTarget.entries()).map(async ([targetUid, meta]) => {
+        const snap = await getDoc(doc(db, 'datingProfiles', targetUid)).catch(() => null);
+        if (!snap || !snap.exists()) return null;
+        const prof = snap.data() as DatingProfile;
+        if (!prof.photoUrl) return null;
+        return mapDatingProfileToPhotoQueueItem(prof, meta);
+      })
+    );
+
+    const rows = hydrated.filter((item): item is AdminPhotoQueueItem => item !== null);
+    const lastCursor = rawDocs.length > 0 ? rawDocs[rawDocs.length - 1] : null;
+    return {
+      rows,
+      lastCursor,
+      hasMore: rawDocs.length === pageSize,
+    };
+  }
+
+  const constraints = [
+    where('photoStatus', '==', params.filter),
+    orderBy('photoUpdatedAt', 'desc'),
+    ...(params.cursor ? [startAfter(params.cursor)] : []),
+    limit(pageSize),
+  ];
+
+  const snap = await getDocs(query(collection(db, 'datingProfiles'), ...constraints));
+  const rawDocs = snap.docs;
+  const rows = rawDocs
+    .map((d) => d.data() as DatingProfile)
+    .filter((p) => p && p.uid && !PROTECTED_LEGACY_UIDS.has(p.uid))
+    .map((p) => mapDatingProfileToPhotoQueueItem(p));
+
+  const lastCursor = rawDocs.length > 0 ? rawDocs[rawDocs.length - 1] : null;
+  return {
+    rows,
+    lastCursor,
+    hasMore: rawDocs.length === pageSize,
+  };
+}
+
+/**
+ * Aprova ou rejeita uma fotografia opcional do Dating no cliente Admin isolado.
+ * Em caso de rejeição, limpa photoUrl/photoPath e apaga o ficheiro WebP do Storage.
+ */
+export async function moderateAdminDatingPhoto(params: {
+  targetUid: string;
+  decision: 'approved' | 'rejected';
+  note?: string;
+}): Promise<void> {
+  const { auth, db } = await ensureIsolatedAdminClient();
+  if (!auth.currentUser) {
+    throw new Error('Sessão administrativa não autenticada.');
+  }
+  if (!params.targetUid || PROTECTED_LEGACY_UIDS.has(params.targetUid)) {
+    throw new Error('Perfil inválido para moderação de fotografia.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const batch = writeBatch(db);
+  const profileRef = doc(db, 'datingProfiles', params.targetUid);
+
+  if (params.decision === 'approved') {
+    batch.update(profileRef, {
+      photoStatus: 'approved',
+      photoModerationNote: null,
+      photoUpdatedAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await batch.commit();
+    return;
+  }
+
+  batch.update(profileRef, {
+    photoStatus: 'rejected',
+    photoUrl: null,
+    photoPath: null,
+    photoModerationNote: (params.note || 'Fotografia removida pela moderação.').slice(0, 160),
+    photoUpdatedAt: nowIso,
+    updatedAt: nowIso,
+  });
+  await batch.commit();
+  await deleteDatingPhotoFromStorage(params.targetUid, adminApp);
+}
+
+/**
+ * Carrega indicadores agregados de crescimento (Aquisição, Engajamento, WAU e Cidades)
+ * a partir de coleções de telemetria e metadados sem ler chats ou identidades privadas.
+ */
+export async function fetchAdminGrowthMetrics(): Promise<AdminGrowthMetricsSnapshot> {
+  const { auth, db } = await ensureIsolatedAdminClient();
+  if (!auth.currentUser) {
+    throw new Error('Sessão administrativa não autenticada.');
+  }
+
+  const MAX_METRIC_DOCS = 500;
+  const [
+    userProfilesSnap,
+    referralLinksSnap,
+    referralStatsSnap,
+    referralAttrsSnap,
+    datingProfilesSnap,
+    datingMatchesSnap,
+    growthTelemetrySnap,
+  ] = await Promise.all([
+    getDocs(query(collection(db, 'userProfiles'), limit(MAX_METRIC_DOCS))),
+    getDocs(query(collection(db, 'referralLinks'), limit(MAX_METRIC_DOCS))).catch(() => null),
+    getDocs(query(collection(db, 'referralStats'), limit(MAX_METRIC_DOCS))).catch(() => null),
+    getDocs(query(collection(db, 'referralAttributions'), limit(MAX_METRIC_DOCS))).catch(() => null),
+    getDocs(query(collection(db, 'datingProfiles'), limit(MAX_METRIC_DOCS))).catch(() => null),
+    getDocs(query(collection(db, 'datingMatches'), limit(MAX_METRIC_DOCS))).catch(() => null),
+    getDocs(query(collection(db, 'growthTelemetry'), limit(MAX_METRIC_DOCS))).catch(() => null),
+  ]);
+
+  return computeGrowthMetricsSummary({
+    userProfiles: userProfilesSnap.docs.map((d) => d.data() as UserProfile),
+    referralLinks: referralLinksSnap ? referralLinksSnap.docs.map((d) => d.data() as ReferralLink) : [],
+    referralStats: referralStatsSnap ? referralStatsSnap.docs.map((d) => d.data() as ReferralStats) : [],
+    referralAttributions: referralAttrsSnap ? referralAttrsSnap.docs.map((d) => d.data() as ReferralAttribution) : [],
+    datingProfiles: datingProfilesSnap ? datingProfilesSnap.docs.map((d) => d.data() as DatingProfile) : [],
+    datingMatches: datingMatchesSnap ? datingMatchesSnap.docs.map((d) => d.data() as DatingMatch) : [],
+    growthTelemetry: growthTelemetrySnap ? growthTelemetrySnap.docs.map((d) => d.data() as GrowthTelemetryRecord) : [],
+  });
+}
+
