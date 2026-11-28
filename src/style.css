@@ -1,14 +1,15 @@
 /* Talk2TM — Mobile-First & Camuflagem por Calculadora */
 :root {
   --bg-black: #000000;
-  --bg-dark: #0d0f14;
-  --bg-surface: #161922;
-  --bg-input: #1b1f2a;
-  --text-main: #f0f6fc;
-  --text-muted: #8b949e;
-  --border-color: #2b313c;
+  --bg-dark: #0b0e14;
+  --bg-surface: #131823;
+  --bg-input: #1a2130;
+  --text-main: #f3f6fb;
+  --text-muted: #93a0b4;
+  --border-color: #252e3f;
   --accent-blue: #58a6ff;
-  --accent-pink: #f778ba;
+  --accent-pink: #fb7185;
+  --accent-coral: #f43f5e;
   --calc-orange: #ff9f0a;
   --calc-btn-bg: #26262e;
   --calc-fn-bg: #3a3a44;
@@ -31,9 +32,9 @@ html, body {
   height: 100dvh;
   background-color: var(--bg-black);
   color: var(--text-main);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 15px;
-  line-height: 1.4;
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   touch-action: manipulation;
@@ -45,7 +46,7 @@ html, body {
   height: 100dvh;
 }
 
-/* Shell Principal Mobile */
+/* Shell Principal Mobile + Expansão Hub Desktop */
 .talk2tm-shell {
   display: flex;
   flex-direction: column;
@@ -57,6 +58,15 @@ html, body {
   background-color: var(--bg-black);
   position: relative;
   overflow: hidden;
+}
+
+@media (min-width: 900px) {
+  .talk2tm-shell.is-hub-active {
+    max-width: 960px;
+    background-color: var(--bg-dark);
+    border-left: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+  }
 }
 
 /* Notificação Fina de Instalação PWA */
@@ -1123,39 +1133,204 @@ html, body {
 /* =========================================================
    8. HUB DE CONEXÕES BILATERAIS (CONTA A <-> CONTA B)
    ========================================================= */
+.talk2tm-shell.is-hub-active .ttm-header {
+  padding: max(6px, env(safe-area-inset-top)) 14px 6px 14px;
+  gap: 0;
+}
+
 .ttm-connect-box {
   display: flex;
   flex-direction: column;
   flex: 1;
-  overflow-y: auto;
-  padding: 16px 14px max(20px, env(safe-area-inset-bottom)) 14px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
   background-color: var(--bg-dark);
+}
+
+.ttm-hub-content {
+  order: 1;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 20px 14px;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
+}
+
+.ttm-hub-nav {
+  order: 2;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  align-items: center;
+  height: 58px;
+  min-height: 58px;
+  padding: 4px 6px max(4px, env(safe-area-inset-bottom)) 6px;
+  background-color: rgba(15, 19, 28, 0.94);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+  z-index: 20;
+}
+
+.ttm-hub-nav-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 44px;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border-radius: 10px;
+  transition: color 0.15s ease, background-color 0.15s ease, transform 0.12s ease;
+}
+
+.ttm-hub-nav-item:active {
+  transform: scale(0.96);
+}
+
+.ttm-hub-nav-item.is-active {
+  color: var(--accent-coral);
+}
+
+.ttm-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.ttm-nav-label {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.ttm-nav-badge {
+  position: absolute;
+  top: 4px;
+  right: calc(50% - 19px);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background-color: var(--accent-coral);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+@media (min-width: 900px) {
+  .ttm-connect-box {
+    flex-direction: row;
+    align-items: stretch;
+  }
+
+  .ttm-hub-nav {
+    order: 0;
+    width: 224px;
+    min-width: 224px;
+    height: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 6px;
+    padding: 20px 12px;
+    border-top: none;
+    border-right: 1px solid var(--border-color);
+    background-color: var(--bg-surface);
+  }
+
+  .ttm-hub-nav-item {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 11px 14px;
+    min-height: 46px;
+    border-radius: 12px;
+  }
+
+  .ttm-hub-nav-item:hover {
+    background-color: rgba(255, 255, 255, 0.04);
+    color: var(--text-main);
+  }
+
+  .ttm-hub-nav-item.is-active {
+    background-color: rgba(244, 63, 94, 0.12);
+    color: var(--accent-coral);
+  }
+
+  .ttm-nav-label {
+    font-size: 14px;
+  }
+
+  .ttm-nav-badge {
+    position: static;
+    margin-left: auto;
+  }
+
+  .ttm-hub-content {
+    order: 1;
+    padding: 24px 28px;
+    align-items: center;
+  }
+
+  .ttm-hub-content > * {
+    width: 100%;
+    max-width: 480px;
+  }
 }
 
 .ttm-connect-card {
   background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px 14px;
+  border-radius: 14px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
 .ttm-connect-section-title {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.2px;
 }
 
 .ttm-connect-self-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ttm-self-avatar-slot {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.ttm-self-actions-wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .ttm-connect-self-code {
@@ -1176,17 +1351,15 @@ html, body {
 
 .ttm-connect-input {
   flex: 1;
-  height: 40px;
+  height: 42px;
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-main);
-  padding: 0 10px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  border-radius: 6px;
+  padding: 0 12px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  border-radius: 8px;
   outline: none;
-  text-transform: uppercase;
-  letter-spacing: 1px;
   user-select: text;
 }
 
@@ -1195,7 +1368,7 @@ html, body {
 }
 
 .ttm-connect-feedback {
-  font-size: 11.5px;
+  font-size: 12px;
   min-height: 16px;
   color: var(--success-color);
 }
@@ -1214,11 +1387,11 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 10px 12px;
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: 12px;
 }
 
 .ttm-connect-item-meta {
@@ -1229,7 +1402,7 @@ html, body {
 }
 
 .ttm-connect-item-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-main);
   white-space: nowrap;
@@ -1238,7 +1411,7 @@ html, body {
 }
 
 .ttm-connect-item-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -1254,27 +1427,35 @@ html, body {
   border: 1px solid var(--border-color);
   color: var(--text-main);
   font-family: inherit;
-  font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  min-height: 34px;
+  padding: 5px 10px;
+  border-radius: 8px;
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.ttm-btn-mini:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.05);
 }
 
 .ttm-btn-mini-primary {
-  border-color: var(--accent-blue);
+  border-color: rgba(88, 166, 255, 0.55);
   color: var(--accent-blue);
-  background-color: rgba(88, 166, 255, 0.1);
+  background-color: rgba(88, 166, 255, 0.12);
 }
 
 .ttm-btn-mini-danger {
-  border-color: rgba(248, 81, 73, 0.6);
+  border-color: rgba(248, 81, 73, 0.55);
   color: #f85149;
 }
 
 .ttm-connect-empty {
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--text-muted);
+  line-height: 1.45;
 }
 
 /* Zero-Cost Identity & Vault Controls */
@@ -2063,40 +2244,74 @@ html, body {
 }
 
 /* =========================================================
-   10. HUB TABS & TALK2TM DATING (+18) — FASE 1
+   10. TALK2TM DATING (+18) — UI COMERCIAL LEVE
    ========================================================= */
-.ttm-connect-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  padding: 4px;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-}
-
-.ttm-connect-tab {
-  min-height: 38px;
-  padding: 6px 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
+.ttm-avatar-circle {
+  position: relative;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
   font-family: var(--font-sans);
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  font-weight: 700;
+  user-select: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
 }
 
-.ttm-connect-tab:hover {
-  color: var(--text-main);
+.ttm-avatar-sm {
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
 }
 
-.ttm-connect-tab.is-active {
-  background-color: var(--bg-input);
-  border-color: var(--border-color);
-  color: var(--text-main);
+.ttm-avatar-md {
+  width: 42px;
+  height: 42px;
+  font-size: 14px;
+}
+
+.ttm-avatar-lg {
+  width: 56px;
+  height: 56px;
+  font-size: 18px;
+}
+
+.ttm-avatar-xl {
+  width: 76px;
+  height: 76px;
+  font-size: 24px;
+}
+
+.ttm-avatar-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ttm-tone-0 {
+  background: linear-gradient(145deg, #4c1d3d 0%, #831843 55%, #1e1b2e 100%);
+}
+
+.ttm-tone-1 {
+  background: linear-gradient(145deg, #172554 0%, #1e40af 55%, #0f172a 100%);
+}
+
+.ttm-tone-2 {
+  background: linear-gradient(145deg, #431407 0%, #9a3412 55%, #1c1917 100%);
+}
+
+.ttm-tone-3 {
+  background: linear-gradient(145deg, #064e3b 0%, #047857 55%, #0f172a 100%);
+}
+
+.ttm-tone-4 {
+  background: linear-gradient(145deg, #312e81 0%, #4338ca 55%, #111827 100%);
 }
 
 .ttm-connect-cards-wrap {
@@ -2122,14 +2337,11 @@ html, body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
+  padding: 6px 2px;
 }
 
 .ttm-dating-quota {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--accent-pink);
   font-variant-numeric: tabular-nums;
@@ -2149,14 +2361,14 @@ html, body {
   padding: 10px 12px;
   background-color: rgba(248, 81, 73, 0.08);
   border: 1px solid rgba(248, 81, 73, 0.35);
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
 .ttm-dating-banner-text {
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-main);
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 .ttm-dating-filters {
@@ -2192,14 +2404,14 @@ html, body {
 
 .ttm-dating-root .ttm-select {
   width: 100%;
-  min-height: 40px;
+  min-height: 42px;
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-main);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 0 10px;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 13.5px;
 }
 
 .ttm-dating-bio-head {
@@ -2216,10 +2428,10 @@ html, body {
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-main);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 8px 10px;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 13.5px;
   line-height: 1.4;
   outline: none;
   user-select: text;
@@ -2233,10 +2445,10 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px;
+  padding: 10px 12px;
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: 10px;
 }
 
 .ttm-dating-check-row {
@@ -2244,9 +2456,9 @@ html, body {
   align-items: flex-start;
   gap: 8px;
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-main);
-  line-height: 1.35;
+  line-height: 1.4;
   cursor: pointer;
 }
 
@@ -2255,18 +2467,43 @@ html, body {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
-  accent-color: var(--accent-pink);
+  accent-color: var(--accent-coral);
 }
 
 .ttm-dating-terms-box {
-  padding: 8px 10px;
+  padding: 10px 12px;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: 8px;
   font-family: var(--font-sans);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-muted);
   line-height: 1.45;
+}
+
+.ttm-link-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  min-height: 40px;
+  padding: 0 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: left;
+  transition: color 0.15s ease;
+}
+
+.ttm-link-btn:hover {
+  color: var(--text-main);
+}
+
+.ttm-link-btn.ttm-link-danger:hover,
+.ttm-link-btn.ttm-link-danger.is-confirming {
+  color: #ff7b72;
+  font-weight: 600;
 }
 
 .ttm-dating-setup-hint,
@@ -2278,113 +2515,326 @@ html, body {
 }
 
 .ttm-dating-card {
-  gap: 10px;
-  padding: 16px 14px;
-  border-color: #2f3542;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 20px;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
 }
 
-.ttm-dating-card-head {
+.ttm-dating-hero-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  max-height: 410px;
+  overflow: hidden;
+  background-color: #161b26;
+  flex-shrink: 0;
+}
+
+.ttm-dating-card-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ttm-dating-hero-fallback {
+  width: 100%;
+  height: 100%;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 10px;
+  padding-bottom: 58px;
+}
+
+.ttm-dating-hero-medallion {
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  color: #ffffff;
+  font-family: var(--font-sans);
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(6px);
+}
+
+.ttm-dating-hero-tag {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.72);
+  letter-spacing: 0.2px;
+}
+
+.ttm-card-share-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background-color: rgba(11, 14, 20, 0.56);
+  backdrop-filter: blur(8px);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 3;
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease;
+}
+
+.ttm-card-share-btn:hover {
+  background-color: rgba(11, 14, 20, 0.78);
+  transform: scale(1.04);
+}
+
+.ttm-card-share-btn:active {
+  transform: scale(0.95);
+}
+
+.ttm-dating-hero-scrim {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 52px 18px 16px 18px;
+  background: linear-gradient(
+    to top,
+    rgba(8, 10, 16, 0.94) 0%,
+    rgba(8, 10, 16, 0.65) 55%,
+    rgba(8, 10, 16, 0) 100%
+  );
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 2;
 }
 
 .ttm-dating-card-name {
   font-family: var(--font-sans);
-  font-size: 17px;
+  font-size: 24px;
   font-weight: 700;
-  color: var(--text-main);
-  line-height: 1.25;
+  color: #ffffff;
+  line-height: 1.15;
+  letter-spacing: -0.3px;
 }
 
-.ttm-dating-intent-tag {
+.ttm-dating-hero-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent-pink);
-  background-color: rgba(247, 120, 186, 0.12);
-  border: 1px solid rgba(247, 120, 186, 0.35);
-  border-radius: 6px;
-  padding: 3px 8px;
-  white-space: nowrap;
+  font-size: 13px;
+  color: rgba(243, 246, 251, 0.88);
+  line-height: 1.35;
 }
 
 .ttm-dating-card-loc {
-  font-family: var(--font-sans);
-  font-size: 12.5px;
-  color: var(--text-muted);
+  color: rgba(243, 246, 251, 0.88);
+}
+
+.ttm-meta-sep {
+  opacity: 0.55;
+}
+
+.ttm-dating-intent-text {
+  color: #fda4af;
+  font-weight: 600;
+}
+
+.ttm-dating-card-body {
+  padding: 16px 18px 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .ttm-dating-card-bio {
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  font-size: 14.5px;
   color: var(--text-main);
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.ttm-dating-card-actions {
+.ttm-dating-action-dock {
   display: flex;
-  gap: 8px;
-  padding-top: 4px;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 2px 0;
 }
 
-.ttm-dating-card-actions .ttm-btn {
-  flex: 1;
+.ttm-btn-circle-pass {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-input);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.15s ease, color 0.15s ease;
+}
+
+.ttm-btn-circle-pass:hover:not(:disabled) {
+  color: var(--text-main);
+  border-color: #4b5563;
+  transform: scale(1.05);
+}
+
+.ttm-btn-circle-pass:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.ttm-btn-circle-like {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #fb7185, #f43f5e);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(244, 63, 94, 0.34);
+  transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), filter 0.15s ease;
+}
+
+.ttm-btn-circle-like:hover:not(:disabled) {
+  filter: brightness(1.06);
+  transform: scale(1.05);
+}
+
+.ttm-btn-circle-like:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.ttm-btn-circle-pass:disabled,
+.ttm-btn-circle-like:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ttm-dating-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .ttm-dating-empty {
   align-items: flex-start;
-  gap: 8px;
-}
-
-.ttm-connect-tab.has-badge:not(.is-active) {
-  border-color: rgba(247, 120, 186, 0.55);
-  color: var(--accent-pink);
+  gap: 10px;
+  padding: 20px 18px;
 }
 
 .ttm-btn-dating-like {
-  background-color: rgba(247, 120, 186, 0.14);
-  border-color: rgba(247, 120, 186, 0.5);
-  color: var(--accent-pink);
-  font-weight: 600;
+  background: linear-gradient(135deg, #fb7185, #f43f5e);
+  border: none;
+  color: #ffffff;
+  font-weight: 700;
+  border-radius: 12px;
+  min-height: 46px;
 }
 
 .ttm-btn-dating-like:hover:not(:disabled) {
-  background-color: rgba(247, 120, 186, 0.24);
-  border-color: var(--accent-pink);
+  filter: brightness(1.06);
 }
 
 .ttm-dating-match-banner {
-  border-color: rgba(247, 120, 186, 0.65);
-  background: linear-gradient(135deg, rgba(247, 120, 186, 0.14), rgba(88, 166, 255, 0.08));
-  gap: 8px;
+  border-color: rgba(244, 63, 94, 0.48);
+  background: radial-gradient(circle at top, rgba(244, 63, 94, 0.18), rgba(19, 24, 35, 0.98) 70%);
+  border-radius: 20px;
+  padding: 26px 20px;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+}
+
+.ttm-match-avatars {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 4px auto 6px auto;
+}
+
+.ttm-match-avatar-item {
+  border: 3px solid var(--bg-surface);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.ttm-match-avatar-item.is-left {
+  margin-right: -12px;
+  z-index: 1;
+}
+
+.ttm-match-avatar-item.is-right {
+  margin-left: -12px;
+  z-index: 1;
+}
+
+.ttm-match-heart-pin {
+  position: relative;
+  z-index: 2;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #fb7185, #f43f5e);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg-surface);
+  box-shadow: 0 4px 12px rgba(244, 63, 94, 0.42);
 }
 
 .ttm-dating-match-title {
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: 22px;
   font-weight: 700;
-  color: var(--accent-pink);
+  color: #ffffff;
+  letter-spacing: -0.2px;
 }
 
 .ttm-dating-match-desc {
   font-family: var(--font-sans);
-  font-size: 13px;
-  color: var(--text-main);
-  line-height: 1.4;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  max-width: 340px;
 }
 
 .ttm-dating-match-actions {
   display: flex;
+  flex-direction: column;
+  width: 100%;
   gap: 8px;
-  padding-top: 2px;
+  padding-top: 4px;
 }
 
 .ttm-dating-match-actions .ttm-btn {
-  flex: 1;
+  width: 100%;
+  min-height: 46px;
+  border-radius: 12px;
 }
 
 .ttm-dating-matches-card {
@@ -2400,20 +2850,25 @@ html, body {
 
 .ttm-dating-new-badge {
   font-family: var(--font-sans);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
-  color: var(--accent-pink);
-  background-color: rgba(247, 120, 186, 0.14);
-  border: 1px solid rgba(247, 120, 186, 0.4);
-  border-radius: 5px;
-  padding: 2px 6px;
+  color: var(--accent-coral);
 }
 
 .ttm-btn-mini-danger.is-confirming,
 .ttm-btn-mini-danger.is-armed {
   background-color: rgba(248, 81, 73, 0.22);
-  border-color: var(--danger);
+  border-color: var(--error-color);
   font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ttm-btn-circle-pass,
+  .ttm-btn-circle-like,
+  .ttm-card-share-btn,
+  .ttm-hub-nav-item {
+    transition: none;
+  }
 }
 
 /* ============================================================================
@@ -2424,8 +2879,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  padding-top: 4px;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .ttm-topbar-danger {
@@ -2749,16 +3204,6 @@ html, body {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
-}
-
-.ttm-dating-card-photo {
-  width: 100%;
-  max-height: 260px;
-  object-fit: cover;
-  border-radius: 10px;
-  border: 1px solid var(--border-color);
-  background-color: var(--bg-input);
-  margin-bottom: 8px;
 }
 
 .ttm-admin-photo-cell {

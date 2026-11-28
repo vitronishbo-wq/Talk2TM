@@ -36,7 +36,7 @@ import {
 import { formatDateSeparatorLabel, formatFullDateTime, formatTime, getLocalDateKey } from '../utils/sanitize';
 import { MobileCalculator, isAdminRouteSequence } from './calculator';
 import { Talk2TMLockScreen } from './lockscreen';
-import { DatingPanel } from './dating-panel';
+import { createMonogramAvatar, DatingPanel } from './dating-panel';
 import { getPartnerLastRead } from '../firebase/firestore';
 import { PWAPromptBar } from './pwa-prompt';
 import { getCountryDisplayName, PhoneCountry, PhoneNormalizationResult } from '../utils/phone';
@@ -257,14 +257,26 @@ export class ChatUI {
   private activeOobCode: string | null = null;
   private activeOobEmail: string | null = null;
 
-  // Hub de Conexões Bilaterais (Descoberta por telefone exato, sem expor TM-XXXX-XXXX)
+  // Hub de Conexões Bilaterais & Descoberta
   private connectionsBtnEl!: HTMLButtonElement;
   private connectViewEl!: HTMLElement;
-  private connectTabConnectionsBtnEl!: HTMLButtonElement;
-  private connectTabDatingBtnEl!: HTMLButtonElement;
-  private connectHubCardsWrapEl!: HTMLElement;
+  private hubNavEl!: HTMLElement;
+  private navDiscoverBtnEl!: HTMLButtonElement;
+  private navDiscoverLabelEl!: HTMLElement;
+  private navMatchesBtnEl!: HTMLButtonElement;
+  private navMatchesLabelEl!: HTMLElement;
+  private navMatchesBadgeEl!: HTMLElement;
+  private navChatsBtnEl!: HTMLButtonElement;
+  private navChatsLabelEl!: HTMLElement;
+  private navAccountBtnEl!: HTMLButtonElement;
+  private navAccountLabelEl!: HTMLElement;
+  private hubContentEl!: HTMLElement;
+  private conversasSectionEl!: HTMLElement;
+  private accountSectionEl!: HTMLElement;
+  private selfAvatarSlotEl!: HTMLElement;
+  private accountEditDatingBtnEl!: HTMLButtonElement;
   private datingPanel!: DatingPanel;
-  private activeConnectTab: 'connections' | 'dating' = 'connections';
+  private activeHubDest: 'discover' | 'matches' | 'connections' | 'account' = 'discover';
   private lastDatingUid: string | null = null;
   private unseenDatingMatchCount = 0;
   private connectSelfTitleEl!: HTMLElement;
@@ -1687,37 +1699,103 @@ export class ChatUI {
    * Hub de Conexões Bilaterais:
    * Descoberta exata pelo número de telefone declarado (sem expor código TM interno).
    */
+  private createHubNavButton(
+    svgPathMarkup: string,
+    labelText: string,
+    onClick: () => void,
+    withBadge: boolean = false
+  ): {
+    btn: HTMLButtonElement;
+    labelEl: HTMLElement;
+    badgeEl?: HTMLElement;
+  } {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ttm-hub-nav-item';
+
+    const iconWrap = document.createElement('span');
+    iconWrap.className = 'ttm-nav-icon';
+    iconWrap.innerHTML = svgPathMarkup;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'ttm-nav-label';
+    labelEl.textContent = labelText;
+
+    btn.appendChild(iconWrap);
+    btn.appendChild(labelEl);
+
+    let badgeEl: HTMLElement | undefined;
+    if (withBadge) {
+      badgeEl = document.createElement('span');
+      badgeEl.className = 'ttm-nav-badge';
+      badgeEl.style.display = 'none';
+      btn.appendChild(badgeEl);
+    }
+
+    btn.addEventListener('click', onClick);
+    return { btn, labelEl, badgeEl };
+  }
+
   private buildConnectView(): void {
     this.connectViewEl = document.createElement('div');
     this.connectViewEl.id = 'ttm-connect-view';
     this.connectViewEl.className = 'ttm-connect-box';
     this.connectViewEl.style.display = 'none';
 
-    const tabBar = document.createElement('div');
-    tabBar.className = 'ttm-connect-tabs';
+    this.hubNavEl = document.createElement('nav');
+    this.hubNavEl.className = 'ttm-hub-nav';
+    this.hubNavEl.setAttribute('aria-label', 'Talk2TM');
 
-    this.connectTabConnectionsBtnEl = document.createElement('button');
-    this.connectTabConnectionsBtnEl.type = 'button';
-    this.connectTabConnectionsBtnEl.className = 'ttm-connect-tab is-active';
-    this.connectTabConnectionsBtnEl.textContent = t('dating.tabConnections');
-    this.connectTabConnectionsBtnEl.addEventListener('click', () => {
-      this.setConnectHubTab('connections');
-    });
+    const navDiscover = this.createHubNavButton(
+      '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>',
+      t('nav.discover'),
+      () => this.setHubDestination('discover')
+    );
+    this.navDiscoverBtnEl = navDiscover.btn;
+    this.navDiscoverLabelEl = navDiscover.labelEl;
+    this.navDiscoverBtnEl.classList.add('is-active');
 
-    this.connectTabDatingBtnEl = document.createElement('button');
-    this.connectTabDatingBtnEl.type = 'button';
-    this.connectTabDatingBtnEl.className = 'ttm-connect-tab';
-    this.connectTabDatingBtnEl.textContent = t('dating.tabDating');
-    this.connectTabDatingBtnEl.addEventListener('click', () => {
-      this.setConnectHubTab('dating');
-    });
+    const navMatches = this.createHubNavButton(
+      '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+      t('nav.matches'),
+      () => this.setHubDestination('matches'),
+      true
+    );
+    this.navMatchesBtnEl = navMatches.btn;
+    this.navMatchesLabelEl = navMatches.labelEl;
+    this.navMatchesBadgeEl = navMatches.badgeEl!;
 
-    tabBar.appendChild(this.connectTabConnectionsBtnEl);
-    tabBar.appendChild(this.connectTabDatingBtnEl);
-    this.connectViewEl.appendChild(tabBar);
+    const navChats = this.createHubNavButton(
+      '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+      t('nav.chats'),
+      () => this.setHubDestination('connections')
+    );
+    this.navChatsBtnEl = navChats.btn;
+    this.navChatsLabelEl = navChats.labelEl;
 
-    this.connectHubCardsWrapEl = document.createElement('div');
-    this.connectHubCardsWrapEl.className = 'ttm-connect-cards-wrap';
+    const navAccount = this.createHubNavButton(
+      '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+      t('nav.account'),
+      () => this.setHubDestination('account')
+    );
+    this.navAccountBtnEl = navAccount.btn;
+    this.navAccountLabelEl = navAccount.labelEl;
+
+    this.hubNavEl.appendChild(this.navDiscoverBtnEl);
+    this.hubNavEl.appendChild(this.navMatchesBtnEl);
+    this.hubNavEl.appendChild(this.navChatsBtnEl);
+    this.hubNavEl.appendChild(this.navAccountBtnEl);
+
+    this.hubContentEl = document.createElement('div');
+    this.hubContentEl.className = 'ttm-hub-content';
+
+    this.conversasSectionEl = document.createElement('div');
+    this.conversasSectionEl.className = 'ttm-connect-cards-wrap';
+    this.conversasSectionEl.style.display = 'none';
+
+    this.accountSectionEl = document.createElement('div');
+    this.accountSectionEl.className = 'ttm-connect-cards-wrap';
+    this.accountSectionEl.style.display = 'none';
 
     // Cartão 1: Minha Conta & Segurança Local
     const selfCard = document.createElement('div');
@@ -1730,6 +1808,9 @@ export class ChatUI {
 
     const selfRow = document.createElement('div');
     selfRow.className = 'ttm-connect-self-row';
+
+    this.selfAvatarSlotEl = document.createElement('div');
+    this.selfAvatarSlotEl.className = 'ttm-self-avatar-slot';
 
     const selfMeta = document.createElement('div');
     selfMeta.className = 'ttm-connect-item-meta';
@@ -1746,11 +1827,21 @@ export class ChatUI {
     selfMeta.appendChild(this.connectSelfPhoneEl);
 
     const selfActions = document.createElement('div');
-    selfActions.className = 'ttm-connect-item-actions';
+    selfActions.className = 'ttm-connect-item-actions ttm-self-actions-wrap';
+
+    const editDatingBtn = document.createElement('button');
+    editDatingBtn.type = 'button';
+    editDatingBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    editDatingBtn.textContent = t('dating.profileBtn');
+    editDatingBtn.addEventListener('click', () => {
+      this.setHubDestination('discover');
+      this.datingPanel.openProfileEditor();
+    });
+    this.accountEditDatingBtnEl = editDatingBtn;
 
     const rotateCodeBtn = document.createElement('button');
     rotateCodeBtn.type = 'button';
-    rotateCodeBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
+    rotateCodeBtn.className = 'ttm-btn-mini';
     rotateCodeBtn.textContent = t('connect.recoveryKeyBtn');
     rotateCodeBtn.title = t('connect.recoveryKeyTitle');
     this.connectRotateCodeBtnEl = rotateCodeBtn;
@@ -1775,10 +1866,12 @@ export class ChatUI {
     deleteAccountBtn.title = t('safety.deleteAccountTitle');
     this.connectDeleteBtnEl = deleteAccountBtn;
 
+    selfActions.appendChild(editDatingBtn);
     selfActions.appendChild(rotateCodeBtn);
     selfActions.appendChild(recoveryEmailBtn);
     selfActions.appendChild(changePinBtn);
     selfActions.appendChild(deleteAccountBtn);
+    selfRow.appendChild(this.selfAvatarSlotEl);
     selfRow.appendChild(selfMeta);
     selfRow.appendChild(selfActions);
 
@@ -2358,12 +2451,12 @@ export class ChatUI {
     refCard.appendChild(this.connectRefStatsEl);
     refCard.appendChild(refActionsRow);
 
-    this.connectHubCardsWrapEl.appendChild(selfCard);
-    this.connectHubCardsWrapEl.appendChild(refCard);
-    this.connectHubCardsWrapEl.appendChild(inviteCard);
-    this.connectHubCardsWrapEl.appendChild(incomingCard);
-    this.connectHubCardsWrapEl.appendChild(outgoingCard);
-    this.connectHubCardsWrapEl.appendChild(convCard);
+    this.accountSectionEl.appendChild(selfCard);
+    this.accountSectionEl.appendChild(refCard);
+    this.conversasSectionEl.appendChild(inviteCard);
+    this.conversasSectionEl.appendChild(incomingCard);
+    this.conversasSectionEl.appendChild(outgoingCard);
+    this.conversasSectionEl.appendChild(convCard);
 
     this.datingPanel = new DatingPanel({
       onLoadWorkspace: this.events.onLoadDatingWorkspace,
@@ -2377,6 +2470,9 @@ export class ChatUI {
       onMarkMatchSeen: this.events.onMarkDatingMatchSeen,
       onUploadPhoto: this.events.onUploadDatingPhoto,
       onRemovePhoto: this.events.onRemoveDatingPhoto,
+      onShareInvite: () => {
+        void this.handleDatingShareInvite();
+      },
       onReportCandidate: (candidate) => {
         this.openReportModal({
           targetUid: candidate.uid,
@@ -2402,23 +2498,53 @@ export class ChatUI {
       },
       onBlockUser: this.events.onBlockUser,
     });
-    this.datingPanel.rootEl.style.display = 'none';
+    this.datingPanel.rootEl.style.display = 'flex';
 
-    this.connectViewEl.appendChild(this.connectHubCardsWrapEl);
-    this.connectViewEl.appendChild(this.datingPanel.rootEl);
+    this.hubContentEl.appendChild(this.datingPanel.rootEl);
+    this.hubContentEl.appendChild(this.conversasSectionEl);
+    this.hubContentEl.appendChild(this.accountSectionEl);
+
+    this.connectViewEl.appendChild(this.hubNavEl);
+    this.connectViewEl.appendChild(this.hubContentEl);
+  }
+
+  private async handleDatingShareInvite(): Promise<void> {
+    const url = this.lastReferralSummary?.inviteUrl;
+    if (!url) {
+      this.setHubDestination('account');
+      return;
+    }
+    await navigator.clipboard?.writeText(url).catch(() => {});
+    this.showTemporaryNotice(t('referral.linkCopied'));
+    const code = this.lastReferralSummary?.referralCode;
+    if (code && this.events.onTrackReferralShare) {
+      void this.events.onTrackReferralShare(code).then((nextShared) => {
+        if (this.lastReferralSummary) {
+          this.updateReferralMetrics({
+            ...this.lastReferralSummary,
+            invitesSharedCount: nextShared,
+          });
+        }
+      }).catch(() => {});
+    }
   }
 
   private syncDatingTabLabel(): void {
-    if (!this.connectTabDatingBtnEl) return;
-    this.connectTabDatingBtnEl.textContent =
-      this.unseenDatingMatchCount > 0
-        ? t('dating.matchTabBadge', { count: this.unseenDatingMatchCount })
-        : t('dating.tabDating');
-    this.connectTabDatingBtnEl.classList.toggle('has-badge', this.unseenDatingMatchCount > 0);
+    if (!this.navMatchesBadgeEl || !this.navMatchesBtnEl) return;
+    if (this.unseenDatingMatchCount > 0) {
+      this.navMatchesBadgeEl.textContent = String(this.unseenDatingMatchCount);
+      this.navMatchesBadgeEl.style.display = 'inline-flex';
+    } else {
+      this.navMatchesBadgeEl.textContent = '';
+      this.navMatchesBadgeEl.style.display = 'none';
+    }
+    this.navMatchesBtnEl.classList.toggle('has-badge', this.unseenDatingMatchCount > 0);
   }
 
   public getActiveConnectTab(): 'connections' | 'dating' {
-    return this.activeConnectTab;
+    return this.activeHubDest === 'discover' || this.activeHubDest === 'matches'
+      ? 'dating'
+      : 'connections';
   }
 
   public updateDatingMatches(matches: DatingMatch[], myUid: string): void {
@@ -2427,15 +2553,28 @@ export class ChatUI {
     this.datingPanel?.updateMatches(matches);
   }
 
-  private setConnectHubTab(tab: 'connections' | 'dating'): void {
-    this.activeConnectTab = tab;
-    const isDating = tab === 'dating';
-    this.connectTabConnectionsBtnEl.classList.toggle('is-active', !isDating);
-    this.connectTabDatingBtnEl.classList.toggle('is-active', isDating);
-    this.connectHubCardsWrapEl.style.display = isDating ? 'none' : 'flex';
-    this.datingPanel.rootEl.style.display = isDating ? 'flex' : 'none';
-    if (isDating && this.currentSession?.talk2tmId) {
-      void this.datingPanel.loadForSession(this.currentSession);
+  private setHubDestination(dest: 'discover' | 'matches' | 'connections' | 'account'): void {
+    this.activeHubDest = dest;
+    const isDatingDest = dest === 'discover' || dest === 'matches';
+
+    this.navDiscoverBtnEl.classList.toggle('is-active', dest === 'discover');
+    this.navMatchesBtnEl.classList.toggle('is-active', dest === 'matches');
+    this.navChatsBtnEl.classList.toggle('is-active', dest === 'connections');
+    this.navAccountBtnEl.classList.toggle('is-active', dest === 'account');
+
+    this.datingPanel.rootEl.style.display = isDatingDest ? 'flex' : 'none';
+    this.conversasSectionEl.style.display = dest === 'connections' ? 'flex' : 'none';
+    this.accountSectionEl.style.display = dest === 'account' ? 'flex' : 'none';
+
+    if (this.hubContentEl) {
+      this.hubContentEl.scrollTop = 0;
+    }
+
+    if (isDatingDest) {
+      this.datingPanel.setSubView(dest === 'matches' ? 'matches' : 'discover');
+      if (this.currentSession?.talk2tmId) {
+        void this.datingPanel.loadForSession(this.currentSession);
+      }
     }
   }
 
@@ -3283,6 +3422,7 @@ export class ChatUI {
   }
 
   public hideAllPrimaryViews(): void {
+    this.appWrapper.classList.remove('is-hub-active');
     this.exitSelectionMode();
     this.closeSettingsModal();
     this.closeReportModal();
@@ -3299,7 +3439,7 @@ export class ChatUI {
     this.chatViewEl.style.display = 'none';
     this.datingPanel?.reset();
     this.lastDatingUid = null;
-    this.activeConnectTab = 'connections';
+    this.activeHubDest = 'discover';
     this.unseenDatingMatchCount = 0;
     this.syncDatingTabLabel();
   }
@@ -3318,6 +3458,7 @@ export class ChatUI {
   }
 
   public showPassEntryView(): void {
+    this.appWrapper.classList.remove('is-hub-active');
     this.closeSettingsModal();
     this.closeReportModal();
     this.lockScreen.hide();
@@ -3331,7 +3472,7 @@ export class ChatUI {
     this.passViewEl.style.display = 'flex';
     this.datingPanel?.reset();
     this.lastDatingUid = null;
-    this.activeConnectTab = 'connections';
+    this.activeHubDest = 'discover';
     this.unseenDatingMatchCount = 0;
     this.syncDatingTabLabel();
     if (this.backToLockBtnEl) {
@@ -3354,6 +3495,7 @@ export class ChatUI {
   }
 
   public showOnboardingView(): void {
+    this.appWrapper.classList.remove('is-hub-active');
     this.closeSettingsModal();
     this.closeReportModal();
     this.lockScreen.hide();
@@ -3407,6 +3549,7 @@ export class ChatUI {
   }
 
   public showRecoveryView(): void {
+    this.appWrapper.classList.remove('is-hub-active');
     this.closeSettingsModal();
     this.closeReportModal();
     this.lockScreen.hide();
@@ -3470,7 +3613,12 @@ export class ChatUI {
 
   private applyConnectSessionMeta(session: UserSession): void {
     this.connectionsBtnEl.style.display = session.talk2tmId ? 'inline-flex' : 'none';
-    this.connectSelfNameEl.textContent = session.displayName || t('connect.defaultName');
+    const selfName = session.displayName || t('connect.defaultName');
+    this.connectSelfNameEl.textContent = selfName;
+    if (this.selfAvatarSlotEl) {
+      this.selfAvatarSlotEl.innerHTML = '';
+      this.selfAvatarSlotEl.appendChild(createMonogramAvatar(selfName, session.userId, 'md'));
+    }
     this.connectSelfPhoneEl.textContent = session.phoneMasked
       ? t('connect.discoveryMasked', { phoneMasked: session.phoneMasked })
       : t('connect.discoveryActive');
@@ -3485,7 +3633,6 @@ export class ChatUI {
     } else {
       this.connectEmailStatusEl.textContent = t('onboarding.emailHint');
     }
-    // No Hub de Conexões o cartão próprio já exibe o nome; evita duplicar no cabeçalho
     this.roomInfoEl.innerHTML = '';
   }
 
@@ -3494,11 +3641,12 @@ export class ChatUI {
     if (switchedAccount) {
       this.datingPanel.reset();
       this.lastDatingUid = session.userId;
-      this.activeConnectTab = 'connections';
+      this.activeHubDest = 'discover';
       this.unseenDatingMatchCount = 0;
       this.syncDatingTabLabel();
     }
     this.currentSession = session;
+    this.appWrapper.classList.add('is-hub-active');
     this.exitSelectionMode();
     this.closeSettingsModal();
     this.closeReportModal();
@@ -3524,7 +3672,7 @@ export class ChatUI {
     this.connectFeedbackEl.textContent = '';
     this.connectFeedbackEl.classList.remove('is-error');
     this.applyConnectSessionMeta(session);
-    this.setConnectHubTab(this.activeConnectTab);
+    this.setHubDestination(this.activeHubDest);
   }
 
   public isConnectViewActive(): boolean {
@@ -3561,11 +3709,13 @@ export class ChatUI {
         const item = document.createElement('div');
         item.className = 'ttm-connect-item';
 
+        const senderName = inv.fromDisplayName || t('connect.defaultContact');
+        item.appendChild(createMonogramAvatar(senderName, inv.fromUid || senderName, 'md'));
+
         const meta = document.createElement('div');
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        const senderName = inv.fromDisplayName || t('connect.defaultContact');
         nameEl.textContent = t('connect.wantsToChat', { name: senderName });
         meta.appendChild(nameEl);
 
@@ -3621,11 +3771,14 @@ export class ChatUI {
         const item = document.createElement('div');
         item.className = 'ttm-connect-item';
 
+        const targetLabel = this.outgoingTargetNameCache.get(inv.inviteId) || t('connect.outgoingFallback');
+        item.appendChild(createMonogramAvatar(targetLabel, inv.inviteId, 'md'));
+
         const meta = document.createElement('div');
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = this.outgoingTargetNameCache.get(inv.inviteId) || t('connect.outgoingFallback');
+        nameEl.textContent = targetLabel;
         const subEl = document.createElement('div');
         subEl.className = 'ttm-connect-item-sub';
         subEl.textContent = t('connect.awaitingAcceptance');
@@ -3668,15 +3821,18 @@ export class ChatUI {
       data.conversations.forEach((conv) => {
         const isA = conv.participantA === myUid;
         const partnerName = isA ? conv.displayNameB : conv.displayNameA;
+        const partnerUid = isA ? conv.participantB : conv.participantA;
+        const safePartnerName = partnerName || t('connect.defaultContact');
 
         const item = document.createElement('div');
         item.className = 'ttm-connect-item';
+        item.appendChild(createMonogramAvatar(safePartnerName, partnerUid || safePartnerName, 'md'));
 
         const meta = document.createElement('div');
         meta.className = 'ttm-connect-item-meta';
         const nameEl = document.createElement('div');
         nameEl.className = 'ttm-connect-item-name';
-        nameEl.textContent = partnerName || t('connect.defaultContact');
+        nameEl.textContent = safePartnerName;
         const subEl = document.createElement('div');
         subEl.className = 'ttm-connect-item-sub';
         subEl.textContent = t('connect.privateChatSub');
@@ -3731,6 +3887,7 @@ export class ChatUI {
   }
 
   public showChatView(session: UserSession, room?: Room): void {
+    this.appWrapper.classList.remove('is-hub-active');
     this.currentSession = session;
     this.closeSettingsModal();
     this.closeReportModal();
@@ -4698,8 +4855,12 @@ export class ChatUI {
     this.recoveryOobSubmitBtn.textContent = t('recovery.oobSaveBtn');
     this.recoveryOobCancelBtnEl.textContent = t('common.cancel');
 
-    // Hub Bilateral & Dating (+18)
-    this.connectTabConnectionsBtnEl.textContent = t('dating.tabConnections');
+    // Hub Bilateral & Descoberta
+    this.navDiscoverLabelEl.textContent = t('nav.discover');
+    this.navMatchesLabelEl.textContent = t('nav.matches');
+    this.navChatsLabelEl.textContent = t('nav.chats');
+    this.navAccountLabelEl.textContent = t('nav.account');
+    this.accountEditDatingBtnEl.textContent = t('dating.profileBtn');
     this.syncDatingTabLabel();
     this.datingPanel.refreshLocale();
     this.connectSelfTitleEl.textContent = t('connect.myAccount');

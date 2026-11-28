@@ -27,6 +27,55 @@ import {
 } from '../types';
 import { detectSuggestedCountry, getCountryByIso, getCountryDisplayName, PHONE_COUNTRIES } from '../utils/phone';
 
+function computeMonogramInitials(name: string): string {
+  const clean = (name || '').trim();
+  if (!clean) return '?';
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+export function computeAvatarToneIndex(seed: string): number {
+  let sum = 0;
+  for (let i = 0; i < seed.length; i++) {
+    sum = (sum + seed.charCodeAt(i) * (i + 1)) % 997;
+  }
+  return sum % 5;
+}
+
+export function createMonogramAvatar(
+  name: string,
+  seed: string,
+  size: 'sm' | 'md' | 'lg' | 'xl' = 'md',
+  photoUrl?: string
+): HTMLElement {
+  const tone = computeAvatarToneIndex(seed || name || 'talk2tm');
+  const el = document.createElement('div');
+  el.className = `ttm-avatar-circle ttm-avatar-${size} ttm-tone-${tone}`;
+
+  const initialsSpan = document.createElement('span');
+  initialsSpan.className = 'ttm-avatar-initials';
+  initialsSpan.textContent = computeMonogramInitials(name);
+  el.appendChild(initialsSpan);
+
+  if (photoUrl && /^https:\/\//i.test(photoUrl)) {
+    const img = document.createElement('img');
+    img.className = 'ttm-avatar-img';
+    img.src = photoUrl;
+    img.alt = name || '';
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    img.addEventListener('error', () => {
+      img.remove();
+    });
+    el.appendChild(img);
+  }
+
+  return el;
+}
+
 export interface DatingPanelCallbacks {
   onLoadWorkspace?: () => Promise<{
     profile: DatingProfile | null;
@@ -53,6 +102,7 @@ export interface DatingPanelCallbacks {
   onBlockUser?: (targetUid: string, targetName: string) => Promise<void>;
   onUploadPhoto?: (blob: Blob) => Promise<DatingProfile>;
   onRemovePhoto?: () => Promise<DatingProfile>;
+  onShareInvite?: () => void;
 }
 
 export class DatingPanel {
@@ -60,6 +110,8 @@ export class DatingPanel {
   private callbacks: DatingPanelCallbacks;
 
   private activeUid: string | null = null;
+  private selfDisplayName = '';
+  private subViewMode: 'discover' | 'matches' = 'discover';
   private currentProfile: DatingProfile | null = null;
   private currentFilters: DatingDiscoveryFilters = validateDatingFilters({});
   private queue: DatingProfile[] = [];
@@ -85,6 +137,7 @@ export class DatingPanel {
 
   // Discovery elements
   private discoveryWrapEl!: HTMLElement;
+  private topBarEl!: HTMLElement;
   private quotaEl!: HTMLElement;
   private filtersToggleBtn!: HTMLButtonElement;
   private profileBtn!: HTMLButtonElement;
@@ -93,6 +146,7 @@ export class DatingPanel {
   private reactivateBtn!: HTMLButtonElement;
 
   private matchBannerCardEl!: HTMLElement;
+  private matchAvatarsEl!: HTMLElement;
   private matchBannerTitleEl!: HTMLElement;
   private matchBannerDescEl!: HTMLElement;
   private matchOpenChatBtn!: HTMLButtonElement;
@@ -112,6 +166,10 @@ export class DatingPanel {
 
   private stageCardEl!: HTMLElement;
   private candidatePhotoEl!: HTMLImageElement;
+  private candidateHeroFallbackEl!: HTMLElement;
+  private candidateHeroMedallionEl!: HTMLElement;
+  private candidateHeroTagEl!: HTMLElement;
+  private cardShareBtnEl!: HTMLButtonElement;
   private candidateNameAgeEl!: HTMLElement;
   private candidateLocationEl!: HTMLElement;
   private candidateIntentEl!: HTMLElement;
@@ -131,6 +189,7 @@ export class DatingPanel {
 
   private matchesCardEl!: HTMLElement;
   private matchesTitleEl!: HTMLElement;
+  private matchesHintEl!: HTMLElement;
   private matchesListEl!: HTMLElement;
 
   // Profile / Setup elements
@@ -191,8 +250,8 @@ export class DatingPanel {
     this.discoveryWrapEl.className = 'ttm-dating-section';
     this.discoveryWrapEl.style.display = 'none';
 
-    const topBar = document.createElement('div');
-    topBar.className = 'ttm-dating-topbar';
+    this.topBarEl = document.createElement('div');
+    this.topBarEl.className = 'ttm-dating-topbar';
 
     this.quotaEl = document.createElement('span');
     this.quotaEl.className = 'ttm-dating-quota';
@@ -217,8 +276,8 @@ export class DatingPanel {
 
     topActions.appendChild(this.filtersToggleBtn);
     topActions.appendChild(this.profileBtn);
-    topBar.appendChild(this.quotaEl);
-    topBar.appendChild(topActions);
+    this.topBarEl.appendChild(this.quotaEl);
+    this.topBarEl.appendChild(topActions);
 
     this.statusBannerEl = document.createElement('div');
     this.statusBannerEl.className = 'ttm-dating-banner';
@@ -310,10 +369,13 @@ export class DatingPanel {
     this.filtersCardEl.appendChild(this.filterCityInput);
     this.filtersCardEl.appendChild(this.filterApplyBtn);
 
-    // Match Celebration Screen (#43)
+    // Match Celebration Screen
     this.matchBannerCardEl = document.createElement('div');
     this.matchBannerCardEl.className = 'ttm-connect-card ttm-dating-match-banner';
     this.matchBannerCardEl.style.display = 'none';
+
+    this.matchAvatarsEl = document.createElement('div');
+    this.matchAvatarsEl.className = 'ttm-match-avatars';
 
     this.matchBannerTitleEl = document.createElement('div');
     this.matchBannerTitleEl.className = 'ttm-dating-match-title';
@@ -340,48 +402,101 @@ export class DatingPanel {
 
     matchActions.appendChild(this.matchOpenChatBtn);
     matchActions.appendChild(this.matchContinueBtn);
+    this.matchBannerCardEl.appendChild(this.matchAvatarsEl);
     this.matchBannerCardEl.appendChild(this.matchBannerTitleEl);
     this.matchBannerCardEl.appendChild(this.matchBannerDescEl);
     this.matchBannerCardEl.appendChild(matchActions);
 
-    // Single Candidate Card
+    // Single Candidate Commercial Hero Card
     this.stageCardEl = document.createElement('div');
     this.stageCardEl.className = 'ttm-connect-card ttm-dating-card';
     this.stageCardEl.style.display = 'none';
+
+    const heroMediaEl = document.createElement('div');
+    heroMediaEl.className = 'ttm-dating-hero-media';
 
     this.candidatePhotoEl = document.createElement('img');
     this.candidatePhotoEl.className = 'ttm-dating-card-photo';
     this.candidatePhotoEl.loading = 'lazy';
     this.candidatePhotoEl.referrerPolicy = 'no-referrer';
     this.candidatePhotoEl.style.display = 'none';
+    this.candidatePhotoEl.addEventListener('error', () => {
+      this.candidatePhotoEl.style.display = 'none';
+      this.candidateHeroFallbackEl.style.display = 'flex';
+    });
 
-    const cardHead = document.createElement('div');
-    cardHead.className = 'ttm-dating-card-head';
+    this.candidateHeroFallbackEl = document.createElement('div');
+    this.candidateHeroFallbackEl.className = 'ttm-dating-hero-fallback ttm-tone-0';
+    this.candidateHeroMedallionEl = document.createElement('div');
+    this.candidateHeroMedallionEl.className = 'ttm-dating-hero-medallion';
+    this.candidateHeroTagEl = document.createElement('span');
+    this.candidateHeroTagEl.className = 'ttm-dating-hero-tag';
+    this.candidateHeroFallbackEl.appendChild(this.candidateHeroMedallionEl);
+    this.candidateHeroFallbackEl.appendChild(this.candidateHeroTagEl);
+
+    this.cardShareBtnEl = document.createElement('button');
+    this.cardShareBtnEl.type = 'button';
+    this.cardShareBtnEl.className = 'ttm-card-share-btn';
+    this.cardShareBtnEl.innerHTML =
+      '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>';
+    this.cardShareBtnEl.addEventListener('click', () => {
+      this.callbacks.onShareInvite?.();
+    });
+
+    const heroScrimEl = document.createElement('div');
+    heroScrimEl.className = 'ttm-dating-hero-scrim';
+
     this.candidateNameAgeEl = document.createElement('div');
     this.candidateNameAgeEl.className = 'ttm-dating-card-name';
-    this.candidateIntentEl = document.createElement('span');
-    this.candidateIntentEl.className = 'ttm-dating-intent-tag';
-    cardHead.appendChild(this.candidateNameAgeEl);
-    cardHead.appendChild(this.candidateIntentEl);
 
-    this.candidateLocationEl = document.createElement('div');
+    const heroMetaRow = document.createElement('div');
+    heroMetaRow.className = 'ttm-dating-hero-meta';
+
+    this.candidateLocationEl = document.createElement('span');
     this.candidateLocationEl.className = 'ttm-dating-card-loc';
+
+    const metaSep = document.createElement('span');
+    metaSep.className = 'ttm-meta-sep';
+    metaSep.setAttribute('aria-hidden', 'true');
+    metaSep.textContent = '·';
+
+    this.candidateIntentEl = document.createElement('span');
+    this.candidateIntentEl.className = 'ttm-dating-intent-text';
+
+    heroMetaRow.appendChild(this.candidateLocationEl);
+    heroMetaRow.appendChild(metaSep);
+    heroMetaRow.appendChild(this.candidateIntentEl);
+    heroScrimEl.appendChild(this.candidateNameAgeEl);
+    heroScrimEl.appendChild(heroMetaRow);
+
+    heroMediaEl.appendChild(this.candidateHeroFallbackEl);
+    heroMediaEl.appendChild(this.candidatePhotoEl);
+    heroMediaEl.appendChild(this.cardShareBtnEl);
+    heroMediaEl.appendChild(heroScrimEl);
+
+    const cardBodyEl = document.createElement('div');
+    cardBodyEl.className = 'ttm-dating-card-body';
 
     this.candidateBioEl = document.createElement('p');
     this.candidateBioEl.className = 'ttm-dating-card-bio';
 
     const cardActions = document.createElement('div');
-    cardActions.className = 'ttm-dating-card-actions';
+    cardActions.className = 'ttm-dating-action-dock';
+
     this.passBtn = document.createElement('button');
     this.passBtn.type = 'button';
-    this.passBtn.className = 'ttm-btn ttm-btn-secondary';
+    this.passBtn.className = 'ttm-btn-circle-pass';
+    this.passBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
     this.passBtn.addEventListener('click', () => {
       void this.handleEvaluateCurrent('pass');
     });
 
     this.likeBtn = document.createElement('button');
     this.likeBtn.type = 'button';
-    this.likeBtn.className = 'ttm-btn ttm-btn-dating-like';
+    this.likeBtn.className = 'ttm-btn-circle-like';
+    this.likeBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
     this.likeBtn.addEventListener('click', () => {
       void this.handleLikeCurrent();
     });
@@ -389,12 +504,18 @@ export class DatingPanel {
     cardActions.appendChild(this.passBtn);
     cardActions.appendChild(this.likeBtn);
 
+    const cardFooter = document.createElement('div');
+    cardFooter.className = 'ttm-dating-card-footer';
+
+    this.phase1NoteEl = document.createElement('div');
+    this.phase1NoteEl.className = 'ttm-field-hint ttm-dating-phase-note';
+
     this.candidateSafetyRowEl = document.createElement('div');
     this.candidateSafetyRowEl.className = 'ttm-dating-safety-row';
 
     this.candidateReportBtn = document.createElement('button');
     this.candidateReportBtn.type = 'button';
-    this.candidateReportBtn.className = 'ttm-btn-mini';
+    this.candidateReportBtn.className = 'ttm-link-btn';
     this.candidateReportBtn.addEventListener('click', () => {
       const candidate = this.queue[0];
       if (!candidate) return;
@@ -403,7 +524,7 @@ export class DatingPanel {
 
     this.candidateBlockBtn = document.createElement('button');
     this.candidateBlockBtn.type = 'button';
-    this.candidateBlockBtn.className = 'ttm-btn-mini ttm-btn-mini-danger';
+    this.candidateBlockBtn.className = 'ttm-link-btn ttm-link-danger';
     this.candidateBlockBtn.addEventListener('click', () => {
       void this.handleBlockCurrentCandidate();
     });
@@ -411,16 +532,15 @@ export class DatingPanel {
     this.candidateSafetyRowEl.appendChild(this.candidateReportBtn);
     this.candidateSafetyRowEl.appendChild(this.candidateBlockBtn);
 
-    this.phase1NoteEl = document.createElement('div');
-    this.phase1NoteEl.className = 'ttm-field-hint ttm-dating-phase-note';
+    cardFooter.appendChild(this.phase1NoteEl);
+    cardFooter.appendChild(this.candidateSafetyRowEl);
 
-    this.stageCardEl.appendChild(this.candidatePhotoEl);
-    this.stageCardEl.appendChild(cardHead);
-    this.stageCardEl.appendChild(this.candidateLocationEl);
-    this.stageCardEl.appendChild(this.candidateBioEl);
-    this.stageCardEl.appendChild(cardActions);
-    this.stageCardEl.appendChild(this.candidateSafetyRowEl);
-    this.stageCardEl.appendChild(this.phase1NoteEl);
+    cardBodyEl.appendChild(this.candidateBioEl);
+    cardBodyEl.appendChild(cardActions);
+    cardBodyEl.appendChild(cardFooter);
+
+    this.stageCardEl.appendChild(heroMediaEl);
+    this.stageCardEl.appendChild(cardBodyEl);
 
     // Empty / Limit / Loading Card
     this.emptyCardEl = document.createElement('div');
@@ -442,17 +562,20 @@ export class DatingPanel {
     this.discoveryFeedbackEl = document.createElement('div');
     this.discoveryFeedbackEl.className = 'ttm-connect-feedback';
 
-    // Active Dating Connections List (#44)
+    // Active Dating Connections List
     this.matchesCardEl = document.createElement('div');
     this.matchesCardEl.className = 'ttm-connect-card ttm-dating-matches-card';
     this.matchesTitleEl = document.createElement('div');
     this.matchesTitleEl.className = 'ttm-connect-section-title';
+    this.matchesHintEl = document.createElement('div');
+    this.matchesHintEl.className = 'ttm-field-hint';
     this.matchesListEl = document.createElement('div');
     this.matchesListEl.className = 'ttm-connect-list';
     this.matchesCardEl.appendChild(this.matchesTitleEl);
+    this.matchesCardEl.appendChild(this.matchesHintEl);
     this.matchesCardEl.appendChild(this.matchesListEl);
 
-    this.discoveryWrapEl.appendChild(topBar);
+    this.discoveryWrapEl.appendChild(this.topBarEl);
     this.discoveryWrapEl.appendChild(this.statusBannerEl);
     this.discoveryWrapEl.appendChild(this.filtersCardEl);
     this.discoveryWrapEl.appendChild(this.matchBannerCardEl);
@@ -862,8 +985,14 @@ export class DatingPanel {
     this.matchOpenChatBtn.textContent = t('dating.matchOpenChatBtn');
     this.matchContinueBtn.textContent = t('dating.matchContinueBtn');
 
-    this.passBtn.textContent = t('dating.passBtn');
-    this.likeBtn.textContent = t('dating.likeBtn');
+    this.passBtn.setAttribute('aria-label', t('dating.passBtn'));
+    this.passBtn.title = t('dating.passBtn');
+    this.likeBtn.setAttribute('aria-label', t('dating.likeBtn'));
+    this.likeBtn.title = t('dating.likeBtn');
+    this.cardShareBtnEl.setAttribute('aria-label', t('dating.shareInviteAria'));
+    this.cardShareBtnEl.title = t('dating.shareInviteAria');
+    this.candidateHeroTagEl.textContent = t('dating.textProfileTag');
+    this.matchesHintEl.textContent = t('dating.matchesHint');
     this.candidateReportBtn.textContent = t('dating.reportBtn');
     this.candidateBlockBtn.textContent = t('dating.blockBtn');
     this.phase1NoteEl.textContent = t('dating.phase1MatchNote');
@@ -1036,6 +1165,8 @@ export class DatingPanel {
 
   public reset(): void {
     this.activeUid = null;
+    this.selfDisplayName = '';
+    this.subViewMode = 'discover';
     this.currentProfile = null;
     this.queue = [];
     this.usedToday = 0;
@@ -1108,6 +1239,7 @@ export class DatingPanel {
       this.activeUid = session.userId;
       this.nameInput.value = session.displayName || '';
     }
+    this.selfDisplayName = session.displayName || '';
 
     if (!this.callbacks.onLoadWorkspace) return;
     this.isLoading = true;
@@ -1200,7 +1332,12 @@ export class DatingPanel {
     this.nextCursor = result.nextCursorUpdatedAt;
   }
 
-  private openProfileEditor(): void {
+  public setSubView(mode: 'discover' | 'matches'): void {
+    this.subViewMode = mode;
+    this.render();
+  }
+
+  public openProfileEditor(): void {
     this.isEditingProfile = true;
     this.profileFeedbackEl.textContent = '';
     this.profileFeedbackEl.classList.remove('is-error');
@@ -1483,6 +1620,10 @@ export class DatingPanel {
       const item = document.createElement('div');
       item.className = 'ttm-connect-item';
 
+      const partnerName = partner.displayName || t('connect.defaultContact');
+      const avatar = createMonogramAvatar(partnerName, partner.uid || partnerName, 'md');
+      item.appendChild(avatar);
+
       const meta = document.createElement('div');
       meta.className = 'ttm-connect-item-meta';
 
@@ -1633,6 +1774,36 @@ export class DatingPanel {
     });
   }
 
+  private renderMatchCelebrationAvatars(match: DatingMatch): void {
+    if (!this.activeUid) return;
+    this.matchAvatarsEl.innerHTML = '';
+    const partner = getDatingMatchPartner(match, this.activeUid);
+    const selfName = this.currentProfile?.displayName || this.selfDisplayName || t('connect.defaultName');
+    const selfPhoto =
+      this.currentProfile && shouldDisplayCandidatePhoto(this.currentProfile)
+        ? this.currentProfile.photoUrl
+        : undefined;
+
+    const selfAvatar = createMonogramAvatar(selfName, this.activeUid, 'xl', selfPhoto);
+    selfAvatar.classList.add('ttm-match-avatar-item', 'is-left');
+
+    const heartPin = document.createElement('div');
+    heartPin.className = 'ttm-match-heart-pin';
+    heartPin.innerHTML =
+      '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+
+    const partnerAvatar = createMonogramAvatar(
+      partner.displayName || t('connect.defaultContact'),
+      partner.uid || partner.displayName,
+      'xl'
+    );
+    partnerAvatar.classList.add('ttm-match-avatar-item', 'is-right');
+
+    this.matchAvatarsEl.appendChild(selfAvatar);
+    this.matchAvatarsEl.appendChild(heartPin);
+    this.matchAvatarsEl.appendChild(partnerAvatar);
+  }
+
   public render(): void {
     const showProfileForm = this.isEditingProfile || !this.currentProfile;
     this.profileWrapEl.style.display = showProfileForm ? 'flex' : 'none';
@@ -1656,7 +1827,32 @@ export class DatingPanel {
 
     this.renderMatchesList();
 
+    const isMatchesSubView = this.subViewMode === 'matches';
+    this.matchesCardEl.style.display = isMatchesSubView ? 'flex' : 'none';
+
     const p = this.currentProfile!;
+    if (isMatchesSubView) {
+      this.topBarEl.style.display = 'none';
+      this.statusBannerEl.style.display = 'none';
+      this.filtersCardEl.style.display = 'none';
+      this.stageCardEl.style.display = 'none';
+      this.emptyCardEl.style.display = 'none';
+      if (this.celebratingMatch && this.activeUid) {
+        const partner = getDatingMatchPartner(this.celebratingMatch, this.activeUid);
+        this.renderMatchCelebrationAvatars(this.celebratingMatch);
+        this.matchBannerDescEl.textContent = t('dating.matchBannerDesc', {
+          name: partner.displayName || t('connect.defaultContact'),
+        });
+        this.matchBannerCardEl.style.display = 'flex';
+      } else {
+        this.matchBannerCardEl.style.display = 'none';
+      }
+      return;
+    }
+
+    this.topBarEl.style.display = 'flex';
+    this.filtersCardEl.style.display = this.showFilters ? 'flex' : 'none';
+
     if (p.suspended) {
       this.statusBannerEl.style.display = 'flex';
       this.statusBannerTextEl.textContent = t('dating.suspendedBanner');
@@ -1671,6 +1867,7 @@ export class DatingPanel {
 
     if (this.celebratingMatch && this.activeUid) {
       const partner = getDatingMatchPartner(this.celebratingMatch, this.activeUid);
+      this.renderMatchCelebrationAvatars(this.celebratingMatch);
       this.matchBannerDescEl.textContent = t('dating.matchBannerDesc', {
         name: partner.displayName || t('connect.defaultContact'),
       });
@@ -1715,14 +1912,22 @@ export class DatingPanel {
     if (activeCandidate && p.discoverable && !p.paused && !p.suspended) {
       this.emptyCardEl.style.display = 'none';
       this.stageCardEl.style.display = 'flex';
+
+      const tone = computeAvatarToneIndex(activeCandidate.uid || activeCandidate.displayName);
+      this.candidateHeroFallbackEl.className = `ttm-dating-hero-fallback ttm-tone-${tone}`;
+      this.candidateHeroMedallionEl.textContent = computeMonogramInitials(activeCandidate.displayName);
+
       if (shouldDisplayCandidatePhoto(activeCandidate)) {
         this.candidatePhotoEl.src = activeCandidate.photoUrl || '';
         this.candidatePhotoEl.alt = activeCandidate.displayName;
         this.candidatePhotoEl.style.display = 'block';
+        this.candidateHeroFallbackEl.style.display = 'none';
       } else {
         this.candidatePhotoEl.style.display = 'none';
         this.candidatePhotoEl.src = '';
+        this.candidateHeroFallbackEl.style.display = 'flex';
       }
+
       const country = getCountryByIso(activeCandidate.countryCode);
       const countryLabel = getCountryDisplayName(country);
       this.candidateNameAgeEl.textContent = `${activeCandidate.displayName}, ${activeCandidate.age}`;

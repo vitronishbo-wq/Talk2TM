@@ -3047,6 +3047,20 @@ export async function runAsyncZeroCostTests(): Promise<{ passed: number; total: 
     assert(fakeStore['talk2tm_hidden_truman-maezinha'] === '["leg_1"]', 'UID legado protegido é imutável no Hard Delete');
   });
 
+  // 65. Hub Comercial: entrada direta na Descoberta, navegação em 4 destinos, cartão retrato e Match com avatares duplos
+  await checkAsync('Hub Comercial: Descoberta como destino padrão, cartão retrato e avatares sem geolocation', async () => {
+    const domSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/dom.ts'), 'utf8');
+    const datingPanelSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/ui/dating-panel.ts'), 'utf8');
+    const styleSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/style.css'), 'utf8');
+
+    assert(domSrc.includes("activeHubDest: 'discover' | 'matches' | 'connections' | 'account' = 'discover'"), 'Hub deve abrir em Descobrir por padrão');
+    assert(domSrc.includes('ttm-hub-nav'), 'Hub deve renderizar navegação principal em 4 destinos');
+    assert(datingPanelSrc.includes('ttm-dating-hero-media'), 'Descoberta deve usar cartão retrato comercial');
+    assert(datingPanelSrc.includes('ttm-match-avatars'), 'Celebração de Match deve renderizar avatares duplos');
+    assert(!datingPanelSrc.includes('geolocation'), 'dating-panel.ts não pode usar APIs contínuas de geolocalização');
+    assert(styleSrc.includes('.talk2tm-shell.is-hub-active'), 'style.css deve suportar layout responsivo do Hub');
+  });
+
   console.log(`\x1b[32m✔ Talk2TM Zero-Cost Async: ${passed}/${total} testes assíncronos executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
