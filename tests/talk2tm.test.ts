@@ -2920,6 +2920,14 @@ export function runTalk2TMTests(): { passed: number; total: number } {
         rules: ['/datingMatches/{matchId}:create', '/conversations/{conversationId}:create'],
       },
       {
+        name: 'Test 24 matchBatch (userRateLimits + datingLikes + datingMatches)',
+        rules: [
+          '/userRateLimits/{uid}:create',
+          '/datingLikes/{likeId}:create',
+          '/datingMatches/{matchId}:create',
+        ],
+      },
+      {
         name: 'moderationReports + userRateLimits (create)',
         rules: ['/userRateLimits/{uid}:create', '/moderationReports/{reportId}:create'],
       },
@@ -2954,6 +2962,16 @@ export function runTalk2TMTests(): { passed: number; total: number } {
       const totalCost = sumRules(b.rules);
       assert(totalCost <= 20, `Lote writeBatch "${b.name}" excede limite de 20 leituras (atual: ${totalCost})`);
     }
+
+    // Garante que datingProfiles allow list não exige campos ausentes da query (ex.: age)
+    const dpMatchIdx = stripped.indexOf('match /datingProfiles/{profileUid}');
+    const dpListStart = stripped.indexOf('allow list:', dpMatchIdx);
+    const dpListEnd = stripped.indexOf(';', dpListStart);
+    const dpListExpr = stripped.slice(dpListStart, dpListEnd);
+    assert(
+      !dpListExpr.includes('resource.data.age'),
+      'datingProfiles allow list não pode exigir resource.data.age sem filtro where(age) na query'
+    );
 
     // Garante que Test 24 em tests/firestore.rules.test.ts inclui dayKey obrigatório
     const rulesTestSrc = fs.readFileSync(path.resolve(process.cwd(), 'tests/firestore.rules.test.ts'), 'utf8');

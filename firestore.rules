@@ -975,8 +975,7 @@ service cloud.firestore {
                          resource.data.discoverable == true &&
                          resource.data.paused == false &&
                          resource.data.suspended == false &&
-                         resource.data.adultConfirmed == true &&
-                         resource.data.age >= 18
+                         resource.data.adultConfirmed == true
                        )
                      );
       allow create: if isUser(profileUid) &&
@@ -1140,8 +1139,7 @@ service cloud.firestore {
     }
 
     function isValidLikeRateLimitBatch(uid) {
-      return existsAfter(/databases/$(database)/documents/userRateLimits/$(uid)) &&
-             isValidLikeRateLimitAfterData(
+      return isValidLikeRateLimitAfterData(
                uid,
                getAfter(/databases/$(database)/documents/userRateLimits/$(uid)).data
              );
@@ -1406,8 +1404,7 @@ service cloud.firestore {
     }
 
     function isValidReportRateLimitBatch(uid) {
-      return existsAfter(/databases/$(database)/documents/userRateLimits/$(uid)) &&
-             isValidReportRateLimitAfterData(
+      return isValidReportRateLimitAfterData(
                uid,
                getAfter(/databases/$(database)/documents/userRateLimits/$(uid)).data
              );
@@ -1486,7 +1483,7 @@ service cloud.firestore {
       allow get: if isUser(uid);
       allow list: if false;
       allow create: if isUser(uid) &&
-                       isCallerActive() &&
+                       isCallerNotDeleting() &&
                        request.resource.data.keys().hasAll([
                          'uid', 'dayKey', 'likeDayKey', 'likeCountToday',
                          'reportDayKey', 'reportCountToday', 'inviteDayKey', 'inviteCountToday', 'updatedAt'
@@ -1516,7 +1513,7 @@ service cloud.firestore {
                        request.resource.data.updatedAt.size() >= 1 &&
                        request.resource.data.updatedAt.size() <= 64;
       allow update: if isUser(uid) &&
-                       isCallerActive() &&
+                       isCallerNotDeleting() &&
                        request.resource.data.keys().hasAll([
                          'uid', 'dayKey', 'likeDayKey', 'likeCountToday',
                          'reportDayKey', 'reportCountToday', 'inviteDayKey', 'inviteCountToday', 'updatedAt'
