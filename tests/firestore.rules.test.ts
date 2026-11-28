@@ -2520,6 +2520,7 @@ async function runEmulatorRulesTests(): Promise<void> {
       const likeABBatch = writeBatch(f5DbA);
       likeABBatch.set(doc(f5DbA, 'userRateLimits', f5UidA), {
         uid: f5UidA,
+        dayKey: '2026-11-26',
         likeDayKey: '2026-11-26',
         likeCountToday: 1,
         reportDayKey: '2026-11-26',
@@ -2543,6 +2544,7 @@ async function runEmulatorRulesTests(): Promise<void> {
       const matchBatch = writeBatch(f5DbB);
       matchBatch.set(doc(f5DbB, 'userRateLimits', f5UidB), {
         uid: f5UidB,
+        dayKey: '2026-11-26',
         likeDayKey: '2026-11-26',
         likeCountToday: 1,
         reportDayKey: '2026-11-26',

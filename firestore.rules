@@ -249,16 +249,76 @@ service cloud.firestore {
       return hash is string && hash.matches('^[a-f0-9]{64}$');
     }
 
+    function isActiveUserProfileData(profData) {
+      return profData.active == true;
+    }
+
+    function isActiveProfileForTalk2tmId(talk2tmId) {
+      return exists(/databases/$(database)/documents/userProfiles/$(talk2tmId)) &&
+             isActiveUserProfileData(get(/databases/$(database)/documents/userProfiles/$(talk2tmId)).data);
+    }
+
     function callerTalk2tmId() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId;
+    }
+
+    function isCallerActiveWithUser(userData) {
+      return userData.get('accountStatus', 'active') != 'deleting' &&
+             isActiveProfileForTalk2tmId(userData.talk2tmId);
     }
 
     function isCallerActive() {
       return isAuthenticated() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountStatus', 'active') != 'deleting' &&
-        exists(/databases/$(database)/documents/userProfiles/$(callerTalk2tmId())) &&
-        get(/databases/$(database)/documents/userProfiles/$(callerTalk2tmId())).data.active == true;
+        isCallerActiveWithUser(get(/databases/$(database)/documents/users/$(request.auth.uid)).data);
+    }
+
+    function isCallerActiveWithTalk2tmId(expectedTalk2tmId, userData) {
+      return userData.get('accountStatus', 'active') != 'deleting' &&
+             userData.talk2tmId == expectedTalk2tmId &&
+             isActiveUserProfileData(get(/databases/$(database)/documents/userProfiles/$(expectedTalk2tmId)).data);
+    }
+
+    function isCallerActiveMatchingTalk2tmId(expectedTalk2tmId) {
+      return isAuthenticated() &&
+        isCallerActiveWithTalk2tmId(
+          expectedTalk2tmId,
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+        );
+    }
+
+    function isCallerNotDeletingWithUser(userData) {
+      return userData.get('accountStatus', 'active') != 'deleting';
+    }
+
+    function isCallerNotDeleting() {
+      return isAuthenticated() &&
+        isCallerNotDeletingWithUser(get(/databases/$(database)/documents/users/$(request.auth.uid)).data);
+    }
+
+    function isMatchingActiveProfileData(profData, uid, displayName) {
+      return profData.uid == uid &&
+             profData.active == true &&
+             profData.displayName == displayName;
+    }
+
+    function isValidActiveProfileForUser(talk2tmId, uid, displayName) {
+      return isMatchingActiveProfileData(
+               get(/databases/$(database)/documents/userProfiles/$(talk2tmId)).data,
+               uid,
+               displayName
+             );
+    }
+
+    function isOwnedActiveProfileData(profData, uid) {
+      return profData.uid == uid && profData.active == true;
+    }
+
+    function isValidOwnedActiveProfile(talk2tmId, uid) {
+      return isOwnedActiveProfileData(
+               get(/databases/$(database)/documents/userProfiles/$(talk2tmId)).data,
+               uid
+             );
     }
 
     function isPairBlocked(uid1, uid2) {
@@ -507,7 +567,6 @@ service cloud.firestore {
       allow list: if isConversationParticipant(resource.data) && isCallerActive();
       allow create: if isAuthenticated() &&
                        isValidId(conversationId) &&
-                       isCallerActive() &&
                        request.resource.data.keys().hasAll([
                          'conversationId', 'participantA', 'participantB',
                          'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
@@ -526,7 +585,6 @@ service cloud.firestore {
                        request.resource.data.participantA != request.resource.data.participantB &&
                        request.resource.data.participantA < request.resource.data.participantB &&
                        conversationId == 'conv_' + request.resource.data.participantA + '_' + request.resource.data.participantB &&
-                       !isPairBlocked(request.resource.data.participantA, request.resource.data.participantB) &&
                        (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB) &&
                        isValidTalk2tmId(request.resource.data.talk2tmIdA) &&
                        isValidTalk2tmId(request.resource.data.talk2tmIdB) &&
@@ -543,18 +601,18 @@ service cloud.firestore {
                        request.resource.data.updatedAt.size() >= 1 &&
                        (!('lastReadA' in request.resource.data) || request.resource.data.lastReadA == null || request.resource.data.lastReadA is string) &&
                        (!('lastReadB' in request.resource.data) || request.resource.data.lastReadB == null || request.resource.data.lastReadB is string) &&
-                       exists(/databases/$(database)/documents/users/$(request.resource.data.participantA)) &&
-                       get(/databases/$(database)/documents/users/$(request.resource.data.participantA)).data.talk2tmId == request.resource.data.talk2tmIdA &&
-                       exists(/databases/$(database)/documents/users/$(request.resource.data.participantB)) &&
-                       get(/databases/$(database)/documents/users/$(request.resource.data.participantB)).data.talk2tmId == request.resource.data.talk2tmIdB &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.uid == request.resource.data.participantA &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.active == true &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.displayName == request.resource.data.displayNameA &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.uid == request.resource.data.participantB &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.active == true &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.displayName == request.resource.data.displayNameB &&
+                       !isPairBlocked(request.resource.data.participantA, request.resource.data.participantB) &&
+                       isCallerNotDeleting() &&
+                       isValidActiveProfileForUser(
+                         request.resource.data.talk2tmIdA,
+                         request.resource.data.participantA,
+                         request.resource.data.displayNameA
+                       ) &&
+                       isValidActiveProfileForUser(
+                         request.resource.data.talk2tmIdB,
+                         request.resource.data.participantB,
+                         request.resource.data.displayNameB
+                       ) &&
                        (
                          (
                            exists(/databases/$(database)/documents/conversationInvites/$(conversationId)) &&
@@ -619,6 +677,12 @@ service cloud.firestore {
                        isAccountDeletionInProgress(request.auth.uid);
 
       // 5. conversations/{conversationId}/messages/{messageId} — Subcoleção de mensagens bilaterais
+      function isConversationMessageAllowed(convData) {
+        return isConversationParticipant(convData) &&
+               !isDatingMatchUnmatched(convData.participantA, convData.participantB) &&
+               !isPairBlocked(convData.participantA, convData.participantB);
+      }
+
       match /messages/{messageId} {
         allow get: if isAuthenticated() &&
                       isValidId(conversationId) &&
@@ -631,16 +695,6 @@ service cloud.firestore {
                        isCallerActive();
         allow create: if isValidId(conversationId) &&
                          isValidId(messageId) &&
-                         isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
-                         isCallerActive() &&
-                         !isDatingMatchUnmatched(
-                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA,
-                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB
-                         ) &&
-                         !isPairBlocked(
-                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA,
-                           get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB
-                         ) &&
                          request.resource.data.keys().hasAll([
                            'messageId', 'conversationId', 'senderId', 'senderTalk2tmId',
                            'text', 'clientId', 'createdAt'
@@ -653,8 +707,6 @@ service cloud.firestore {
                          request.resource.data.conversationId == conversationId &&
                          request.resource.data.senderId == request.auth.uid &&
                          isValidTalk2tmId(request.resource.data.senderTalk2tmId) &&
-                         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-                         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId == request.resource.data.senderTalk2tmId &&
                          request.resource.data.text is string &&
                          request.resource.data.text.size() >= 1 &&
                          request.resource.data.text.size() <= 2000 &&
@@ -663,7 +715,9 @@ service cloud.firestore {
                          request.resource.data.createdAt is string &&
                          request.resource.data.createdAt.size() >= 1 &&
                          (!('status' in request.resource.data) || isValidStatus(request.resource.data.status)) &&
-                         isValidOptionalServerTimestamp(request.resource.data);
+                         isValidOptionalServerTimestamp(request.resource.data) &&
+                         isCallerActiveMatchingTalk2tmId(request.resource.data.senderTalk2tmId) &&
+                         isConversationMessageAllowed(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
         allow update: if isValidId(conversationId) &&
                          isValidId(messageId) &&
                          isConversationParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) &&
@@ -706,7 +760,6 @@ service cloud.firestore {
                        request.resource.data.toUid is string &&
                        request.resource.data.toUid.size() >= 1 &&
                        request.resource.data.toUid != request.auth.uid &&
-                       !isPairBlocked(request.resource.data.fromUid, request.resource.data.toUid) &&
                        isValidTalk2tmId(request.resource.data.fromTalk2tmId) &&
                        isValidTalk2tmId(request.resource.data.toTalk2tmId) &&
                        request.resource.data.fromTalk2tmId != request.resource.data.toTalk2tmId &&
@@ -714,24 +767,23 @@ service cloud.firestore {
                        request.resource.data.fromDisplayName.size() >= 1 &&
                        request.resource.data.fromDisplayName.size() <= 30 &&
                        isValidId(request.resource.data.conversationId) &&
-                       inviteId == request.resource.data.conversationId &&
-                       isCanonicalConversationIdForPair(
-                         request.resource.data.conversationId,
-                         request.resource.data.fromUid,
-                         request.resource.data.toUid
-                       ) &&
+                       isCanonicalConversationIdForPair(request.resource.data.conversationId, request.resource.data.fromUid, request.resource.data.toUid) &&
                        request.resource.data.status == 'pending' &&
                        request.resource.data.createdAt is string &&
                        request.resource.data.createdAt.size() >= 1 &&
                        request.resource.data.updatedAt is string &&
                        request.resource.data.updatedAt.size() >= 1 &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.uid == request.auth.uid &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.active == true &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.displayName == request.resource.data.fromDisplayName &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.active == true;
+                       !isPairBlocked(request.resource.data.fromUid, request.resource.data.toUid) &&
+                       isCallerNotDeleting() &&
+                       isValidActiveProfileForUser(
+                         request.resource.data.fromTalk2tmId,
+                         request.auth.uid,
+                         request.resource.data.fromDisplayName
+                       ) &&
+                       isValidOwnedActiveProfile(
+                         request.resource.data.toTalk2tmId,
+                         request.resource.data.toUid
+                       );
       allow update: if isAuthenticated() &&
                        isValidId(inviteId) &&
                        isCallerActive() &&
@@ -752,8 +804,7 @@ service cloud.firestore {
                                (
                                  (
                                    request.resource.data.status == 'accepted' &&
-                                   exists(/databases/$(database)/documents/userProfiles/$(resource.data.fromTalk2tmId)) &&
-                                   get(/databases/$(database)/documents/userProfiles/$(resource.data.fromTalk2tmId)).data.active == true
+                                   isActiveProfileForTalk2tmId(resource.data.fromTalk2tmId)
                                  ) ||
                                  request.resource.data.status == 'declined'
                                )
@@ -781,13 +832,15 @@ service cloud.firestore {
                              'fromUid', 'fromDisplayName', 'fromTalk2tmId',
                              'toUid', 'toTalk2tmId', 'status', 'updatedAt'
                            ]) &&
-                           exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
-                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.uid == request.auth.uid &&
-                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.active == true &&
-                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.displayName == request.resource.data.fromDisplayName &&
-                           exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)) &&
-                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.uid == request.resource.data.toUid &&
-                           get(/databases/$(database)/documents/userProfiles/$(request.resource.data.toTalk2tmId)).data.active == true
+                           isValidActiveProfileForUser(
+                             request.resource.data.fromTalk2tmId,
+                             request.auth.uid,
+                             request.resource.data.fromDisplayName
+                           ) &&
+                           isValidOwnedActiveProfile(
+                             request.resource.data.toTalk2tmId,
+                             request.resource.data.toUid
+                           )
                          )
                        );
       allow delete: if isAuthenticated() &&
@@ -928,7 +981,6 @@ service cloud.firestore {
                      );
       allow create: if isUser(profileUid) &&
                        isValidId(profileUid) &&
-                       isCallerActive() &&
                        request.resource.data.keys().hasAll([
                          'uid', 'talk2tmId', 'displayName', 'age', 'gender', 'seeking',
                          'countryCode', 'city', 'cityKey', 'bio', 'intent',
@@ -945,11 +997,11 @@ service cloud.firestore {
                        ]) &&
                        request.resource.data.uid == request.auth.uid &&
                        isValidTalk2tmId(request.resource.data.talk2tmId) &&
-                       callerTalk2tmId() == request.resource.data.talk2tmId &&
                        request.resource.data.suspended == false &&
                        isValidDatingProfileFields(request.resource.data) &&
                        isValidOptionalDatingPhotoFields(request.resource.data, profileUid) &&
-                       isValidOwnerDatingPhotoState(request.resource.data, profileUid);
+                       isValidOwnerDatingPhotoState(request.resource.data, profileUid) &&
+                       isCallerActiveMatchingTalk2tmId(request.resource.data.talk2tmId);
       allow update: if isAuthenticated() &&
                        isValidId(profileUid) &&
                        (
@@ -1048,6 +1100,53 @@ service cloud.firestore {
              data.createdAt.size() <= 64;
     }
 
+    function isDatingSenderEligibleData(profData) {
+      return profData.suspended == false &&
+             profData.adultConfirmed == true &&
+             profData.age >= 18;
+    }
+
+    function isDatingSenderEligible(uid) {
+      return isDatingSenderEligibleData(get(/databases/$(database)/documents/datingProfiles/$(uid)).data);
+    }
+
+    function isDatingTargetEligibleData(profData) {
+      return profData.discoverable == true &&
+             profData.paused == false &&
+             profData.suspended == false &&
+             profData.adultConfirmed == true &&
+             profData.age >= 18;
+    }
+
+    function isDatingTargetEligible(uid) {
+      return isDatingTargetEligibleData(get(/databases/$(database)/documents/datingProfiles/$(uid)).data);
+    }
+
+    function isValidLikeRateLimitTransitionData(afterData, beforeData) {
+      return (afterData.likeDayKey != beforeData.likeDayKey && afterData.likeCountToday == 1) ||
+             (afterData.likeDayKey == beforeData.likeDayKey && afterData.likeCountToday == beforeData.likeCountToday + 1);
+    }
+
+    function isValidLikeRateLimitAfterData(uid, afterData) {
+      return afterData.likeCountToday >= 1 &&
+             afterData.likeCountToday <= 5 &&
+             (
+               (afterData.likeCountToday == 1 && !exists(/databases/$(database)/documents/userRateLimits/$(uid))) ||
+               isValidLikeRateLimitTransitionData(
+                 afterData,
+                 get(/databases/$(database)/documents/userRateLimits/$(uid)).data
+               )
+             );
+    }
+
+    function isValidLikeRateLimitBatch(uid) {
+      return existsAfter(/databases/$(database)/documents/userRateLimits/$(uid)) &&
+             isValidLikeRateLimitAfterData(
+               uid,
+               getAfter(/databases/$(database)/documents/userRateLimits/$(uid)).data
+             );
+    }
+
     match /datingLikes/{likeId} {
       // Secreto: só quem já criou o like recíproco consegue ler o like recebido (nunca há enumeração)
       allow get: if isAuthenticated() &&
@@ -1066,7 +1165,6 @@ service cloud.firestore {
                      resource.data.fromUid == request.auth.uid;
       allow create: if isAuthenticated() &&
                        isValidCompositeDatingId(likeId) &&
-                       isCallerActive() &&
                        request.resource.data.keys().hasAll([
                          'likeId', 'fromUid', 'toUid', 'fromTalk2tmId', 'fromDisplayName', 'createdAt'
                        ]) &&
@@ -1076,44 +1174,15 @@ service cloud.firestore {
                        request.resource.data.fromUid == request.auth.uid &&
                        isValidDatingLikeFields(request.resource.data, likeId) &&
                        !isPairBlocked(request.resource.data.fromUid, request.resource.data.toUid) &&
-                       callerTalk2tmId() == request.resource.data.fromTalk2tmId &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.fromTalk2tmId)).data.displayName == request.resource.data.fromDisplayName &&
-                       exists(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)) &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)).data.suspended == false &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)).data.adultConfirmed == true &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.auth.uid)).data.age >= 18 &&
-                       exists(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)) &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.discoverable == true &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.paused == false &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.suspended == false &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.adultConfirmed == true &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.toUid)).data.age >= 18 &&
-                       existsAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
-                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday >= 1 &&
-                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday <= 5 &&
-                       (
-                         (
-                           !exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
-                           getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday == 1
-                         ) ||
-                         (
-                           exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
-                           (
-                             (
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey !=
-                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey &&
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday == 1
-                             ) ||
-                             (
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey ==
-                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeDayKey &&
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday ==
-                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.likeCountToday + 1
-                             )
-                           )
-                         )
-                       );
+                       isCallerNotDeleting() &&
+                       isValidActiveProfileForUser(
+                         request.resource.data.fromTalk2tmId,
+                         request.auth.uid,
+                         request.resource.data.fromDisplayName
+                       ) &&
+                       isDatingSenderEligible(request.auth.uid) &&
+                       isDatingTargetEligible(request.resource.data.toUid) &&
+                       isValidLikeRateLimitBatch(request.auth.uid);
       allow update: if false;
       allow delete: if isAuthenticated() &&
                        isValidCompositeDatingId(likeId) &&
@@ -1158,6 +1227,10 @@ service cloud.firestore {
              (!('unmatchedAt' in data) || (data.unmatchedAt is string && data.unmatchedAt.size() >= 1 && data.unmatchedAt.size() <= 64));
     }
 
+    function isNonSuspendedDatingProfile(uid) {
+      return get(/databases/$(database)/documents/datingProfiles/$(uid)).data.suspended == false;
+    }
+
     match /datingMatches/{matchId} {
       allow get: if isAuthenticated() &&
                     isValidCompositeDatingId(matchId) &&
@@ -1179,7 +1252,6 @@ service cloud.firestore {
                      );
       allow create: if isAuthenticated() &&
                        isValidCompositeDatingId(matchId) &&
-                       isCallerActive() &&
                        request.resource.data.keys().hasAll([
                          'matchId', 'conversationId', 'participantA', 'participantB',
                          'talk2tmIdA', 'talk2tmIdB', 'displayNameA', 'displayNameB',
@@ -1195,20 +1267,21 @@ service cloud.firestore {
                        (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB) &&
                        request.resource.data.matchedByUid == request.auth.uid &&
                        request.resource.data.status == 'matched' &&
+                       isCallerNotDeleting() &&
                        existsAfter(/databases/$(database)/documents/datingLikes/$(request.resource.data.participantA + '_' + request.resource.data.participantB)) &&
                        existsAfter(/databases/$(database)/documents/datingLikes/$(request.resource.data.participantB + '_' + request.resource.data.participantA)) &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.uid == request.resource.data.participantA &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.active == true &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdA)).data.displayName == request.resource.data.displayNameA &&
-                       exists(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)) &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.uid == request.resource.data.participantB &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.active == true &&
-                       get(/databases/$(database)/documents/userProfiles/$(request.resource.data.talk2tmIdB)).data.displayName == request.resource.data.displayNameB &&
-                       exists(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantA)) &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantA)).data.suspended == false &&
-                       exists(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantB)) &&
-                       get(/databases/$(database)/documents/datingProfiles/$(request.resource.data.participantB)).data.suspended == false;
+                       isValidActiveProfileForUser(
+                         request.resource.data.talk2tmIdA,
+                         request.resource.data.participantA,
+                         request.resource.data.displayNameA
+                       ) &&
+                       isValidActiveProfileForUser(
+                         request.resource.data.talk2tmIdB,
+                         request.resource.data.participantB,
+                         request.resource.data.displayNameB
+                       ) &&
+                       isNonSuspendedDatingProfile(request.resource.data.participantA) &&
+                       isNonSuspendedDatingProfile(request.resource.data.participantB);
       allow update: if isAuthenticated() &&
                        isValidCompositeDatingId(matchId) &&
                        isCallerActive() &&
@@ -1315,6 +1388,31 @@ service cloud.firestore {
                        (resource.data.blockerUid == request.auth.uid || resource.data.blockedUid == request.auth.uid);
     }
 
+    function isValidReportRateLimitTransitionData(afterData, beforeData) {
+      return (afterData.reportDayKey != beforeData.reportDayKey && afterData.reportCountToday == 1) ||
+             (afterData.reportDayKey == beforeData.reportDayKey && afterData.reportCountToday == beforeData.reportCountToday + 1);
+    }
+
+    function isValidReportRateLimitAfterData(uid, afterData) {
+      return afterData.reportCountToday >= 1 &&
+             afterData.reportCountToday <= 10 &&
+             (
+               (afterData.reportCountToday == 1 && !exists(/databases/$(database)/documents/userRateLimits/$(uid))) ||
+               isValidReportRateLimitTransitionData(
+                 afterData,
+                 get(/databases/$(database)/documents/userRateLimits/$(uid)).data
+               )
+             );
+    }
+
+    function isValidReportRateLimitBatch(uid) {
+      return existsAfter(/databases/$(database)/documents/userRateLimits/$(uid)) &&
+             isValidReportRateLimitAfterData(
+               uid,
+               getAfter(/databases/$(database)/documents/userRateLimits/$(uid)).data
+             );
+    }
+
     match /moderationReports/{reportId} {
       allow get: if isAuthenticated() &&
                     isValidCompositeDatingId(reportId) &&
@@ -1329,7 +1427,6 @@ service cloud.firestore {
                      );
       allow create: if isAuthenticated() &&
                        isValidCompositeDatingId(reportId) &&
-                       isCallerActive() &&
                        request.resource.data.keys().hasAll([
                          'reportId', 'reporterUid', 'reporterTalk2tmId', 'targetUid',
                          'sourceType', 'reason', 'evidenceSnapshot', 'status', 'createdAt'
@@ -1343,7 +1440,6 @@ service cloud.firestore {
                        request.resource.data.reportId == reportId &&
                        request.resource.data.reporterUid == request.auth.uid &&
                        isValidTalk2tmId(request.resource.data.reporterTalk2tmId) &&
-                       callerTalk2tmId() == request.resource.data.reporterTalk2tmId &&
                        request.resource.data.targetUid is string &&
                        request.resource.data.targetUid.size() >= 1 &&
                        request.resource.data.targetUid.size() <= 128 &&
@@ -1366,31 +1462,8 @@ service cloud.firestore {
                        request.resource.data.createdAt is string &&
                        request.resource.data.createdAt.size() >= 1 &&
                        request.resource.data.createdAt.size() <= 64 &&
-                       existsAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
-                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday >= 1 &&
-                       getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday <= 10 &&
-                       (
-                         (
-                           !exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
-                           getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday == 1
-                         ) ||
-                         (
-                           exists(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)) &&
-                           (
-                             (
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey !=
-                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey &&
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday == 1
-                             ) ||
-                             (
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey ==
-                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportDayKey &&
-                               getAfter(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday ==
-                               get(/databases/$(database)/documents/userRateLimits/$(request.auth.uid)).data.reportCountToday + 1
-                             )
-                           )
-                         )
-                       );
+                       isCallerActiveMatchingTalk2tmId(request.resource.data.reporterTalk2tmId) &&
+                       isValidReportRateLimitBatch(request.auth.uid);
       allow update: if isAdmin() &&
                        isValidCompositeDatingId(reportId) &&
                        request.resource.data.reportId == resource.data.reportId &&
@@ -1571,6 +1644,18 @@ service cloud.firestore {
       allow delete: if isUser(uid) && isAccountDeletionInProgress(uid);
     }
 
+    function isActiveReferralLinkData(linkData, expectedReferrerUid) {
+      return linkData.referrerUid == expectedReferrerUid && linkData.active == true;
+    }
+
+    function isValidActiveReferralLink(code, expectedReferrerUid) {
+      return exists(/databases/$(database)/documents/referralLinks/$(code)) &&
+             isActiveReferralLinkData(
+               get(/databases/$(database)/documents/referralLinks/$(code)).data,
+               expectedReferrerUid
+             );
+    }
+
     match /referralAttributions/{newUid} {
       allow get: if isUser(newUid) ||
                     isAdmin() ||
@@ -1579,7 +1664,6 @@ service cloud.firestore {
                      (isAuthenticated() && resource.data.referrerUid == request.auth.uid);
       allow create: if isUser(newUid) &&
                        !isProtectedLegacyUid(newUid) &&
-                       isCallerActive() &&
                        !exists(/databases/$(database)/documents/referralAttributions/$(newUid)) &&
                        request.resource.data.keys().hasAll([
                          'newUid', 'newTalk2tmId', 'referralCode', 'referrerUid', 'createdAt'
@@ -1589,7 +1673,6 @@ service cloud.firestore {
                        ]) &&
                        request.resource.data.newUid == newUid &&
                        isValidTalk2tmId(request.resource.data.newTalk2tmId) &&
-                       callerTalk2tmId() == request.resource.data.newTalk2tmId &&
                        isValidReferralCode(request.resource.data.referralCode) &&
                        request.resource.data.referrerUid is string &&
                        request.resource.data.referrerUid.size() >= 1 &&
@@ -1598,9 +1681,8 @@ service cloud.firestore {
                        request.resource.data.createdAt is string &&
                        request.resource.data.createdAt.size() >= 1 &&
                        request.resource.data.createdAt.size() <= 64 &&
-                       exists(/databases/$(database)/documents/referralLinks/$(request.resource.data.referralCode)) &&
-                       get(/databases/$(database)/documents/referralLinks/$(request.resource.data.referralCode)).data.referrerUid == request.resource.data.referrerUid &&
-                       get(/databases/$(database)/documents/referralLinks/$(request.resource.data.referralCode)).data.active == true;
+                       isCallerActiveMatchingTalk2tmId(request.resource.data.newTalk2tmId) &&
+                       isValidActiveReferralLink(request.resource.data.referralCode, request.resource.data.referrerUid);
       allow update: if false;
       allow delete: if isUser(newUid) && isAccountDeletionInProgress(newUid);
     }

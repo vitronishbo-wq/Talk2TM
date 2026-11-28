@@ -2739,6 +2739,229 @@ export function runTalk2TMTests(): { passed: number; total: number } {
     }
   });
 
+  // 69. Auditoria Automática de Orçamento de Chamadas (get/exists) em firestore.rules
+  check('Firestore Rules Call-Budget Auditor: nenhuma regra excede 10 leituras nem lotes writeBatch excedem 20', () => {
+    const rawRules = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
+
+    // Remove comentários de linha // fora de literais entre aspas simples '...'
+    let stripped = '';
+    let inSingleQuote = false;
+    let braceBalance = 0;
+    let parenBalance = 0;
+    for (let i = 0; i < rawRules.length; i++) {
+      const ch = rawRules[i];
+      const prev = i > 0 ? rawRules[i - 1] : '';
+      const next = i + 1 < rawRules.length ? rawRules[i + 1] : '';
+      if (ch === "'" && prev !== '\\') {
+        inSingleQuote = !inSingleQuote;
+        stripped += ch;
+        continue;
+      }
+      if (!inSingleQuote && ch === '/' && next === '/') {
+        while (i < rawRules.length && rawRules[i] !== '\n') i++;
+        stripped += '\n';
+        continue;
+      }
+      if (!inSingleQuote) {
+        if (ch === '{') braceBalance++;
+        else if (ch === '}') braceBalance--;
+        else if (ch === '(') parenBalance++;
+        else if (ch === ')') parenBalance--;
+        assert(braceBalance >= 0, 'Chavetas desbalanceadas em firestore.rules');
+        assert(parenBalance >= 0, 'Parênteses desbalanceados em firestore.rules');
+      }
+      stripped += ch;
+    }
+    assert(braceBalance === 0, `Chavetas não fechadas em firestore.rules (saldo: ${braceBalance})`);
+    assert(parenBalance === 0, `Parênteses não fechados em firestore.rules (saldo: ${parenBalance})`);
+
+    const findMatchingBrace = (src: string, openIdx: number): number => {
+      let depth = 0;
+      let quote = false;
+      for (let i = openIdx; i < src.length; i++) {
+        const c = src[i];
+        const p = i > 0 ? src[i - 1] : '';
+        if (c === "'" && p !== '\\') {
+          quote = !quote;
+          continue;
+        }
+        if (quote) continue;
+        if (c === '{') depth++;
+        else if (c === '}') {
+          depth--;
+          if (depth === 0) return i;
+        }
+      }
+      return -1;
+    };
+
+    // Extrai todas as funções definidas em firestore.rules
+    const fnBodies = new Map<string, string>();
+    const fnRegex = /\bfunction\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*\{/g;
+    let fnMatch: RegExpExecArray | null;
+    while ((fnMatch = fnRegex.exec(stripped)) !== null) {
+      const name = fnMatch[1];
+      const openBrace = fnRegex.lastIndex - 1;
+      const closeBrace = findMatchingBrace(stripped, openBrace);
+      assert(closeBrace > openBrace, `Função ${name} sem fecho de chaveta`);
+      fnBodies.set(name, stripped.slice(openBrace + 1, closeBrace));
+    }
+    assert(fnBodies.size >= 15, 'Auditor deve extrair todas as funções auxiliares de firestore.rules');
+
+    const countExprCalls = (expr: string, stack: Set<string> = new Set()): number => {
+      let count = 0;
+      const firestoreLookupRe = /(?<![a-zA-Z0-9_.])(exists|get|existsAfter|getAfter)\s*\(/g;
+      while (firestoreLookupRe.exec(expr) !== null) {
+        count++;
+      }
+      const callRe = /(?<![a-zA-Z0-9_.])([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+      let m: RegExpExecArray | null;
+      while ((m = callRe.exec(expr)) !== null) {
+        const fnName = m[1];
+        const body = fnBodies.get(fnName);
+        if (!body || stack.has(fnName)) continue;
+        const nextStack = new Set(stack);
+        nextStack.add(fnName);
+        count += countExprCalls(body, nextStack);
+      }
+      return count;
+    };
+
+    // Percorre recursivamente todos os blocos match ... { ... } e extrai regras allow <ops>: if <expr>;
+    const ruleCosts = new Map<string, number>();
+    const scanMatchBlock = (blockBody: string, prefixPath: string): void => {
+      let idx = 0;
+      while (idx < blockBody.length) {
+        while (idx < blockBody.length && /\s/.test(blockBody[idx])) idx++;
+        if (idx >= blockBody.length) break;
+
+        if (blockBody.startsWith('match ', idx)) {
+          const mHeader = /^match\s+(\S+)\s*\{/.exec(blockBody.slice(idx));
+          assert(Boolean(mHeader), `Cabeçalho match inválido em ${prefixPath || '/'}`);
+          const seg = mHeader![1].trim();
+          const braceIdx = idx + mHeader![0].length - 1;
+          const closeIdx = findMatchingBrace(blockBody, braceIdx);
+          assert(closeIdx > braceIdx, `Bloco match ${seg} sem }`);
+          const nextPath = prefixPath ? `${prefixPath}${seg.startsWith('/') ? seg : `/${seg}`}` : seg;
+          scanMatchBlock(blockBody.slice(braceIdx + 1, closeIdx), nextPath);
+          idx = closeIdx + 1;
+          continue;
+        }
+
+        if (blockBody.startsWith('function ', idx)) {
+          const braceIdx = blockBody.indexOf('{', idx);
+          const closeIdx = findMatchingBrace(blockBody, braceIdx);
+          idx = closeIdx + 1;
+          continue;
+        }
+
+        if (blockBody.startsWith('allow ', idx)) {
+          let semiIdx = idx;
+          let inQ = false;
+          for (; semiIdx < blockBody.length; semiIdx++) {
+            const c = blockBody[semiIdx];
+            const p = semiIdx > 0 ? blockBody[semiIdx - 1] : '';
+            if (c === "'" && p !== '\\') inQ = !inQ;
+            else if (!inQ && c === ';') break;
+          }
+          const stmt = blockBody.slice(idx, semiIdx);
+          const allowMatch = /^allow\s+([a-z,\s]+):\s*if\s+([\s\S]+)$/.exec(stmt.trim());
+          assert(Boolean(allowMatch), `Declaração allow inválida em ${prefixPath}: ${stmt}`);
+          if (allowMatch) {
+            const ops = allowMatch[1].split(',').map((s) => s.trim()).filter(Boolean);
+            const expr = allowMatch[2];
+            const cost = countExprCalls(expr);
+            const normPath = prefixPath.replace('/databases/{database}/documents', '') || '/';
+            for (const op of ops) {
+              ruleCosts.set(`${normPath}:${op}`, cost);
+            }
+          }
+          idx = semiIdx + 1;
+          continue;
+        }
+
+        idx++;
+      }
+    };
+
+    const rootToken = 'match /databases/{database}/documents';
+    const serviceIdx = stripped.indexOf(rootToken);
+    assert(serviceIdx >= 0, 'Bloco raiz /databases/{database}/documents não encontrado');
+    const rootOpen = stripped.indexOf('{', serviceIdx + rootToken.length);
+    const rootClose = findMatchingBrace(stripped, rootOpen);
+    scanMatchBlock(stripped.slice(rootOpen + 1, rootClose), '');
+
+    assert(ruleCosts.size >= 40, `Auditor deve inspecionar todas as regras allow (inspecionadas: ${ruleCosts.size})`);
+
+    // 1. Nenhuma regra isolada pode exceder o limite estrito de 10 chamadas do Firestore
+    for (const [key, cost] of ruleCosts.entries()) {
+      assert(cost <= 10, `Regra ${key} excede limite seguro de 10 leituras (atual: ${cost})`);
+    }
+
+    // 2. Nenhuma operação writeBatch da aplicação/testes pode exceder 20 chamadas somadas no lote
+    const sumRules = (keys: string[]): number =>
+      keys.reduce((acc, k) => {
+        const val = ruleCosts.get(k);
+        assert(typeof val === 'number', `Regra esperada não encontrada pelo auditor: ${k}`);
+        return acc + (val ?? 0);
+      }, 0);
+
+    const batches: Array<{ name: string; rules: string[] }> = [
+      {
+        name: 'datingLikes + userRateLimits (create)',
+        rules: ['/userRateLimits/{uid}:create', '/datingLikes/{likeId}:create'],
+      },
+      {
+        name: 'datingLikes + userRateLimits (update)',
+        rules: ['/userRateLimits/{uid}:update', '/datingLikes/{likeId}:create'],
+      },
+      {
+        name: 'datingMatches + conversations (create)',
+        rules: ['/datingMatches/{matchId}:create', '/conversations/{conversationId}:create'],
+      },
+      {
+        name: 'moderationReports + userRateLimits (create)',
+        rules: ['/userRateLimits/{uid}:create', '/moderationReports/{reportId}:create'],
+      },
+      {
+        name: 'moderationReports + userRateLimits (update)',
+        rules: ['/userRateLimits/{uid}:update', '/moderationReports/{reportId}:create'],
+      },
+      {
+        name: 'Hard Delete cascadeBatch',
+        rules: [
+          '/datingProfiles/{profileUid}/evaluations/{targetUid}:delete',
+          '/userBlocks/{blockId}:delete',
+          '/datingLikes/{likeId}:delete',
+          '/conversations/{conversationId}/messages/{messageId}:delete',
+          '/conversations/{conversationId}:delete',
+          '/conversationInvites/{inviteId}:delete',
+        ],
+      },
+      {
+        name: 'Hard Delete finalRootBatch',
+        rules: [
+          '/userRateLimits/{uid}:delete',
+          '/datingProfiles/{profileUid}:delete',
+          '/phoneLookup/{phoneHash}:delete',
+          '/userProfiles/{talk2tmId}:delete',
+          '/users/{uid}:delete',
+        ],
+      },
+    ];
+
+    for (const b of batches) {
+      const totalCost = sumRules(b.rules);
+      assert(totalCost <= 20, `Lote writeBatch "${b.name}" excede limite de 20 leituras (atual: ${totalCost})`);
+    }
+
+    // Garante que Test 24 em tests/firestore.rules.test.ts inclui dayKey obrigatório
+    const rulesTestSrc = fs.readFileSync(path.resolve(process.cwd(), 'tests/firestore.rules.test.ts'), 'utf8');
+    const test24Block = rulesTestSrc.slice(rulesTestSrc.indexOf('24. Fase 5:'));
+    const dayKeyMatches = test24Block.match(/dayKey:\s*'2026-11-26'/g) ?? [];
+    assert(dayKeyMatches.length >= 2, 'Test 24 deve incluir dayKey em ambos os documentos userRateLimits');
+  });
+
   console.log(`\x1b[32m✔ Talk2TM: ${passed}/${total} testes síncronos executados com 100% de aprovação.\x1b[0m`);
   return { passed, total };
 }
