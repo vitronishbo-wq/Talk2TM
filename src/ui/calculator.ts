@@ -295,8 +295,8 @@ export class MobileCalculator {
     const cleanToken = normalizeCalculatorSequence(token);
     if (!cleanToken) return false;
     this.inputSequence += cleanToken;
-    if (this.inputSequence.length > 32) {
-      this.inputSequence = this.inputSequence.slice(-24);
+    if (this.inputSequence.length > 256) {
+      this.inputSequence = this.inputSequence.slice(-128);
     }
     if (isAdminRouteSequence(this.inputSequence)) {
       this.clear();
@@ -320,7 +320,7 @@ export class MobileCalculator {
 
     this.updateDisplay();
 
-    // Verificação instantânea do segredo legado e, em seguida, PINs numéricos locais (4-8 dígitos)
+    // Verificação instantânea do segredo legado e, em seguida, PINs numéricos locais (>= 6 dígitos)
     if (!this.checkSecretUnlock()) {
       this.triggerCustomPinCheck();
     }

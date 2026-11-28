@@ -43,12 +43,10 @@ import { getCountryDisplayName, PhoneCountry, PhoneNormalizationResult } from '.
 import { createPhoneInputField, PhoneInputField } from './phone-input';
 import { LOCALE_REGISTRY, SUPPORTED_LOCALES, t } from '../i18n';
 import {
-  generateRecoveryCode,
   getAllLocalIdentities,
-  normalizeRecoveryCode,
+  validateAccountEmail,
   validateLocalPin,
-  validateOptionalRecoveryEmail,
-  validateRecoverySecret,
+  validateUsername,
 } from '../identity';
 
 export interface UIEvents {
@@ -61,34 +59,24 @@ export interface UIEvents {
   onUpdateSettings: (settings: AppSettings) => void;
   onDeleteMessagesLocally?: (messageIds: string[]) => void;
   onCreateIdentity?: (params: {
-    displayName: string;
+    username: string;
     phone: string;
+    email: string;
     pin: string;
-    recoveryCode?: string;
-    recoveryEmail?: string;
   }) => Promise<{
     talk2tmId: string;
-    recoveryCode: string;
     e164Phone: string;
+    email: string;
+    emailVerified: boolean;
   }>;
-  onFinishOnboarding?: () => Promise<void>;
-  onRecoverIdentity?: (params: {
-    phone?: string;
-    recoveryEmail?: string;
-    recoveryCode: string;
-    newPin: string;
-  }) => Promise<void>;
+  onCheckEmailActivation?: () => Promise<{ verified: boolean }>;
+  onResendActivationEmail?: () => Promise<{ alreadyVerified: boolean; email: string }>;
+  onCancelPendingActivation?: () => Promise<void>;
   onSendPasswordResetEmail?: (email: string) => Promise<{ email: string }>;
   onCompleteInAppPasswordReset?: (params: {
     oobCode: string;
-    recoveryCode: string;
     newPin: string;
   }) => Promise<void>;
-  onRegenerateRecoveryCode?: (currentPin: string, customRecoveryCode?: string) => Promise<string>;
-  onAssociateRecoveryEmail?: (
-    currentPin: string,
-    email: string
-  ) => Promise<{ status: 'already_active' | 'verification_sent'; email: string }>;
   onChangeLocalPin?: (currentPin: string, newPin: string) => Promise<void>;
   onSendInvite?: (targetPhone: string) => Promise<string | void>;
   onAcceptInvite?: (invite: ConversationInvite) => Promise<void>;
@@ -177,15 +165,18 @@ export class ChatUI {
   private landingSecondaryBtnEl!: HTMLButtonElement;
   private activeReferralInvite: { code: string; referrerDisplayName?: string } | null = null;
 
-  // Tela de Cadastro Ultraminimalista (4 campos + Chave Pessoal de Recuperação + E-mail Opcional)
+  // Tela de Cadastro Único (User + Tel +244 + E-mail + PIN local >= 6 dígitos) + Ativação por Link
   private onboardingViewEl!: HTMLElement;
   private onboardingRefBannerEl!: HTMLElement;
   private onboardingTitleEl!: HTMLElement;
   private onboardingSubtitleEl!: HTMLElement;
   private onboardingFormEl!: HTMLFormElement;
   private onboardingNameInput!: HTMLInputElement;
+  private onboardingUsernameHintEl!: HTMLElement;
   private onboardingPhoneField!: PhoneInputField;
   private onboardingPhonePreviewEl!: HTMLElement;
+  private onboardingEmailInput!: HTMLInputElement;
+  private onboardingEmailHintEl!: HTMLElement;
   private onboardingPinInput!: HTMLInputElement;
   private onboardingPinToggleBtn1El!: HTMLButtonElement;
   private onboardingPinConfirmInput!: HTMLInputElement;
@@ -193,60 +184,28 @@ export class ChatUI {
   private onboardingErrorEl!: HTMLElement;
   private onboardingSubmitBtn!: HTMLButtonElement;
   private onboardingBackBtnEl!: HTMLButtonElement;
-  private recoveryStepBoxEl!: HTMLElement;
-  private onboardingStep2TitleEl!: HTMLElement;
-  private onboardingStep2DescEl!: HTMLElement;
-  private onboardingStep2FormEl!: HTMLFormElement;
-  private onboardingPmUsernameInput!: HTMLInputElement;
-  private onboardingSecretInput!: HTMLInputElement;
-  private onboardingSecretToggleBtn1El!: HTMLButtonElement;
-  private onboardingSecretConfirmInput!: HTMLInputElement;
-  private onboardingSecretToggleBtn2El!: HTMLButtonElement;
-  private onboardingSecretHintEl!: HTMLElement;
-  private onboardingEmailInput!: HTMLInputElement;
-  private onboardingEmailHintEl!: HTMLElement;
-  private onboardingStep2ErrorEl!: HTMLElement;
-  private onboardingStep2SubmitBtn!: HTMLButtonElement;
-  private onboardingGenCodeBtnEl!: HTMLButtonElement;
-  private onboardingBackStep1BtnEl!: HTMLButtonElement;
-  private recoveryStepCodeEl!: HTMLElement;
-  private onboardingCopyCodeBtn!: HTMLButtonElement;
-  private pendingOnboardingDraft: { displayName: string; phone: string; e164Phone: string; pin: string } | null = null;
+  private pendingActivationBoxEl!: HTMLElement;
+  private pendingActivationTitleEl!: HTMLElement;
+  private pendingActivationDescEl!: HTMLElement;
+  private pendingActivationFeedbackEl!: HTMLElement;
+  private pendingActivationCheckBtn!: HTMLButtonElement;
+  private pendingActivationResendBtn!: HTMLButtonElement;
+  private pendingActivationBackBtn!: HTMLButtonElement;
+  private pendingActivationEmail: string = '';
 
-  // Tela de Entrada em Outro Aparelho / Recuperação (Zero Custos)
+  // Tela de Recuperação por E-mail + Conclusão OOB (Novo PIN + Repetir PIN)
   private recoveryViewEl!: HTMLElement;
   private recoveryTitleEl!: HTMLElement;
   private recoverySubtitleEl!: HTMLElement;
   private recoveryMainFormEl!: HTMLFormElement;
-  private recoveryPhoneField!: PhoneInputField;
-  private recoveryPhonePreviewEl!: HTMLElement;
   private recoveryEmailInput!: HTMLInputElement;
   private recoveryEmailHintEl!: HTMLElement;
-  private recoveryCodeInput!: HTMLInputElement;
-  private recoveryKeyToggleBtnEl!: HTMLButtonElement;
-  private recoveryKeyHintEl!: HTMLElement;
-  private recoveryPinInput!: HTMLInputElement;
-  private recoveryPinToggleBtn1El!: HTMLButtonElement;
-  private recoveryPinConfirmInput!: HTMLInputElement;
-  private recoveryPinToggleBtn2El!: HTMLButtonElement;
-  private recoveryErrorEl!: HTMLElement;
+  private recoveryFeedbackEl!: HTMLElement;
   private recoverySubmitBtn!: HTMLButtonElement;
-  private recoveryForgotEmailBtn!: HTMLButtonElement;
   private recoveryBackBtnEl!: HTMLButtonElement;
-  private recoveryResetBoxEl!: HTMLElement;
-  private recoveryResetTitleEl!: HTMLElement;
-  private recoveryResetDescEl!: HTMLElement;
-  private recoveryResetEmailInput!: HTMLInputElement;
-  private recoveryResetFeedbackEl!: HTMLElement;
-  private recoveryResetSubmitBtn!: HTMLButtonElement;
-  private recoveryResetBackBtnEl!: HTMLButtonElement;
   private recoveryOobBoxEl!: HTMLElement;
   private recoveryOobTitleEl!: HTMLElement;
   private recoveryOobEmailLabelEl!: HTMLElement;
-  private recoveryOobSecretInput!: HTMLInputElement;
-  private recoveryOobSecretToggleBtn1El!: HTMLButtonElement;
-  private recoveryOobSecretConfirmInput!: HTMLInputElement;
-  private recoveryOobSecretToggleBtn2El!: HTMLButtonElement;
   private recoveryOobPinInput!: HTMLInputElement;
   private recoveryOobPinToggleBtn1El!: HTMLButtonElement;
   private recoveryOobPinConfirmInput!: HTMLInputElement;
@@ -282,21 +241,7 @@ export class ChatUI {
   private connectSelfTitleEl!: HTMLElement;
   private connectSelfNameEl!: HTMLElement;
   private connectSelfPhoneEl!: HTMLElement;
-  private connectRotateCodeBtnEl!: HTMLButtonElement;
-  private connectRecoveryEmailBtnEl!: HTMLButtonElement;
   private connectChangePinBtnEl!: HTMLButtonElement;
-  private connectRecoveryPanelEl!: HTMLElement;
-  private connectRotHintEl!: HTMLElement;
-  private connectRotCustomInput!: HTMLInputElement;
-  private connectRotPinInput!: HTMLInputElement;
-  private connectRotSubmitBtnEl!: HTMLButtonElement;
-  private connectRotGenBtnEl!: HTMLButtonElement;
-  private connectRotCopyBtnEl!: HTMLButtonElement;
-  private connectEmailPanelEl!: HTMLElement;
-  private connectEmailStatusEl!: HTMLElement;
-  private connectEmailInput!: HTMLInputElement;
-  private connectEmailPinInput!: HTMLInputElement;
-  private connectSaveEmailBtnEl!: HTMLButtonElement;
   private connectPinPanelEl!: HTMLElement;
   private connectCurPinInput!: HTMLInputElement;
   private connectNextPinInput!: HTMLInputElement;
@@ -406,6 +351,20 @@ export class ChatUI {
     itemRefId?: string;
     evidenceSnapshot: string;
   } | null = null;
+
+  // Folha de Partilha / Recomendar a um amigo & Confirmação de Bloqueio
+  private shareSheetModalEl!: HTMLElement;
+  private shareSheetTitleEl!: HTMLElement;
+  private shareSheetDescEl!: HTMLElement;
+  private shareSheetWhatsappEl!: HTMLAnchorElement;
+  private shareSheetCopyBtnEl!: HTMLButtonElement;
+  private shareSheetDismissBtnEl!: HTMLButtonElement;
+
+  private blockedDoneModalEl!: HTMLElement;
+  private blockedDoneTitleEl!: HTMLElement;
+  private blockedDoneDescEl!: HTMLElement;
+  private blockedDoneOkBtnEl!: HTMLButtonElement;
+  private lastBlockedName = '';
 
   private renderedMessageIds: Set<string> = new Set();
   private renderedMessages: Map<string, { msg: Message; isSelf: boolean }> = new Map();
@@ -549,6 +508,8 @@ export class ChatUI {
     this.buildChatView();
     this.buildSettingsModal();
     this.buildReportModal();
+    this.buildShareSheetModal();
+    this.buildBlockedDoneModal();
 
     this.mainEl.appendChild(this.passViewEl);
     this.mainEl.appendChild(this.landingViewEl);
@@ -559,6 +520,8 @@ export class ChatUI {
     this.appWrapper.appendChild(this.mainEl);
     this.appWrapper.appendChild(this.settingsModalEl);
     this.appWrapper.appendChild(this.reportModalEl);
+    this.appWrapper.appendChild(this.shareSheetModalEl);
+    this.appWrapper.appendChild(this.blockedDoneModalEl);
 
     this.container.appendChild(this.appWrapper);
 
@@ -569,7 +532,7 @@ export class ChatUI {
   private createPinInputWithToggle(
     id: string,
     placeholder: string,
-    maxLength: number = 8,
+    maxLength: number = 128,
     autocomplete: AutoFill = 'off'
   ): { wrapper: HTMLElement; input: HTMLInputElement; toggleBtn: HTMLButtonElement } {
     const wrapper = document.createElement('div');
@@ -590,45 +553,6 @@ export class ChatUI {
     toggleBtn.className = 'ttm-toggle-vis-btn';
     toggleBtn.textContent = t('common.show');
     toggleBtn.setAttribute('aria-label', t('pass.pinVisToggleAria'));
-    toggleBtn.addEventListener('click', () => {
-      const showing = input.type === 'text';
-      input.type = showing ? 'password' : 'text';
-      toggleBtn.textContent = showing ? t('common.show') : t('common.hide');
-    });
-
-    wrapper.appendChild(input);
-    wrapper.appendChild(toggleBtn);
-    return { wrapper, input, toggleBtn };
-  }
-
-  private createSecretInputWithToggle(
-    id: string,
-    placeholder: string,
-    maxLength: number = 40,
-    startVisible: boolean = true,
-    autocomplete: AutoFill = 'off',
-    name?: string
-  ): { wrapper: HTMLElement; input: HTMLInputElement; toggleBtn: HTMLButtonElement } {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'ttm-input-group';
-
-    const input = document.createElement('input');
-    input.type = startVisible ? 'text' : 'password';
-    input.id = id;
-    if (name) {
-      input.name = name;
-    }
-    input.className = 'ttm-input ttm-input-left ttm-input-with-toggle';
-    input.placeholder = placeholder;
-    input.maxLength = maxLength;
-    input.autocomplete = autocomplete;
-    input.autocapitalize = 'none';
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.className = 'ttm-toggle-vis-btn';
-    toggleBtn.textContent = startVisible ? t('common.hide') : t('common.show');
-    toggleBtn.setAttribute('aria-label', t('pass.secretVisToggleAria'));
     toggleBtn.addEventListener('click', () => {
       const showing = input.type === 'text';
       input.type = showing ? 'password' : 'text';
@@ -709,12 +633,12 @@ export class ChatUI {
     const pinField = this.createPinInputWithToggle(
       'ttm-single-pass',
       t('pass.pinPlaceholder'),
-      16,
+      128,
       'off'
     );
     this.singlePassInput = pinField.input;
     this.passPinToggleBtnEl = pinField.toggleBtn;
-    this.singlePassInput.maxLength = 32;
+    this.singlePassInput.maxLength = 128;
     this.singlePassInput.inputMode = 'text';
     this.singlePassInput.removeAttribute('pattern');
     this.singlePassInput.addEventListener('input', () => {
@@ -892,8 +816,36 @@ export class ChatUI {
     this.onboardingNameInput.id = 'ttm-onboarding-name';
     this.onboardingNameInput.className = 'ttm-input ttm-input-left';
     this.onboardingNameInput.placeholder = t('onboarding.namePlaceholder');
-    this.onboardingNameInput.maxLength = 30;
-    this.onboardingNameInput.autocomplete = 'name';
+    this.onboardingNameInput.maxLength = 24;
+    this.onboardingNameInput.autocomplete = 'username';
+    this.onboardingNameInput.autocapitalize = 'none';
+
+    this.onboardingUsernameHintEl = document.createElement('div');
+    this.onboardingUsernameHintEl.className = 'ttm-field-hint';
+    this.onboardingUsernameHintEl.textContent = '';
+    this.onboardingUsernameHintEl.style.display = 'none';
+
+    this.onboardingNameInput.addEventListener('input', () => {
+      const raw = this.onboardingNameInput.value;
+      if (!raw.trim()) {
+        this.onboardingUsernameHintEl.textContent = '';
+        this.onboardingUsernameHintEl.style.display = 'none';
+        this.onboardingUsernameHintEl.classList.remove('is-valid', 'is-invalid');
+        return;
+      }
+      const check = validateUsername(raw);
+      if (check.valid) {
+        this.onboardingUsernameHintEl.textContent = `@${check.username}`;
+        this.onboardingUsernameHintEl.style.display = 'block';
+        this.onboardingUsernameHintEl.classList.add('is-valid');
+        this.onboardingUsernameHintEl.classList.remove('is-invalid');
+      } else {
+        this.onboardingUsernameHintEl.textContent = check.error || t('err.usernameFormat');
+        this.onboardingUsernameHintEl.style.display = 'block';
+        this.onboardingUsernameHintEl.classList.add('is-invalid');
+        this.onboardingUsernameHintEl.classList.remove('is-valid');
+      }
+    });
 
     this.onboardingPhonePreviewEl = document.createElement('div');
     this.onboardingPhonePreviewEl.className = 'ttm-field-hint';
@@ -914,110 +866,10 @@ export class ChatUI {
       'onboarding'
     );
 
-    const pin1 = this.createPinInputWithToggle(
-      'ttm-onboarding-pin',
-      t('onboarding.pinPlaceholder'),
-      8,
-      'off'
-    );
-    this.onboardingPinInput = pin1.input;
-    this.onboardingPinToggleBtn1El = pin1.toggleBtn;
-
-    const pin2 = this.createPinInputWithToggle(
-      'ttm-onboarding-pin-confirm',
-      t('onboarding.pinConfirmPlaceholder'),
-      8,
-      'off'
-    );
-    this.onboardingPinConfirmInput = pin2.input;
-    this.onboardingPinToggleBtn2El = pin2.toggleBtn;
-
-    this.onboardingErrorEl = document.createElement('div');
-    this.onboardingErrorEl.className = 'ttm-error';
-    this.onboardingErrorEl.textContent = '';
-
-    this.onboardingSubmitBtn = document.createElement('button');
-    this.onboardingSubmitBtn.type = 'submit';
-    this.onboardingSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.onboardingSubmitBtn.textContent = t('onboarding.continueBtn');
-
-    const backBtn = document.createElement('button');
-    backBtn.type = 'button';
-    backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    backBtn.textContent = t('common.back');
-    backBtn.addEventListener('click', () => {
-      this.returnToEntryScreen();
-    });
-    this.onboardingBackBtnEl = backBtn;
-
-    this.onboardingFormEl.appendChild(this.onboardingNameInput);
-    this.onboardingFormEl.appendChild(this.onboardingPhoneField.wrapper);
-    this.onboardingFormEl.appendChild(this.onboardingPhonePreviewEl);
-    this.onboardingFormEl.appendChild(pin1.wrapper);
-    this.onboardingFormEl.appendChild(pin2.wrapper);
-    this.onboardingFormEl.appendChild(this.onboardingErrorEl);
-    this.onboardingFormEl.appendChild(this.onboardingSubmitBtn);
-    this.onboardingFormEl.appendChild(backBtn);
-
-    // Passo 2: Definir Chave Pessoal (compatível com Gestor de Senhas nativo) + E-mail de recuperação opcional
-    this.recoveryStepBoxEl = document.createElement('div');
-    this.recoveryStepBoxEl.className = 'ttm-recovery-confirm-box';
-    this.recoveryStepBoxEl.style.display = 'none';
-
-    const recTitle = document.createElement('div');
-    recTitle.className = 'ttm-recovery-title';
-    recTitle.textContent = t('onboarding.step2Title');
-    this.onboardingStep2TitleEl = recTitle;
-
-    const recDesc = document.createElement('p');
-    recDesc.className = 'ttm-onboarding-tip';
-    recDesc.textContent = t('onboarding.step2Desc');
-    this.onboardingStep2DescEl = recDesc;
-
-    this.onboardingStep2FormEl = document.createElement('form');
-    this.onboardingStep2FormEl.className = 'ttm-form';
-
-    // Campo username somente leitura para o Gestor de Senhas nativo (Google / Apple Keychain) guardar Telefone + Chave Pessoal
-    this.onboardingPmUsernameInput = document.createElement('input');
-    this.onboardingPmUsernameInput.type = 'text';
-    this.onboardingPmUsernameInput.id = 'ttm-onboarding-username';
-    this.onboardingPmUsernameInput.name = 'username';
-    this.onboardingPmUsernameInput.autocomplete = 'username';
-    this.onboardingPmUsernameInput.readOnly = true;
-    this.onboardingPmUsernameInput.tabIndex = -1;
-    this.onboardingPmUsernameInput.className = 'ttm-input ttm-input-left ttm-pm-username';
-    this.onboardingPmUsernameInput.setAttribute('aria-label', t('onboarding.pmPhoneAria'));
-
-    const sec1 = this.createSecretInputWithToggle(
-      'ttm-onboarding-secret',
-      t('onboarding.secretPlaceholder'),
-      40,
-      false,
-      'new-password',
-      'password'
-    );
-    this.onboardingSecretInput = sec1.input;
-    this.onboardingSecretToggleBtn1El = sec1.toggleBtn;
-
-    this.onboardingSecretHintEl = document.createElement('div');
-    this.onboardingSecretHintEl.className = 'ttm-field-hint';
-    this.onboardingSecretHintEl.textContent = '';
-    this.onboardingSecretHintEl.style.display = 'none';
-
-    const sec2 = this.createSecretInputWithToggle(
-      'ttm-onboarding-secret-confirm',
-      t('onboarding.secretConfirmPlaceholder'),
-      40,
-      false,
-      'new-password'
-    );
-    this.onboardingSecretConfirmInput = sec2.input;
-    this.onboardingSecretToggleBtn2El = sec2.toggleBtn;
-
     this.onboardingEmailInput = document.createElement('input');
     this.onboardingEmailInput.type = 'email';
     this.onboardingEmailInput.id = 'ttm-onboarding-email';
-    this.onboardingEmailInput.name = 'recovery-email';
+    this.onboardingEmailInput.name = 'email';
     this.onboardingEmailInput.className = 'ttm-input ttm-input-left';
     this.onboardingEmailInput.placeholder = t('onboarding.emailPlaceholder');
     this.onboardingEmailInput.maxLength = 120;
@@ -1037,7 +889,7 @@ export class ChatUI {
         this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
         return;
       }
-      const check = validateOptionalRecoveryEmail(raw);
+      const check = validateAccountEmail(raw);
       if (check.valid && check.email) {
         this.onboardingEmailHintEl.textContent = '';
         this.onboardingEmailHintEl.style.display = 'none';
@@ -1051,127 +903,164 @@ export class ChatUI {
       }
     });
 
-    this.recoveryStepCodeEl = document.createElement('div');
-    this.recoveryStepCodeEl.className = 'ttm-code-badge ttm-code-badge-compact';
-    this.recoveryStepCodeEl.style.display = 'none';
+    const pin1 = this.createPinInputWithToggle(
+      'ttm-onboarding-pin',
+      t('onboarding.pinPlaceholder'),
+      128,
+      'off'
+    );
+    this.onboardingPinInput = pin1.input;
+    this.onboardingPinToggleBtn1El = pin1.toggleBtn;
 
-    this.onboardingCopyCodeBtn = document.createElement('button');
-    this.onboardingCopyCodeBtn.type = 'button';
-    this.onboardingCopyCodeBtn.className = 'ttm-btn ttm-btn-secondary';
-    this.onboardingCopyCodeBtn.textContent = t('onboarding.copyCodeBtn');
-    this.onboardingCopyCodeBtn.style.display = 'none';
-    this.onboardingCopyCodeBtn.addEventListener('click', async () => {
-      const code = this.recoveryStepCodeEl.textContent || '';
-      if (!code) return;
-      await navigator.clipboard?.writeText(code).catch(() => {});
-      this.onboardingSecretHintEl.textContent = t('onboarding.codeCopied');
-      this.onboardingSecretHintEl.style.display = 'block';
-      this.onboardingSecretHintEl.classList.add('is-valid');
-      this.onboardingSecretHintEl.classList.remove('is-invalid');
+    const pin2 = this.createPinInputWithToggle(
+      'ttm-onboarding-pin-confirm',
+      t('onboarding.pinConfirmPlaceholder'),
+      128,
+      'off'
+    );
+    this.onboardingPinConfirmInput = pin2.input;
+    this.onboardingPinToggleBtn2El = pin2.toggleBtn;
+
+    this.onboardingErrorEl = document.createElement('div');
+    this.onboardingErrorEl.className = 'ttm-error';
+    this.onboardingErrorEl.textContent = '';
+
+    this.onboardingSubmitBtn = document.createElement('button');
+    this.onboardingSubmitBtn.type = 'submit';
+    this.onboardingSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.onboardingSubmitBtn.textContent = t('onboarding.createEnterBtn');
+
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    backBtn.textContent = t('common.back');
+    backBtn.addEventListener('click', () => {
+      this.returnToEntryScreen();
     });
+    this.onboardingBackBtnEl = backBtn;
 
-    this.onboardingSecretInput.addEventListener('input', () => {
-      const raw = this.onboardingSecretInput.value;
-      if (!raw.trim()) {
-        this.onboardingSecretHintEl.textContent = '';
-        this.onboardingSecretHintEl.style.display = 'none';
-        this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
-        return;
+    this.onboardingFormEl.appendChild(this.onboardingNameInput);
+    this.onboardingFormEl.appendChild(this.onboardingUsernameHintEl);
+    this.onboardingFormEl.appendChild(this.onboardingPhoneField.wrapper);
+    this.onboardingFormEl.appendChild(this.onboardingPhonePreviewEl);
+    this.onboardingFormEl.appendChild(this.onboardingEmailInput);
+    this.onboardingFormEl.appendChild(this.onboardingEmailHintEl);
+    this.onboardingFormEl.appendChild(pin1.wrapper);
+    this.onboardingFormEl.appendChild(pin2.wrapper);
+    this.onboardingFormEl.appendChild(this.onboardingErrorEl);
+    this.onboardingFormEl.appendChild(this.onboardingSubmitBtn);
+    this.onboardingFormEl.appendChild(backBtn);
+
+    // Painel de Ativação Pendente por E-mail (bloqueia entrada até clicar no link de ativação)
+    this.pendingActivationBoxEl = document.createElement('div');
+    this.pendingActivationBoxEl.className = 'ttm-recovery-confirm-box';
+    this.pendingActivationBoxEl.style.display = 'none';
+
+    this.pendingActivationTitleEl = document.createElement('div');
+    this.pendingActivationTitleEl.className = 'ttm-recovery-title';
+    this.pendingActivationTitleEl.textContent = t('activation.title');
+
+    this.pendingActivationDescEl = document.createElement('p');
+    this.pendingActivationDescEl.className = 'ttm-onboarding-tip';
+    this.pendingActivationDescEl.textContent = '';
+
+    this.pendingActivationFeedbackEl = document.createElement('div');
+    this.pendingActivationFeedbackEl.className = 'ttm-field-hint';
+    this.pendingActivationFeedbackEl.textContent = '';
+
+    this.pendingActivationCheckBtn = document.createElement('button');
+    this.pendingActivationCheckBtn.type = 'button';
+    this.pendingActivationCheckBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
+    this.pendingActivationCheckBtn.textContent = t('activation.checkBtn');
+    this.pendingActivationCheckBtn.addEventListener('click', async () => {
+      if (!this.events.onCheckEmailActivation) return;
+      this.pendingActivationFeedbackEl.textContent = '';
+      this.pendingActivationFeedbackEl.classList.remove('is-valid', 'is-invalid');
+      this.pendingActivationCheckBtn.disabled = true;
+      this.pendingActivationCheckBtn.textContent = t('activation.checkingBtn');
+      try {
+        const res = await this.events.onCheckEmailActivation();
+        if (!res.verified) {
+          this.pendingActivationFeedbackEl.textContent = t('activation.notYetConfirmed');
+          this.pendingActivationFeedbackEl.classList.add('is-invalid');
+        }
+      } catch (err: any) {
+        this.pendingActivationFeedbackEl.textContent = this.extractReadableError(err);
+        this.pendingActivationFeedbackEl.classList.add('is-invalid');
+      } finally {
+        this.pendingActivationCheckBtn.disabled = false;
+        this.pendingActivationCheckBtn.textContent = t('activation.checkBtn');
       }
-      const check = validateRecoverySecret(raw, this.pendingOnboardingDraft?.pin);
-      this.onboardingSecretHintEl.style.display = 'block';
-      if (check.valid) {
-        this.onboardingSecretHintEl.textContent = t('onboarding.secretValid', {
-          count: check.normalized.length,
-        });
-        this.onboardingSecretHintEl.classList.add('is-valid');
-        this.onboardingSecretHintEl.classList.remove('is-invalid');
-      } else {
-        this.onboardingSecretHintEl.textContent = check.error || t('onboarding.secretInvalid');
-        this.onboardingSecretHintEl.classList.add('is-invalid');
-        this.onboardingSecretHintEl.classList.remove('is-valid');
+    });
+
+    this.pendingActivationResendBtn = document.createElement('button');
+    this.pendingActivationResendBtn.type = 'button';
+    this.pendingActivationResendBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    this.pendingActivationResendBtn.textContent = t('activation.resendBtn');
+    this.pendingActivationResendBtn.addEventListener('click', async () => {
+      if (!this.events.onResendActivationEmail) return;
+      this.pendingActivationFeedbackEl.textContent = '';
+      this.pendingActivationFeedbackEl.classList.remove('is-valid', 'is-invalid');
+      this.pendingActivationResendBtn.disabled = true;
+      this.pendingActivationResendBtn.textContent = t('activation.resendingBtn');
+      try {
+        const res = await this.events.onResendActivationEmail();
+        if (!res.alreadyVerified) {
+          this.pendingActivationFeedbackEl.textContent = t('activation.resentNotice', {
+            email: res.email || this.pendingActivationEmail,
+          });
+          this.pendingActivationFeedbackEl.classList.add('is-valid');
+        }
+      } catch (err: any) {
+        this.pendingActivationFeedbackEl.textContent = this.extractReadableError(err);
+        this.pendingActivationFeedbackEl.classList.add('is-invalid');
+      } finally {
+        this.pendingActivationResendBtn.disabled = false;
+        this.pendingActivationResendBtn.textContent = t('activation.resendBtn');
       }
     });
 
-    this.onboardingStep2ErrorEl = document.createElement('div');
-    this.onboardingStep2ErrorEl.className = 'ttm-error';
-    this.onboardingStep2ErrorEl.textContent = '';
-
-    this.onboardingStep2SubmitBtn = document.createElement('button');
-    this.onboardingStep2SubmitBtn.type = 'submit';
-    this.onboardingStep2SubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
-
-    const genRandomBtn = document.createElement('button');
-    genRandomBtn.type = 'button';
-    genRandomBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-step2-sub';
-    genRandomBtn.textContent = t('onboarding.genCodeBtn');
-    genRandomBtn.addEventListener('click', () => {
-      const generated = generateRecoveryCode();
-      this.onboardingSecretInput.value = generated;
-      this.onboardingSecretConfirmInput.value = generated;
-      this.recoveryStepCodeEl.textContent = generated;
-      this.recoveryStepCodeEl.style.display = 'block';
-      this.onboardingCopyCodeBtn.style.display = 'inline-block';
-      this.onboardingSecretHintEl.textContent = t('onboarding.genCodeApplied');
-      this.onboardingSecretHintEl.style.display = 'block';
-      this.onboardingSecretHintEl.classList.add('is-valid');
-      this.onboardingSecretHintEl.classList.remove('is-invalid');
-      this.onboardingStep2ErrorEl.textContent = '';
+    this.pendingActivationBackBtn = document.createElement('button');
+    this.pendingActivationBackBtn.type = 'button';
+    this.pendingActivationBackBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
+    this.pendingActivationBackBtn.textContent = t('common.back');
+    this.pendingActivationBackBtn.addEventListener('click', () => {
+      void this.events.onCancelPendingActivation?.();
     });
-    this.onboardingGenCodeBtnEl = genRandomBtn;
 
-    const backStep1Btn = document.createElement('button');
-    backStep1Btn.type = 'button';
-    backStep1Btn.className = 'ttm-btn ttm-btn-secondary ttm-btn-step2-sub';
-    backStep1Btn.textContent = t('onboarding.backStep1Btn');
-    backStep1Btn.addEventListener('click', () => {
-      this.recoveryStepBoxEl.style.display = 'none';
-      this.onboardingFormEl.style.display = 'flex';
-      this.onboardingSubtitleEl.style.display = '';
-      this.onboardingStep2ErrorEl.textContent = '';
-    });
-    this.onboardingBackStep1BtnEl = backStep1Btn;
-
-    const step2ActionsRow = document.createElement('div');
-    step2ActionsRow.className = 'ttm-step2-actions';
-    step2ActionsRow.appendChild(backStep1Btn);
-    step2ActionsRow.appendChild(genRandomBtn);
-
-    this.onboardingStep2FormEl.appendChild(this.onboardingPmUsernameInput);
-    this.onboardingStep2FormEl.appendChild(sec1.wrapper);
-    this.onboardingStep2FormEl.appendChild(this.onboardingSecretHintEl);
-    this.onboardingStep2FormEl.appendChild(sec2.wrapper);
-    this.onboardingStep2FormEl.appendChild(this.onboardingEmailInput);
-    this.onboardingStep2FormEl.appendChild(this.onboardingEmailHintEl);
-    this.onboardingStep2FormEl.appendChild(this.recoveryStepCodeEl);
-    this.onboardingStep2FormEl.appendChild(this.onboardingCopyCodeBtn);
-    this.onboardingStep2FormEl.appendChild(this.onboardingStep2ErrorEl);
-    this.onboardingStep2FormEl.appendChild(this.onboardingStep2SubmitBtn);
-    this.onboardingStep2FormEl.appendChild(step2ActionsRow);
-
-    this.recoveryStepBoxEl.appendChild(recTitle);
-    this.recoveryStepBoxEl.appendChild(recDesc);
-    this.recoveryStepBoxEl.appendChild(this.onboardingStep2FormEl);
+    this.pendingActivationBoxEl.appendChild(this.pendingActivationTitleEl);
+    this.pendingActivationBoxEl.appendChild(this.pendingActivationDescEl);
+    this.pendingActivationBoxEl.appendChild(this.pendingActivationFeedbackEl);
+    this.pendingActivationBoxEl.appendChild(this.pendingActivationCheckBtn);
+    this.pendingActivationBoxEl.appendChild(this.pendingActivationResendBtn);
+    this.pendingActivationBoxEl.appendChild(this.pendingActivationBackBtn);
 
     this.onboardingFormEl.addEventListener('submit', async (e) => {
       e.preventDefault();
       this.onboardingErrorEl.textContent = '';
 
-      const displayName = this.onboardingNameInput.value.trim();
-      const pin = this.onboardingPinInput.value.trim();
-      const pinConfirm = this.onboardingPinConfirmInput.value.trim();
-
-      if (!displayName) {
-        this.onboardingErrorEl.textContent = t('onboarding.errNameRequired');
+      const userCheck = validateUsername(this.onboardingNameInput.value);
+      if (!userCheck.valid) {
+        this.onboardingErrorEl.textContent = userCheck.error || t('onboarding.errNameRequired');
         return;
       }
+
       const phoneCheck = this.onboardingPhoneField.validate();
       if (!phoneCheck.valid || !phoneCheck.e164) {
         this.onboardingErrorEl.textContent = phoneCheck.error || t('onboarding.errPhoneInvalid');
         return;
       }
-      if (!/^\d{4,8}$/.test(pin)) {
+
+      const emailCheck = validateAccountEmail(this.onboardingEmailInput.value);
+      if (!emailCheck.valid || !emailCheck.email) {
+        this.onboardingErrorEl.textContent = emailCheck.error || t('onboarding.errEmailInvalid');
+        return;
+      }
+
+      const pin = this.onboardingPinInput.value.trim();
+      const pinConfirm = this.onboardingPinConfirmInput.value.trim();
+
+      if (!/^\d{6,}$/.test(pin)) {
         this.onboardingErrorEl.textContent = t('onboarding.errPinFormat');
         return;
       }
@@ -1185,72 +1074,26 @@ export class ChatUI {
         return;
       }
 
-      this.pendingOnboardingDraft = {
-        displayName,
-        phone: phoneCheck.e164,
-        e164Phone: phoneCheck.e164,
-        pin,
-      };
-      this.onboardingPmUsernameInput.value = phoneCheck.e164;
-      this.onboardingFormEl.style.display = 'none';
-      this.onboardingSubtitleEl.style.display = 'none';
-      this.recoveryStepBoxEl.style.display = 'flex';
-      this.onboardingStep2ErrorEl.textContent = '';
-      setTimeout(() => {
-        this.onboardingSecretInput.focus();
-      }, 80);
-    });
-
-    this.onboardingStep2FormEl.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      this.onboardingStep2ErrorEl.textContent = '';
-
-      const draft = this.pendingOnboardingDraft;
-      if (!draft) {
-        this.recoveryStepBoxEl.style.display = 'none';
-        this.onboardingFormEl.style.display = 'flex';
-        this.onboardingSubtitleEl.style.display = '';
-        return;
-      }
-
-      const secret = this.onboardingSecretInput.value.trim();
-      const secretConfirm = this.onboardingSecretConfirmInput.value.trim();
-      const recoveryEmailRaw = this.onboardingEmailInput.value.trim();
-
-      const check = validateRecoverySecret(secret, draft.pin);
-      if (!check.valid) {
-        this.onboardingStep2ErrorEl.textContent = check.error || t('onboarding.errSecretInvalid');
-        return;
-      }
-      if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
-        this.onboardingStep2ErrorEl.textContent = t('onboarding.errSecretMismatch');
-        return;
-      }
-      const emailCheck = validateOptionalRecoveryEmail(recoveryEmailRaw);
-      if (!emailCheck.valid) {
-        this.onboardingStep2ErrorEl.textContent = emailCheck.error || t('onboarding.errEmailInvalid');
-        return;
-      }
-
-      if (this.events.onCreateIdentity) {
-        this.onboardingStep2SubmitBtn.disabled = true;
-        this.onboardingStep2SubmitBtn.textContent = t('onboarding.creatingBtn');
-        try {
-          await this.events.onCreateIdentity({
-            displayName: draft.displayName,
-            phone: draft.phone,
-            pin: draft.pin,
-            recoveryCode: secret,
-            recoveryEmail: emailCheck.email,
-          });
-          this.pendingOnboardingDraft = null;
-          await this.events.onFinishOnboarding?.();
-        } catch (err: any) {
-          this.onboardingStep2ErrorEl.textContent = this.extractReadableError(err);
-        } finally {
-          this.onboardingStep2SubmitBtn.disabled = false;
-          this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
+      if (!this.events.onCreateIdentity) return;
+      this.onboardingSubmitBtn.disabled = true;
+      this.onboardingSubmitBtn.textContent = t('onboarding.creatingBtn');
+      try {
+        const res = await this.events.onCreateIdentity({
+          username: userCheck.username,
+          phone: phoneCheck.e164,
+          email: emailCheck.email,
+          pin,
+        });
+        if (res.emailVerified) {
+          await this.events.onCheckEmailActivation?.();
+        } else {
+          this.showPendingActivationView(res.email, userCheck.username);
         }
+      } catch (err: any) {
+        this.onboardingErrorEl.textContent = this.extractReadableError(err);
+      } finally {
+        this.onboardingSubmitBtn.disabled = false;
+        this.onboardingSubmitBtn.textContent = t('onboarding.createEnterBtn');
       }
     });
 
@@ -1258,15 +1101,14 @@ export class ChatUI {
     cardEl.appendChild(subtitleEl);
     cardEl.appendChild(this.onboardingRefBannerEl);
     cardEl.appendChild(this.onboardingFormEl);
-    cardEl.appendChild(this.recoveryStepBoxEl);
+    cardEl.appendChild(this.pendingActivationBoxEl);
     this.onboardingViewEl.appendChild(cardEl);
   }
 
   /**
-   * Entrada em Outro Aparelho / Recuperação gratuita:
-   * 1. Telefone (+ E-mail se associou) + Chave Pessoal + PIN (com Gestor de Senhas nativo)
-   * 2. Link gratuito de redefinição por e-mail para quem associou e-mail opcional
-   * 3. Conclusão in-app caso seja aberto diretamente via ?mode=resetPassword&oobCode=...
+   * Recuperação de Acesso (exclusivamente via link de e-mail):
+   * 1. Formulário principal com um único campo: E-mail associado à conta
+   * 2. Conclusão in-app ao abrir ?mode=resetPassword&oobCode=... com apenas Novo PIN + Repetir PIN
    */
   private buildRecoveryView(): void {
     this.recoveryViewEl = document.createElement('div');
@@ -1290,30 +1132,10 @@ export class ChatUI {
     this.recoveryMainFormEl = document.createElement('form');
     this.recoveryMainFormEl.className = 'ttm-form';
 
-    this.recoveryPhonePreviewEl = document.createElement('div');
-    this.recoveryPhonePreviewEl.className = 'ttm-field-hint';
-
-    this.recoveryPhoneField = createPhoneInputField({
-      id: 'ttm-recovery-phone',
-      name: 'username',
-      placeholder: t('recovery.phonePlaceholder'),
-      autocomplete: 'username',
-      onChange: (raw, res, country) => {
-        this.updatePhonePreview(raw, res, country, this.recoveryPhonePreviewEl, 'recovery');
-      },
-    });
-    this.updatePhonePreview(
-      '',
-      { valid: false },
-      this.recoveryPhoneField.getCountry(),
-      this.recoveryPhonePreviewEl,
-      'recovery'
-    );
-
     this.recoveryEmailInput = document.createElement('input');
     this.recoveryEmailInput.type = 'email';
     this.recoveryEmailInput.id = 'ttm-recovery-email';
-    this.recoveryEmailInput.name = 'recovery-email';
+    this.recoveryEmailInput.name = 'email';
     this.recoveryEmailInput.className = 'ttm-input ttm-input-left';
     this.recoveryEmailInput.placeholder = t('recovery.emailPlaceholder');
     this.recoveryEmailInput.maxLength = 120;
@@ -1325,64 +1147,14 @@ export class ChatUI {
     recoveryEmailHint.textContent = t('recovery.emailHint');
     this.recoveryEmailHintEl = recoveryEmailHint;
 
-    const recKeyField = this.createSecretInputWithToggle(
-      'ttm-recovery-code',
-      t('recovery.keyPlaceholder'),
-      40,
-      false,
-      'current-password',
-      'password'
-    );
-    this.recoveryCodeInput = recKeyField.input;
-    this.recoveryKeyToggleBtnEl = recKeyField.toggleBtn;
-
-    const recKeyHintEl = document.createElement('div');
-    recKeyHintEl.className = 'ttm-field-hint';
-    recKeyHintEl.textContent = t('recovery.keyHint');
-    this.recoveryKeyHintEl = recKeyHintEl;
-
-    const newPin1 = this.createPinInputWithToggle(
-      'ttm-recovery-pin',
-      t('recovery.pinPlaceholder'),
-      8,
-      'off'
-    );
-    this.recoveryPinInput = newPin1.input;
-    this.recoveryPinToggleBtn1El = newPin1.toggleBtn;
-
-    const newPin2 = this.createPinInputWithToggle(
-      'ttm-recovery-pin-confirm',
-      t('recovery.pinConfirmPlaceholder'),
-      8,
-      'off'
-    );
-    this.recoveryPinConfirmInput = newPin2.input;
-    this.recoveryPinToggleBtn2El = newPin2.toggleBtn;
-
-    this.recoveryErrorEl = document.createElement('div');
-    this.recoveryErrorEl.className = 'ttm-error';
-    this.recoveryErrorEl.textContent = '';
+    this.recoveryFeedbackEl = document.createElement('div');
+    this.recoveryFeedbackEl.className = 'ttm-field-hint';
+    this.recoveryFeedbackEl.textContent = '';
 
     this.recoverySubmitBtn = document.createElement('button');
     this.recoverySubmitBtn.type = 'submit';
     this.recoverySubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
-
-    this.recoveryForgotEmailBtn = document.createElement('button');
-    this.recoveryForgotEmailBtn.type = 'button';
-    this.recoveryForgotEmailBtn.className = 'ttm-btn ttm-btn-secondary';
-    this.recoveryForgotEmailBtn.textContent = t('recovery.forgotKeyBtn');
-    this.recoveryForgotEmailBtn.addEventListener('click', () => {
-      this.recoveryMainFormEl.style.display = 'none';
-      this.recoveryOobBoxEl.style.display = 'none';
-      this.recoveryResetBoxEl.style.display = 'flex';
-      this.recoveryResetEmailInput.value = this.recoveryEmailInput.value.trim();
-      this.recoveryResetFeedbackEl.textContent = '';
-      this.recoveryResetFeedbackEl.classList.remove('is-valid', 'is-invalid');
-      setTimeout(() => {
-        this.recoveryResetEmailInput.focus();
-      }, 80);
-    });
+    this.recoverySubmitBtn.textContent = t('recovery.resetSendBtn');
 
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
@@ -1393,167 +1165,43 @@ export class ChatUI {
     });
     this.recoveryBackBtnEl = backBtn;
 
-    this.recoveryMainFormEl.appendChild(this.recoveryPhoneField.wrapper);
-    this.recoveryMainFormEl.appendChild(this.recoveryPhonePreviewEl);
     this.recoveryMainFormEl.appendChild(this.recoveryEmailInput);
     this.recoveryMainFormEl.appendChild(recoveryEmailHint);
-    this.recoveryMainFormEl.appendChild(recKeyField.wrapper);
-    this.recoveryMainFormEl.appendChild(recKeyHintEl);
-    this.recoveryMainFormEl.appendChild(newPin1.wrapper);
-    this.recoveryMainFormEl.appendChild(newPin2.wrapper);
-    this.recoveryMainFormEl.appendChild(this.recoveryErrorEl);
+    this.recoveryMainFormEl.appendChild(this.recoveryFeedbackEl);
     this.recoveryMainFormEl.appendChild(this.recoverySubmitBtn);
-    this.recoveryMainFormEl.appendChild(this.recoveryForgotEmailBtn);
     this.recoveryMainFormEl.appendChild(backBtn);
 
     this.recoveryMainFormEl.addEventListener('submit', async (e) => {
       e.preventDefault();
-      this.recoveryErrorEl.textContent = '';
+      this.recoveryFeedbackEl.textContent = '';
+      this.recoveryFeedbackEl.classList.remove('is-valid', 'is-invalid');
 
-      const rawPhone = this.recoveryPhoneField.getValue();
-      const recoveryEmail = this.recoveryEmailInput.value.trim();
-      const recoveryCode = this.recoveryCodeInput.value.trim();
-      const newPin = this.recoveryPinInput.value.trim();
-      const confirmPin = this.recoveryPinConfirmInput.value.trim();
-
-      if (!rawPhone && !recoveryEmail) {
-        this.recoveryErrorEl.textContent = t('recovery.errMissingPhoneOrEmail');
-        return;
-      }
-      let normalizedPhone: string | undefined;
-      if (rawPhone) {
-        const phoneCheck = this.recoveryPhoneField.validate();
-        if (!phoneCheck.valid || !phoneCheck.e164) {
-          this.recoveryErrorEl.textContent = phoneCheck.error || t('onboarding.errPhoneInvalid');
-          return;
-        }
-        normalizedPhone = phoneCheck.e164;
-      }
-      const emailCheck = validateOptionalRecoveryEmail(recoveryEmail);
-      if (!emailCheck.valid) {
-        this.recoveryErrorEl.textContent = emailCheck.error || t('onboarding.errEmailInvalid');
-        return;
-      }
-      if (normalizeRecoveryCode(recoveryCode).length < 6 && recoveryCode.length < 6) {
-        this.recoveryErrorEl.textContent = t('recovery.errSecretMissing');
-        return;
-      }
-      if (!/^\d{4,8}$/.test(newPin)) {
-        this.recoveryErrorEl.textContent = t('onboarding.errPinFormat');
-        return;
-      }
-      if (newPin !== confirmPin) {
-        this.recoveryErrorEl.textContent = t('onboarding.errPinMismatch');
-        return;
-      }
-
-      if (this.events.onRecoverIdentity) {
-        this.recoverySubmitBtn.disabled = true;
-        this.recoverySubmitBtn.textContent = t('recovery.submittingBtn');
-        try {
-          await this.events.onRecoverIdentity({
-            phone: normalizedPhone,
-            recoveryEmail: emailCheck.email,
-            recoveryCode,
-            newPin,
-          });
-        } catch (err: any) {
-          this.recoveryErrorEl.textContent = this.extractReadableError(err);
-        } finally {
-          this.recoverySubmitBtn.disabled = false;
-          this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
-        }
-      }
-    });
-
-    // Painel 2: Pedir link gratuito de redefinição por e-mail (Firebase Auth nativo)
-    this.recoveryResetBoxEl = document.createElement('div');
-    this.recoveryResetBoxEl.className = 'ttm-recovery-confirm-box';
-    this.recoveryResetBoxEl.style.display = 'none';
-
-    const resetBoxTitle = document.createElement('div');
-    resetBoxTitle.className = 'ttm-recovery-title';
-    resetBoxTitle.textContent = t('recovery.resetTitle');
-    this.recoveryResetTitleEl = resetBoxTitle;
-
-    const resetBoxDesc = document.createElement('p');
-    resetBoxDesc.className = 'ttm-onboarding-tip';
-    resetBoxDesc.textContent = t('recovery.resetDesc');
-    this.recoveryResetDescEl = resetBoxDesc;
-
-    const resetForm = document.createElement('form');
-    resetForm.className = 'ttm-form';
-
-    this.recoveryResetEmailInput = document.createElement('input');
-    this.recoveryResetEmailInput.type = 'email';
-    this.recoveryResetEmailInput.className = 'ttm-input ttm-input-left';
-    this.recoveryResetEmailInput.placeholder = t('recovery.resetEmailPlaceholder');
-    this.recoveryResetEmailInput.maxLength = 120;
-    this.recoveryResetEmailInput.autocomplete = 'email';
-    this.recoveryResetEmailInput.inputMode = 'email';
-
-    this.recoveryResetFeedbackEl = document.createElement('div');
-    this.recoveryResetFeedbackEl.className = 'ttm-field-hint';
-    this.recoveryResetFeedbackEl.textContent = '';
-
-    this.recoveryResetSubmitBtn = document.createElement('button');
-    this.recoveryResetSubmitBtn.type = 'submit';
-    this.recoveryResetSubmitBtn.className = 'ttm-btn ttm-btn-primary ttm-btn-large';
-    this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendBtn');
-
-    const resetBackBtn = document.createElement('button');
-    resetBackBtn.type = 'button';
-    resetBackBtn.className = 'ttm-btn ttm-btn-secondary ttm-btn-large';
-    resetBackBtn.textContent = t('recovery.resetDoneBackBtn');
-    resetBackBtn.addEventListener('click', () => {
-      const typedEmail = this.recoveryResetEmailInput.value.trim();
-      if (typedEmail) {
-        this.recoveryEmailInput.value = typedEmail;
-      }
-      this.recoveryResetBoxEl.style.display = 'none';
-      this.recoveryMainFormEl.style.display = 'flex';
-    });
-    this.recoveryResetBackBtnEl = resetBackBtn;
-
-    resetForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      this.recoveryResetFeedbackEl.textContent = '';
-      this.recoveryResetFeedbackEl.classList.remove('is-valid', 'is-invalid');
-
-      const rawEmail = this.recoveryResetEmailInput.value.trim();
-      const emailCheck = validateOptionalRecoveryEmail(rawEmail);
+      const rawEmail = this.recoveryEmailInput.value.trim();
+      const emailCheck = validateAccountEmail(rawEmail);
       if (!emailCheck.valid || !emailCheck.email) {
-        this.recoveryResetFeedbackEl.textContent = emailCheck.error || t('recovery.resetValidEmail');
-        this.recoveryResetFeedbackEl.classList.add('is-invalid');
+        this.recoveryFeedbackEl.textContent = emailCheck.error || t('recovery.resetValidEmail');
+        this.recoveryFeedbackEl.classList.add('is-invalid');
         return;
       }
 
       if (!this.events.onSendPasswordResetEmail) return;
-      this.recoveryResetSubmitBtn.disabled = true;
-      this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendingBtn');
+      this.recoverySubmitBtn.disabled = true;
+      this.recoverySubmitBtn.textContent = t('recovery.resetSendingBtn');
       try {
         const res = await this.events.onSendPasswordResetEmail(emailCheck.email);
-        this.recoveryEmailInput.value = res.email;
-        this.recoveryResetFeedbackEl.textContent = t('recovery.resetSent', { email: res.email });
-        this.recoveryResetFeedbackEl.classList.add('is-valid');
+        this.recoveryFeedbackEl.textContent = t('recovery.resetSent', { email: res.email });
+        this.recoveryFeedbackEl.classList.add('is-valid');
       } catch (err: any) {
-        this.recoveryResetFeedbackEl.textContent = this.extractReadableError(err);
-        this.recoveryResetFeedbackEl.classList.add('is-invalid');
+        this.recoveryFeedbackEl.textContent = this.extractReadableError(err);
+        this.recoveryFeedbackEl.classList.add('is-invalid');
       } finally {
-        this.recoveryResetSubmitBtn.disabled = false;
-        this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendBtn');
+        this.recoverySubmitBtn.disabled = false;
+        this.recoverySubmitBtn.textContent = t('recovery.resetSendBtn');
       }
     });
 
-    resetForm.appendChild(this.recoveryResetEmailInput);
-    resetForm.appendChild(this.recoveryResetFeedbackEl);
-    resetForm.appendChild(this.recoveryResetSubmitBtn);
-    resetForm.appendChild(resetBackBtn);
-    this.recoveryResetBoxEl.appendChild(resetBoxTitle);
-    this.recoveryResetBoxEl.appendChild(resetBoxDesc);
-    this.recoveryResetBoxEl.appendChild(resetForm);
-
-    // Painel 3: Conclusão direta quando aberto via link ?mode=resetPassword&oobCode=...
+    // Painel 2: Conclusão direta quando aberto via link ?mode=resetPassword&oobCode=...
+    // Exibe exclusivamente "Novo PIN" e "Repetir PIN"
     this.recoveryOobBoxEl = document.createElement('div');
     this.recoveryOobBoxEl.className = 'ttm-recovery-confirm-box';
     this.recoveryOobBoxEl.style.display = 'none';
@@ -1570,31 +1218,10 @@ export class ChatUI {
     const oobForm = document.createElement('form');
     oobForm.className = 'ttm-form';
 
-    const oobSec1 = this.createSecretInputWithToggle(
-      'ttm-oob-secret',
-      t('recovery.oobSecretPlaceholder'),
-      40,
-      false,
-      'new-password',
-      'password'
-    );
-    this.recoveryOobSecretInput = oobSec1.input;
-    this.recoveryOobSecretToggleBtn1El = oobSec1.toggleBtn;
-
-    const oobSec2 = this.createSecretInputWithToggle(
-      'ttm-oob-secret-confirm',
-      t('recovery.oobSecretConfirmPlaceholder'),
-      40,
-      false,
-      'new-password'
-    );
-    this.recoveryOobSecretConfirmInput = oobSec2.input;
-    this.recoveryOobSecretToggleBtn2El = oobSec2.toggleBtn;
-
     const oobPin1 = this.createPinInputWithToggle(
       'ttm-oob-pin',
       t('recovery.pinPlaceholder'),
-      8,
+      128,
       'off'
     );
     this.recoveryOobPinInput = oobPin1.input;
@@ -1603,7 +1230,7 @@ export class ChatUI {
     const oobPin2 = this.createPinInputWithToggle(
       'ttm-oob-pin-confirm',
       t('recovery.pinConfirmPlaceholder'),
-      8,
+      128,
       'off'
     );
     this.recoveryOobPinConfirmInput = oobPin2.input;
@@ -1634,12 +1261,10 @@ export class ChatUI {
       this.recoveryOobErrorEl.textContent = '';
       if (!this.activeOobCode) return;
 
-      const secret = this.recoveryOobSecretInput.value.trim();
-      const secretConfirm = this.recoveryOobSecretConfirmInput.value.trim();
       const newPin = this.recoveryOobPinInput.value.trim();
       const confirmPin = this.recoveryOobPinConfirmInput.value.trim();
 
-      if (!/^\d{4,8}$/.test(newPin)) {
+      if (!/^\d{6,}$/.test(newPin)) {
         this.recoveryOobErrorEl.textContent = t('onboarding.errPinFormat');
         return;
       }
@@ -1647,13 +1272,9 @@ export class ChatUI {
         this.recoveryOobErrorEl.textContent = t('onboarding.errPinMismatch');
         return;
       }
-      const secCheck = validateRecoverySecret(secret, newPin);
-      if (!secCheck.valid) {
-        this.recoveryOobErrorEl.textContent = secCheck.error || t('onboarding.errSecretInvalid');
-        return;
-      }
-      if (normalizeRecoveryCode(secret) !== normalizeRecoveryCode(secretConfirm)) {
-        this.recoveryOobErrorEl.textContent = t('onboarding.errSecretMismatch');
+      const pinCheck = await validateLocalPin(newPin, false);
+      if (!pinCheck.valid) {
+        this.recoveryOobErrorEl.textContent = pinCheck.error || t('onboarding.errPinInvalid');
         return;
       }
 
@@ -1663,7 +1284,6 @@ export class ChatUI {
       try {
         await this.events.onCompleteInAppPasswordReset({
           oobCode: this.activeOobCode,
-          recoveryCode: secret,
           newPin,
         });
         this.activeOobCode = null;
@@ -1676,8 +1296,6 @@ export class ChatUI {
       }
     });
 
-    oobForm.appendChild(oobSec1.wrapper);
-    oobForm.appendChild(oobSec2.wrapper);
     oobForm.appendChild(oobPin1.wrapper);
     oobForm.appendChild(oobPin2.wrapper);
     oobForm.appendChild(this.recoveryOobErrorEl);
@@ -1690,7 +1308,6 @@ export class ChatUI {
     cardEl.appendChild(titleEl);
     cardEl.appendChild(subtitleEl);
     cardEl.appendChild(this.recoveryMainFormEl);
-    cardEl.appendChild(this.recoveryResetBoxEl);
     cardEl.appendChild(this.recoveryOobBoxEl);
     this.recoveryViewEl.appendChild(cardEl);
   }
@@ -1839,20 +1456,6 @@ export class ChatUI {
     });
     this.accountEditDatingBtnEl = editDatingBtn;
 
-    const rotateCodeBtn = document.createElement('button');
-    rotateCodeBtn.type = 'button';
-    rotateCodeBtn.className = 'ttm-btn-mini';
-    rotateCodeBtn.textContent = t('connect.recoveryKeyBtn');
-    rotateCodeBtn.title = t('connect.recoveryKeyTitle');
-    this.connectRotateCodeBtnEl = rotateCodeBtn;
-
-    const recoveryEmailBtn = document.createElement('button');
-    recoveryEmailBtn.type = 'button';
-    recoveryEmailBtn.className = 'ttm-btn-mini';
-    recoveryEmailBtn.textContent = t('connect.recoveryEmailBtn');
-    recoveryEmailBtn.title = t('connect.recoveryEmailTitle');
-    this.connectRecoveryEmailBtnEl = recoveryEmailBtn;
-
     const changePinBtn = document.createElement('button');
     changePinBtn.type = 'button';
     changePinBtn.className = 'ttm-btn-mini';
@@ -1867,193 +1470,11 @@ export class ChatUI {
     this.connectDeleteBtnEl = deleteAccountBtn;
 
     selfActions.appendChild(editDatingBtn);
-    selfActions.appendChild(rotateCodeBtn);
-    selfActions.appendChild(recoveryEmailBtn);
     selfActions.appendChild(changePinBtn);
     selfActions.appendChild(deleteAccountBtn);
     selfRow.appendChild(this.selfAvatarSlotEl);
     selfRow.appendChild(selfMeta);
     selfRow.appendChild(selfActions);
-
-    // Painel inline: Definir Chave Pessoal de recuperação (ou gerar código automático)
-    this.connectRecoveryPanelEl = document.createElement('div');
-    this.connectRecoveryPanelEl.className = 'ttm-inline-security-panel';
-    this.connectRecoveryPanelEl.style.display = 'none';
-
-    const rotForm = document.createElement('form');
-    rotForm.className = 'ttm-form';
-    const rotCustomInput = document.createElement('input');
-    rotCustomInput.type = 'text';
-    rotCustomInput.maxLength = 40;
-    rotCustomInput.placeholder = t('connect.rotPlaceholder');
-    rotCustomInput.className = 'ttm-connect-input ttm-connect-input-phone';
-    this.connectRotCustomInput = rotCustomInput;
-
-    const rotPinInput = document.createElement('input');
-    rotPinInput.type = 'password';
-    rotPinInput.inputMode = 'numeric';
-    rotPinInput.maxLength = 8;
-    rotPinInput.autocomplete = 'off';
-    rotPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
-    rotPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
-    this.connectRotPinInput = rotPinInput;
-
-    const rotBtnRow = document.createElement('div');
-    rotBtnRow.className = 'ttm-inline-form';
-    const rotSubmitBtn = document.createElement('button');
-    rotSubmitBtn.type = 'submit';
-    rotSubmitBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    rotSubmitBtn.textContent = t('connect.saveKeyBtn');
-    this.connectRotSubmitBtnEl = rotSubmitBtn;
-
-    const rotGenBtn = document.createElement('button');
-    rotGenBtn.type = 'button';
-    rotGenBtn.className = 'ttm-btn-mini';
-    rotGenBtn.textContent = t('connect.genAutoBtn');
-    this.connectRotGenBtnEl = rotGenBtn;
-
-    rotBtnRow.appendChild(rotSubmitBtn);
-    rotBtnRow.appendChild(rotGenBtn);
-
-    const rotResultEl = document.createElement('div');
-    rotResultEl.className = 'ttm-code-badge ttm-code-badge-compact';
-    rotResultEl.style.display = 'none';
-    const rotHintEl = document.createElement('div');
-    rotHintEl.className = 'ttm-field-hint';
-    rotHintEl.textContent = t('connect.rotHint');
-    this.connectRotHintEl = rotHintEl;
-
-    const rotCopyBtn = document.createElement('button');
-    rotCopyBtn.type = 'button';
-    rotCopyBtn.className = 'ttm-btn-mini';
-    rotCopyBtn.textContent = t('connect.copyKeyBtn');
-    rotCopyBtn.style.display = 'none';
-    rotCopyBtn.addEventListener('click', async () => {
-      const code = rotResultEl.textContent || '';
-      if (code) {
-        await navigator.clipboard?.writeText(code).catch(() => {});
-        this.showConnectFeedback(t('connect.keyCopied'));
-      }
-    });
-    this.connectRotCopyBtnEl = rotCopyBtn;
-
-    rotGenBtn.addEventListener('click', () => {
-      rotCustomInput.value = generateRecoveryCode();
-    });
-
-    rotForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const pin = rotPinInput.value.trim();
-      const customKey = rotCustomInput.value.trim();
-      if (!/^\d{4,8}$/.test(pin)) {
-        this.showConnectFeedback(t('connect.enterCurrentPin'), true);
-        return;
-      }
-      if (customKey) {
-        const keyCheck = validateRecoverySecret(customKey, pin);
-        if (!keyCheck.valid) {
-          this.showConnectFeedback(keyCheck.error || t('onboarding.errSecretInvalid'), true);
-          return;
-        }
-      }
-      if (!this.events.onRegenerateRecoveryCode) return;
-      rotSubmitBtn.disabled = true;
-      try {
-        const savedCode = await this.events.onRegenerateRecoveryCode(pin, customKey || undefined);
-        rotPinInput.value = '';
-        rotCustomInput.value = '';
-        rotResultEl.textContent = savedCode;
-        rotResultEl.style.display = 'block';
-        rotCopyBtn.style.display = 'inline-block';
-        rotHintEl.textContent = t('connect.keyUpdatedHint');
-        this.showConnectFeedback(t('connect.keyUpdated'));
-      } catch (err) {
-        this.showConnectFeedback(this.extractReadableError(err), true);
-      } finally {
-        rotSubmitBtn.disabled = false;
-      }
-    });
-
-    rotForm.appendChild(rotCustomInput);
-    rotForm.appendChild(rotPinInput);
-    rotForm.appendChild(rotBtnRow);
-    this.connectRecoveryPanelEl.appendChild(rotHintEl);
-    this.connectRecoveryPanelEl.appendChild(rotForm);
-    this.connectRecoveryPanelEl.appendChild(rotResultEl);
-    this.connectRecoveryPanelEl.appendChild(rotCopyBtn);
-
-    // Painel inline: E-mail de recuperação opcional
-    this.connectEmailPanelEl = document.createElement('div');
-    this.connectEmailPanelEl.className = 'ttm-inline-security-panel';
-    this.connectEmailPanelEl.style.display = 'none';
-
-    this.connectEmailStatusEl = document.createElement('div');
-    this.connectEmailStatusEl.className = 'ttm-field-hint';
-    this.connectEmailStatusEl.textContent = t('onboarding.emailHint');
-
-    const emailForm = document.createElement('form');
-    emailForm.className = 'ttm-form';
-
-    this.connectEmailInput = document.createElement('input');
-    this.connectEmailInput.type = 'email';
-    this.connectEmailInput.maxLength = 120;
-    this.connectEmailInput.autocomplete = 'email';
-    this.connectEmailInput.inputMode = 'email';
-    this.connectEmailInput.placeholder = t('onboarding.emailPlaceholder');
-    this.connectEmailInput.className = 'ttm-connect-input ttm-connect-input-phone';
-
-    const emailPinInput = document.createElement('input');
-    emailPinInput.type = 'password';
-    emailPinInput.inputMode = 'numeric';
-    emailPinInput.maxLength = 8;
-    emailPinInput.autocomplete = 'off';
-    emailPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
-    emailPinInput.className = 'ttm-connect-input ttm-connect-input-phone';
-    this.connectEmailPinInput = emailPinInput;
-
-    const saveEmailBtn = document.createElement('button');
-    saveEmailBtn.type = 'submit';
-    saveEmailBtn.className = 'ttm-btn-mini ttm-btn-mini-primary';
-    saveEmailBtn.textContent = t('connect.emailSaveBtn');
-    this.connectSaveEmailBtnEl = saveEmailBtn;
-
-    emailForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const rawEmail = this.connectEmailInput.value.trim();
-      const pin = emailPinInput.value.trim();
-      const check = validateOptionalRecoveryEmail(rawEmail);
-      if (!check.valid || !check.email) {
-        this.showConnectFeedback(check.error || t('connect.emailValidRequired'), true);
-        return;
-      }
-      if (!/^\d{4,8}$/.test(pin)) {
-        this.showConnectFeedback(t('connect.enterCurrentPin'), true);
-        return;
-      }
-      if (!this.events.onAssociateRecoveryEmail) return;
-      saveEmailBtn.disabled = true;
-      try {
-        const res = await this.events.onAssociateRecoveryEmail(pin, check.email);
-        emailPinInput.value = '';
-        if (res.status === 'already_active') {
-          this.connectEmailStatusEl.textContent = t('connect.emailActive', { email: res.email });
-          this.showConnectFeedback(t('connect.emailAlreadyActive'));
-        } else {
-          this.connectEmailStatusEl.textContent = t('connect.emailConfirmSentHint', { email: res.email });
-          this.showConnectFeedback(t('connect.emailConfirmSentNotice', { email: res.email }));
-        }
-      } catch (err) {
-        this.showConnectFeedback(this.extractReadableError(err), true);
-      } finally {
-        saveEmailBtn.disabled = false;
-      }
-    });
-
-    emailForm.appendChild(this.connectEmailInput);
-    emailForm.appendChild(emailPinInput);
-    emailForm.appendChild(saveEmailBtn);
-    this.connectEmailPanelEl.appendChild(this.connectEmailStatusEl);
-    this.connectEmailPanelEl.appendChild(emailForm);
 
     // Painel inline: Alterar PIN local
     this.connectPinPanelEl = document.createElement('div');
@@ -2065,7 +1486,7 @@ export class ChatUI {
     const curPinInp = document.createElement('input');
     curPinInp.type = 'password';
     curPinInp.inputMode = 'numeric';
-    curPinInp.maxLength = 8;
+    curPinInp.maxLength = 128;
     curPinInp.autocomplete = 'off';
     curPinInp.placeholder = t('connect.currentPinPlaceholder');
     curPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
@@ -2074,7 +1495,7 @@ export class ChatUI {
     const nextPinInp = document.createElement('input');
     nextPinInp.type = 'password';
     nextPinInp.inputMode = 'numeric';
-    nextPinInp.maxLength = 8;
+    nextPinInp.maxLength = 128;
     nextPinInp.autocomplete = 'off';
     nextPinInp.placeholder = t('connect.newPinPlaceholder');
     nextPinInp.className = 'ttm-connect-input ttm-connect-input-phone';
@@ -2083,7 +1504,7 @@ export class ChatUI {
     const nextPinConfInp = document.createElement('input');
     nextPinConfInp.type = 'password';
     nextPinConfInp.inputMode = 'numeric';
-    nextPinConfInp.maxLength = 8;
+    nextPinConfInp.maxLength = 128;
     nextPinConfInp.autocomplete = 'off';
     nextPinConfInp.placeholder = t('connect.confirmNewPinPlaceholder');
     nextPinConfInp.className = 'ttm-connect-input ttm-connect-input-phone';
@@ -2100,7 +1521,7 @@ export class ChatUI {
       const cur = curPinInp.value.trim();
       const next = nextPinInp.value.trim();
       const conf = nextPinConfInp.value.trim();
-      if (!/^\d{4,8}$/.test(cur) || !/^\d{4,8}$/.test(next)) {
+      if (!/^\d{6,}$/.test(cur) || !/^\d{6,}$/.test(next)) {
         this.showConnectFeedback(t('onboarding.errPinFormat'), true);
         return;
       }
@@ -2146,7 +1567,7 @@ export class ChatUI {
     const deletePinInput = document.createElement('input');
     deletePinInput.type = 'password';
     deletePinInput.inputMode = 'numeric';
-    deletePinInput.maxLength = 8;
+    deletePinInput.maxLength = 128;
     deletePinInput.autocomplete = 'off';
     deletePinInput.placeholder = t('safety.deleteAccountPinPlaceholder');
     deletePinInput.className = 'ttm-connect-input ttm-connect-input-phone';
@@ -2172,7 +1593,7 @@ export class ChatUI {
     deleteForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const pin = deletePinInput.value.trim();
-      if (!/^\d{4,8}$/.test(pin)) {
+      if (!/^\d{6,}$/.test(pin)) {
         this.showConnectFeedback(t('connect.enterCurrentPin'), true);
         return;
       }
@@ -2217,31 +1638,9 @@ export class ChatUI {
     this.connectDeletePanelEl.appendChild(deleteWarnEl);
     this.connectDeletePanelEl.appendChild(deleteForm);
 
-    rotateCodeBtn.addEventListener('click', () => {
-      const visible = this.connectRecoveryPanelEl.style.display === 'flex';
-      this.connectRecoveryPanelEl.style.display = visible ? 'none' : 'flex';
-      this.connectEmailPanelEl.style.display = 'none';
-      this.connectPinPanelEl.style.display = 'none';
-      this.connectDeletePanelEl.style.display = 'none';
-      this.resetDeleteAccountConfirmState();
-      rotResultEl.style.display = 'none';
-      rotCopyBtn.style.display = 'none';
-    });
-
-    recoveryEmailBtn.addEventListener('click', () => {
-      const visible = this.connectEmailPanelEl.style.display === 'flex';
-      this.connectEmailPanelEl.style.display = visible ? 'none' : 'flex';
-      this.connectRecoveryPanelEl.style.display = 'none';
-      this.connectPinPanelEl.style.display = 'none';
-      this.connectDeletePanelEl.style.display = 'none';
-      this.resetDeleteAccountConfirmState();
-    });
-
     changePinBtn.addEventListener('click', () => {
       const visible = this.connectPinPanelEl.style.display === 'flex';
       this.connectPinPanelEl.style.display = visible ? 'none' : 'flex';
-      this.connectRecoveryPanelEl.style.display = 'none';
-      this.connectEmailPanelEl.style.display = 'none';
       this.connectDeletePanelEl.style.display = 'none';
       this.resetDeleteAccountConfirmState();
     });
@@ -2249,8 +1648,6 @@ export class ChatUI {
     deleteAccountBtn.addEventListener('click', () => {
       const visible = this.connectDeletePanelEl.style.display === 'flex';
       this.connectDeletePanelEl.style.display = visible ? 'none' : 'flex';
-      this.connectRecoveryPanelEl.style.display = 'none';
-      this.connectEmailPanelEl.style.display = 'none';
       this.connectPinPanelEl.style.display = 'none';
       if (visible) {
         this.resetDeleteAccountConfirmState();
@@ -2259,8 +1656,6 @@ export class ChatUI {
 
     selfCard.appendChild(selfTitle);
     selfCard.appendChild(selfRow);
-    selfCard.appendChild(this.connectRecoveryPanelEl);
-    selfCard.appendChild(this.connectEmailPanelEl);
     selfCard.appendChild(this.connectPinPanelEl);
     selfCard.appendChild(this.connectDeletePanelEl);
 
@@ -2496,7 +1891,11 @@ export class ChatUI {
           evidenceSnapshot: `Match ${match.matchId} (${partner.displayName || partner.uid})`,
         });
       },
-      onBlockUser: this.events.onBlockUser,
+      onBlockUser: async (targetUid, targetName) => {
+        if (!this.events.onBlockUser) return;
+        await this.events.onBlockUser(targetUid, targetName);
+        this.openBlockedDoneModal(targetName);
+      },
     });
     this.datingPanel.rootEl.style.display = 'flex';
 
@@ -2508,14 +1907,7 @@ export class ChatUI {
     this.connectViewEl.appendChild(this.hubContentEl);
   }
 
-  private async handleDatingShareInvite(): Promise<void> {
-    const url = this.lastReferralSummary?.inviteUrl;
-    if (!url) {
-      this.setHubDestination('account');
-      return;
-    }
-    await navigator.clipboard?.writeText(url).catch(() => {});
-    this.showTemporaryNotice(t('referral.linkCopied'));
+  private trackShareAction(): void {
     const code = this.lastReferralSummary?.referralCode;
     if (code && this.events.onTrackReferralShare) {
       void this.events.onTrackReferralShare(code).then((nextShared) => {
@@ -2527,6 +1919,18 @@ export class ChatUI {
         }
       }).catch(() => {});
     }
+  }
+
+  private async handleDatingShareInvite(): Promise<void> {
+    const url = this.lastReferralSummary?.inviteUrl;
+    if (!url) {
+      this.setHubDestination('account');
+      return;
+    }
+    this.shareSheetWhatsappEl.href = buildWhatsAppReferralShareUrl(
+      t('referral.whatsappShareText', { url })
+    );
+    this.shareSheetModalEl.style.display = 'flex';
   }
 
   private syncDatingTabLabel(): void {
@@ -3205,6 +2609,129 @@ export class ChatUI {
     this.reportModalEl.appendChild(box);
   }
 
+  private buildShareSheetModal(): void {
+    this.shareSheetModalEl = document.createElement('div');
+    this.shareSheetModalEl.id = 'ttm-share-sheet-modal';
+    this.shareSheetModalEl.className = 'ttm-modal-backdrop';
+    this.shareSheetModalEl.style.display = 'none';
+    this.shareSheetModalEl.addEventListener('click', (e) => {
+      if (e.target === this.shareSheetModalEl) {
+        this.shareSheetModalEl.style.display = 'none';
+      }
+    });
+
+    const box = document.createElement('div');
+    box.className = 'ttm-modal-box ttm-commercial-sheet';
+
+    const emblem = document.createElement('div');
+    emblem.className = 'ttm-sheet-emblem';
+    emblem.innerHTML =
+      '<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2L11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+
+    this.shareSheetTitleEl = document.createElement('div');
+    this.shareSheetTitleEl.className = 'ttm-sheet-title';
+    this.shareSheetTitleEl.textContent = t('referral.sheetTitle');
+
+    this.shareSheetDescEl = document.createElement('div');
+    this.shareSheetDescEl.className = 'ttm-sheet-desc';
+    this.shareSheetDescEl.textContent = t('referral.sheetDesc');
+
+    const actions = document.createElement('div');
+    actions.className = 'ttm-sheet-actions';
+
+    this.shareSheetWhatsappEl = document.createElement('a');
+    this.shareSheetWhatsappEl.className = 'ttm-btn ttm-btn-whatsapp';
+    this.shareSheetWhatsappEl.target = '_blank';
+    this.shareSheetWhatsappEl.rel = 'noopener noreferrer';
+    this.shareSheetWhatsappEl.href = 'https://wa.me/';
+    this.shareSheetWhatsappEl.textContent = t('referral.whatsappBtn');
+    this.shareSheetWhatsappEl.addEventListener('click', () => {
+      this.trackShareAction();
+      this.shareSheetModalEl.style.display = 'none';
+    });
+
+    this.shareSheetCopyBtnEl = document.createElement('button');
+    this.shareSheetCopyBtnEl.type = 'button';
+    this.shareSheetCopyBtnEl.className = 'ttm-btn ttm-btn-secondary';
+    this.shareSheetCopyBtnEl.textContent = t('referral.copyLinkBtn');
+    this.shareSheetCopyBtnEl.addEventListener('click', async () => {
+      const url = this.lastReferralSummary?.inviteUrl;
+      if (!url) return;
+      await navigator.clipboard?.writeText(url).catch(() => {});
+      this.trackShareAction();
+      this.shareSheetModalEl.style.display = 'none';
+      this.showTemporaryNotice(t('referral.linkCopied'));
+    });
+
+    this.shareSheetDismissBtnEl = document.createElement('button');
+    this.shareSheetDismissBtnEl.type = 'button';
+    this.shareSheetDismissBtnEl.className = 'ttm-link-btn ttm-sheet-dismiss';
+    this.shareSheetDismissBtnEl.textContent = t('referral.notNowBtn');
+    this.shareSheetDismissBtnEl.addEventListener('click', () => {
+      this.shareSheetModalEl.style.display = 'none';
+    });
+
+    actions.appendChild(this.shareSheetWhatsappEl);
+    actions.appendChild(this.shareSheetCopyBtnEl);
+    actions.appendChild(this.shareSheetDismissBtnEl);
+
+    box.appendChild(emblem);
+    box.appendChild(this.shareSheetTitleEl);
+    box.appendChild(this.shareSheetDescEl);
+    box.appendChild(actions);
+    this.shareSheetModalEl.appendChild(box);
+  }
+
+  private buildBlockedDoneModal(): void {
+    this.blockedDoneModalEl = document.createElement('div');
+    this.blockedDoneModalEl.id = 'ttm-blocked-done-modal';
+    this.blockedDoneModalEl.className = 'ttm-modal-backdrop';
+    this.blockedDoneModalEl.style.display = 'none';
+    this.blockedDoneModalEl.addEventListener('click', (e) => {
+      if (e.target === this.blockedDoneModalEl) {
+        this.blockedDoneModalEl.style.display = 'none';
+      }
+    });
+
+    const box = document.createElement('div');
+    box.className = 'ttm-modal-box ttm-commercial-sheet';
+
+    const emblem = document.createElement('div');
+    emblem.className = 'ttm-sheet-emblem is-safe';
+    emblem.innerHTML =
+      '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>';
+
+    this.blockedDoneTitleEl = document.createElement('div');
+    this.blockedDoneTitleEl.className = 'ttm-sheet-title';
+    this.blockedDoneTitleEl.textContent = t('safety.blockedModalTitle');
+
+    this.blockedDoneDescEl = document.createElement('div');
+    this.blockedDoneDescEl.className = 'ttm-sheet-desc';
+
+    this.blockedDoneOkBtnEl = document.createElement('button');
+    this.blockedDoneOkBtnEl.type = 'button';
+    this.blockedDoneOkBtnEl.className = 'ttm-btn ttm-btn-primary';
+    this.blockedDoneOkBtnEl.textContent = t('safety.blockedModalOkBtn');
+    this.blockedDoneOkBtnEl.addEventListener('click', () => {
+      this.blockedDoneModalEl.style.display = 'none';
+    });
+
+    box.appendChild(emblem);
+    box.appendChild(this.blockedDoneTitleEl);
+    box.appendChild(this.blockedDoneDescEl);
+    box.appendChild(this.blockedDoneOkBtnEl);
+    this.blockedDoneModalEl.appendChild(box);
+  }
+
+  public openBlockedDoneModal(targetName?: string): void {
+    const cleanName = (targetName || '').trim() || t('connect.defaultContact');
+    this.lastBlockedName = cleanName;
+    this.blockedDoneTitleEl.textContent = t('safety.blockedModalTitle');
+    this.blockedDoneDescEl.textContent = t('safety.blockedModalDesc', { name: cleanName });
+    this.blockedDoneOkBtnEl.textContent = t('safety.blockedModalOkBtn');
+    this.blockedDoneModalEl.style.display = 'flex';
+  }
+
   private populateReportReasonSelect(): void {
     if (!this.reportReasonSelectEl) return;
     const prev = this.reportReasonSelectEl.value || 'harassment';
@@ -3289,6 +2816,7 @@ export class ChatUI {
     this.chatBlockBtnEl.disabled = true;
     try {
       await this.events.onBlockUser(targetUid, targetName);
+      this.openBlockedDoneModal(targetName);
     } catch (err) {
       this.showTemporaryNotice(this.extractReadableError(err));
     } finally {
@@ -3510,10 +3038,17 @@ export class ChatUI {
     this.onboardingFormEl.style.display = 'flex';
     this.onboardingSubtitleEl.style.display = '';
     this.syncOnboardingReferralBanner();
-    this.recoveryStepBoxEl.style.display = 'none';
-    this.pendingOnboardingDraft = null;
+    this.pendingActivationBoxEl.style.display = 'none';
+    this.pendingActivationEmail = '';
     this.onboardingNameInput.value = '';
+    this.onboardingUsernameHintEl.textContent = '';
+    this.onboardingUsernameHintEl.style.display = 'none';
+    this.onboardingUsernameHintEl.classList.remove('is-valid', 'is-invalid');
     this.onboardingPhoneField.reset();
+    this.onboardingEmailInput.value = '';
+    this.onboardingEmailHintEl.textContent = '';
+    this.onboardingEmailHintEl.style.display = 'none';
+    this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
     this.onboardingPinInput.value = '';
     this.onboardingPinConfirmInput.value = '';
     this.onboardingPinInput.type = 'password';
@@ -3521,31 +3056,39 @@ export class ChatUI {
     this.onboardingPinToggleBtn1El.textContent = t('common.show');
     this.onboardingPinToggleBtn2El.textContent = t('common.show');
     this.onboardingErrorEl.textContent = '';
-    this.onboardingSecretInput.value = '';
-    this.onboardingSecretInput.type = 'password';
-    this.onboardingSecretConfirmInput.value = '';
-    this.onboardingSecretConfirmInput.type = 'password';
-    this.onboardingSecretToggleBtn1El.textContent = t('common.show');
-    this.onboardingSecretToggleBtn2El.textContent = t('common.show');
-    this.onboardingPmUsernameInput.value = '';
-    this.onboardingEmailInput.value = '';
-    this.onboardingEmailHintEl.textContent = '';
-    this.onboardingEmailHintEl.style.display = 'none';
-    this.onboardingEmailHintEl.classList.remove('is-valid', 'is-invalid');
-    this.onboardingSecretHintEl.textContent = '';
-    this.onboardingSecretHintEl.style.display = 'none';
-    this.onboardingSecretHintEl.classList.remove('is-valid', 'is-invalid');
-    this.onboardingStep2ErrorEl.textContent = '';
-    this.recoveryStepCodeEl.textContent = '';
-    this.recoveryStepCodeEl.style.display = 'none';
-    this.onboardingCopyCodeBtn.style.display = 'none';
     this.onboardingSubmitBtn.disabled = false;
-    this.onboardingSubmitBtn.textContent = t('onboarding.continueBtn');
-    this.onboardingStep2SubmitBtn.disabled = false;
-    this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
+    this.onboardingSubmitBtn.textContent = t('onboarding.createEnterBtn');
     setTimeout(() => {
       this.onboardingNameInput.focus();
     }, 100);
+  }
+
+  public showPendingActivationView(email: string, _username?: string): void {
+    this.appWrapper.classList.remove('is-hub-active');
+    this.closeSettingsModal();
+    this.closeReportModal();
+    this.lockScreen.hide();
+    this.calculator.hide();
+    this.headerEl.style.display = 'none';
+    this.passViewEl.style.display = 'none';
+    if (this.landingViewEl) this.landingViewEl.style.display = 'none';
+    this.recoveryViewEl.style.display = 'none';
+    this.connectViewEl.style.display = 'none';
+    this.chatViewEl.style.display = 'none';
+    this.onboardingViewEl.style.display = 'flex';
+    this.onboardingRefBannerEl.style.display = 'none';
+    this.onboardingFormEl.style.display = 'none';
+    this.onboardingSubtitleEl.style.display = 'none';
+    this.pendingActivationEmail = email;
+    this.pendingActivationBoxEl.style.display = 'flex';
+    this.pendingActivationTitleEl.textContent = t('activation.title');
+    this.pendingActivationDescEl.textContent = t('activation.desc', { email });
+    this.pendingActivationFeedbackEl.textContent = '';
+    this.pendingActivationFeedbackEl.classList.remove('is-valid', 'is-invalid');
+    this.pendingActivationCheckBtn.disabled = false;
+    this.pendingActivationCheckBtn.textContent = t('activation.checkBtn');
+    this.pendingActivationResendBtn.disabled = false;
+    this.pendingActivationResendBtn.textContent = t('activation.resendBtn');
   }
 
   public showRecoveryView(): void {
@@ -3562,26 +3105,16 @@ export class ChatUI {
     this.chatViewEl.style.display = 'none';
     this.recoveryViewEl.style.display = 'flex';
     this.recoveryMainFormEl.style.display = 'flex';
-    this.recoveryResetBoxEl.style.display = 'none';
     this.recoveryOobBoxEl.style.display = 'none';
     this.activeOobCode = null;
     this.activeOobEmail = null;
-    this.recoveryPhoneField.reset();
     this.recoveryEmailInput.value = '';
-    this.recoveryCodeInput.value = '';
-    this.recoveryCodeInput.type = 'password';
-    this.recoveryKeyToggleBtnEl.textContent = t('common.show');
-    this.recoveryPinInput.value = '';
-    this.recoveryPinConfirmInput.value = '';
-    this.recoveryPinInput.type = 'password';
-    this.recoveryPinConfirmInput.type = 'password';
-    this.recoveryPinToggleBtn1El.textContent = t('common.show');
-    this.recoveryPinToggleBtn2El.textContent = t('common.show');
-    this.recoveryErrorEl.textContent = '';
+    this.recoveryFeedbackEl.textContent = '';
+    this.recoveryFeedbackEl.classList.remove('is-valid', 'is-invalid');
     this.recoverySubmitBtn.disabled = false;
-    this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
+    this.recoverySubmitBtn.textContent = t('recovery.resetSendBtn');
     setTimeout(() => {
-      this.recoveryPhoneField.input.focus();
+      this.recoveryEmailInput.focus();
     }, 100);
   }
 
@@ -3590,15 +3123,8 @@ export class ChatUI {
     this.activeOobCode = oobCode;
     this.activeOobEmail = email;
     this.recoveryMainFormEl.style.display = 'none';
-    this.recoveryResetBoxEl.style.display = 'none';
     this.recoveryOobBoxEl.style.display = 'flex';
     this.recoveryOobEmailLabelEl.textContent = t('recovery.oobAccountDesc', { email });
-    this.recoveryOobSecretInput.value = '';
-    this.recoveryOobSecretInput.type = 'password';
-    this.recoveryOobSecretToggleBtn1El.textContent = t('common.show');
-    this.recoveryOobSecretConfirmInput.value = '';
-    this.recoveryOobSecretConfirmInput.type = 'password';
-    this.recoveryOobSecretToggleBtn2El.textContent = t('common.show');
     this.recoveryOobPinInput.value = '';
     this.recoveryOobPinConfirmInput.value = '';
     this.recoveryOobPinInput.type = 'password';
@@ -3607,7 +3133,7 @@ export class ChatUI {
     this.recoveryOobPinToggleBtn2El.textContent = t('common.show');
     this.recoveryOobErrorEl.textContent = '';
     setTimeout(() => {
-      this.recoveryOobSecretInput.focus();
+      this.recoveryOobPinInput.focus();
     }, 100);
   }
 
@@ -3619,20 +3145,19 @@ export class ChatUI {
       this.selfAvatarSlotEl.innerHTML = '';
       this.selfAvatarSlotEl.appendChild(createMonogramAvatar(selfName, session.userId, 'md'));
     }
-    this.connectSelfPhoneEl.textContent = session.phoneMasked
-      ? t('connect.discoveryMasked', { phoneMasked: session.phoneMasked })
-      : t('connect.discoveryActive');
-    if (session.pendingRecoveryEmail) {
-      this.connectEmailStatusEl.textContent = t('connect.emailPending', {
-        email: session.pendingRecoveryEmail,
-      });
-    } else if (session.recoveryEmail) {
-      this.connectEmailStatusEl.textContent = t('connect.emailLinkedStatus', {
-        email: session.recoveryEmail,
-      });
-    } else {
-      this.connectEmailStatusEl.textContent = t('onboarding.emailHint');
+    const metaParts: string[] = [];
+    if (session.username) {
+      metaParts.push(`@${session.username}`);
     }
+    if (session.phoneMasked) {
+      metaParts.push(t('connect.discoveryMasked', { phoneMasked: session.phoneMasked }));
+    } else {
+      metaParts.push(t('connect.discoveryActive'));
+    }
+    if (session.email) {
+      metaParts.push(session.email);
+    }
+    this.connectSelfPhoneEl.textContent = metaParts.join(' · ');
     this.roomInfoEl.innerHTML = '';
   }
 
@@ -3661,14 +3186,11 @@ export class ChatUI {
     this.chatViewEl.style.display = 'none';
     this.headerEl.style.display = 'flex';
     this.connectViewEl.style.display = 'flex';
-    this.connectRecoveryPanelEl.style.display = 'none';
-    this.connectEmailPanelEl.style.display = 'none';
     this.connectPinPanelEl.style.display = 'none';
     this.connectDeletePanelEl.style.display = 'none';
     this.connectDeletePinInput.value = '';
     this.connectDeleteCheckbox.checked = false;
     this.resetDeleteAccountConfirmState();
-    this.connectEmailInput.value = session.recoveryEmail || session.pendingRecoveryEmail || '';
     this.connectFeedbackEl.textContent = '';
     this.connectFeedbackEl.classList.remove('is-error');
     this.applyConnectSessionMeta(session);
@@ -4767,12 +4289,17 @@ export class ChatUI {
         ? t('pass.backToCalc')
         : t('pass.backToLock');
 
-    // Cadastro
+    // Cadastro e Ativação
     this.onboardingTitleEl.textContent = t('onboarding.title');
     this.onboardingSubtitleEl.textContent = t('onboarding.subtitle');
     this.onboardingNameInput.placeholder = t('onboarding.namePlaceholder');
     this.onboardingPhoneField.input.placeholder = t('onboarding.phonePlaceholder');
     this.onboardingPhoneField.refreshLocale();
+    this.onboardingEmailInput.placeholder = t('onboarding.emailPlaceholder');
+    if (!this.onboardingEmailInput.value.trim()) {
+      this.onboardingEmailHintEl.textContent = '';
+      this.onboardingEmailHintEl.style.display = 'none';
+    }
     this.onboardingPinInput.placeholder = t('onboarding.pinPlaceholder');
     this.onboardingPinConfirmInput.placeholder = t('onboarding.pinConfirmPlaceholder');
     this.onboardingPinToggleBtn1El.textContent =
@@ -4781,73 +4308,31 @@ export class ChatUI {
       this.onboardingPinConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
     this.onboardingPinToggleBtn1El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
     this.onboardingPinToggleBtn2El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
-    this.onboardingSubmitBtn.textContent = t('onboarding.continueBtn');
+    this.onboardingSubmitBtn.textContent = t('onboarding.createEnterBtn');
     this.onboardingBackBtnEl.textContent = t('common.back');
-    this.onboardingStep2TitleEl.textContent = t('onboarding.step2Title');
-    this.onboardingStep2DescEl.textContent = t('onboarding.step2Desc');
-    this.onboardingPmUsernameInput.setAttribute('aria-label', t('onboarding.pmPhoneAria'));
-    this.onboardingSecretInput.placeholder = t('onboarding.secretPlaceholder');
-    this.onboardingSecretConfirmInput.placeholder = t('onboarding.secretConfirmPlaceholder');
-    this.onboardingSecretToggleBtn1El.textContent =
-      this.onboardingSecretInput.type === 'text' ? t('common.hide') : t('common.show');
-    this.onboardingSecretToggleBtn2El.textContent =
-      this.onboardingSecretConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
-    this.onboardingSecretToggleBtn1El.setAttribute('aria-label', t('pass.secretVisToggleAria'));
-    this.onboardingSecretToggleBtn2El.setAttribute('aria-label', t('pass.secretVisToggleAria'));
-    if (!this.onboardingSecretInput.value.trim()) {
-      this.onboardingSecretHintEl.textContent = '';
-      this.onboardingSecretHintEl.style.display = 'none';
+    this.pendingActivationTitleEl.textContent = t('activation.title');
+    if (this.pendingActivationEmail) {
+      this.pendingActivationDescEl.textContent = t('activation.desc', {
+        email: this.pendingActivationEmail,
+      });
     }
-    this.onboardingEmailInput.placeholder = t('onboarding.emailPlaceholder');
-    if (!this.onboardingEmailInput.value.trim()) {
-      this.onboardingEmailHintEl.textContent = '';
-      this.onboardingEmailHintEl.style.display = 'none';
-    }
-    this.onboardingCopyCodeBtn.textContent = t('onboarding.copyCodeBtn');
-    this.onboardingStep2SubmitBtn.textContent = t('onboarding.createEnterBtn');
-    this.onboardingGenCodeBtnEl.textContent = t('onboarding.genCodeBtn');
-    this.onboardingBackStep1BtnEl.textContent = t('onboarding.backStep1Btn');
+    this.pendingActivationCheckBtn.textContent = t('activation.checkBtn');
+    this.pendingActivationResendBtn.textContent = t('activation.resendBtn');
+    this.pendingActivationBackBtn.textContent = t('common.back');
 
     // Recuperação
     this.recoveryTitleEl.textContent = t('recovery.title');
     this.recoverySubtitleEl.textContent = t('recovery.subtitle');
-    this.recoveryPhoneField.input.placeholder = t('recovery.phonePlaceholder');
-    this.recoveryPhoneField.refreshLocale();
     this.recoveryEmailInput.placeholder = t('recovery.emailPlaceholder');
     this.recoveryEmailHintEl.textContent = t('recovery.emailHint');
-    this.recoveryCodeInput.placeholder = t('recovery.keyPlaceholder');
-    this.recoveryKeyHintEl.textContent = t('recovery.keyHint');
-    this.recoveryKeyToggleBtnEl.textContent =
-      this.recoveryCodeInput.type === 'text' ? t('common.hide') : t('common.show');
-    this.recoveryKeyToggleBtnEl.setAttribute('aria-label', t('pass.secretVisToggleAria'));
-    this.recoveryPinInput.placeholder = t('recovery.pinPlaceholder');
-    this.recoveryPinConfirmInput.placeholder = t('recovery.pinConfirmPlaceholder');
-    this.recoveryPinToggleBtn1El.textContent =
-      this.recoveryPinInput.type === 'text' ? t('common.hide') : t('common.show');
-    this.recoveryPinToggleBtn2El.textContent =
-      this.recoveryPinConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
-    this.recoveryPinToggleBtn1El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
-    this.recoveryPinToggleBtn2El.setAttribute('aria-label', t('pass.pinVisToggleAria'));
-    this.recoverySubmitBtn.textContent = t('recovery.submitBtn');
-    this.recoveryForgotEmailBtn.textContent = t('recovery.forgotKeyBtn');
+    this.recoverySubmitBtn.textContent = t('recovery.resetSendBtn');
     this.recoveryBackBtnEl.textContent = t('common.back');
-    this.recoveryResetTitleEl.textContent = t('recovery.resetTitle');
-    this.recoveryResetDescEl.textContent = t('recovery.resetDesc');
-    this.recoveryResetEmailInput.placeholder = t('recovery.resetEmailPlaceholder');
-    this.recoveryResetSubmitBtn.textContent = t('recovery.resetSendBtn');
-    this.recoveryResetBackBtnEl.textContent = t('recovery.resetDoneBackBtn');
     this.recoveryOobTitleEl.textContent = t('recovery.oobTitle');
     this.recoveryOobEmailLabelEl.textContent = this.activeOobEmail
       ? t('recovery.oobAccountDesc', { email: this.activeOobEmail })
       : t('recovery.oobDefaultDesc');
-    this.recoveryOobSecretInput.placeholder = t('recovery.oobSecretPlaceholder');
-    this.recoveryOobSecretConfirmInput.placeholder = t('recovery.oobSecretConfirmPlaceholder');
     this.recoveryOobPinInput.placeholder = t('recovery.pinPlaceholder');
     this.recoveryOobPinConfirmInput.placeholder = t('recovery.pinConfirmPlaceholder');
-    this.recoveryOobSecretToggleBtn1El.textContent =
-      this.recoveryOobSecretInput.type === 'text' ? t('common.hide') : t('common.show');
-    this.recoveryOobSecretToggleBtn2El.textContent =
-      this.recoveryOobSecretConfirmInput.type === 'text' ? t('common.hide') : t('common.show');
     this.recoveryOobPinToggleBtn1El.textContent =
       this.recoveryOobPinInput.type === 'text' ? t('common.hide') : t('common.show');
     this.recoveryOobPinToggleBtn2El.textContent =
@@ -4864,20 +4349,7 @@ export class ChatUI {
     this.syncDatingTabLabel();
     this.datingPanel.refreshLocale();
     this.connectSelfTitleEl.textContent = t('connect.myAccount');
-    this.connectRotateCodeBtnEl.textContent = t('connect.recoveryKeyBtn');
-    this.connectRotateCodeBtnEl.title = t('connect.recoveryKeyTitle');
-    this.connectRecoveryEmailBtnEl.textContent = t('connect.recoveryEmailBtn');
-    this.connectRecoveryEmailBtnEl.title = t('connect.recoveryEmailTitle');
     this.connectChangePinBtnEl.textContent = t('connect.changePinBtn');
-    this.connectRotCustomInput.placeholder = t('connect.rotPlaceholder');
-    this.connectRotPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
-    this.connectRotSubmitBtnEl.textContent = t('connect.saveKeyBtn');
-    this.connectRotGenBtnEl.textContent = t('connect.genAutoBtn');
-    this.connectRotHintEl.textContent = t('connect.rotHint');
-    this.connectRotCopyBtnEl.textContent = t('connect.copyKeyBtn');
-    this.connectEmailInput.placeholder = t('onboarding.emailPlaceholder');
-    this.connectEmailPinInput.placeholder = t('connect.confirmCurrentPinPlaceholder');
-    this.connectSaveEmailBtnEl.textContent = t('connect.emailSaveBtn');
     this.connectCurPinInput.placeholder = t('connect.currentPinPlaceholder');
     this.connectNextPinInput.placeholder = t('connect.newPinPlaceholder');
     this.connectNextPinConfInput.placeholder = t('connect.confirmNewPinPlaceholder');
@@ -4896,6 +4368,16 @@ export class ChatUI {
     this.connectRefDescEl.textContent = t('referral.cardDesc');
     this.connectRefWhatsappLinkEl.textContent = t('referral.whatsappBtn');
     this.connectRefCopyBtnEl.textContent = t('referral.copyLinkBtn');
+    this.shareSheetTitleEl.textContent = t('referral.sheetTitle');
+    this.shareSheetDescEl.textContent = t('referral.sheetDesc');
+    this.shareSheetWhatsappEl.textContent = t('referral.whatsappBtn');
+    this.shareSheetCopyBtnEl.textContent = t('referral.copyLinkBtn');
+    this.shareSheetDismissBtnEl.textContent = t('referral.notNowBtn');
+    this.blockedDoneTitleEl.textContent = t('safety.blockedModalTitle');
+    this.blockedDoneOkBtnEl.textContent = t('safety.blockedModalOkBtn');
+    if (this.lastBlockedName) {
+      this.blockedDoneDescEl.textContent = t('safety.blockedModalDesc', { name: this.lastBlockedName });
+    }
     if (this.lastReferralSummary) {
       this.updateReferralMetrics(this.lastReferralSummary);
     } else {

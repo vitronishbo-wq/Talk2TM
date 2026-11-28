@@ -33,10 +33,8 @@ import { Message } from '../types';
 import { ACCESS_CONFIG } from '../config';
 import { generateId } from '../utils/sanitize';
 import {
-  createTalk2TMIdentity,
+  registerAccountWithEmail,
   restoreLocalIdentity,
-  getLocalIdentity,
-  LocalIdentity,
 } from '../identity';
 
 export interface DiagnosticOptions {
@@ -311,12 +309,19 @@ export async function testIdentityAcceptanceFlow(
       throw new Error('Serviço Firebase não disponível.');
     }
 
-    // Passo 1 & 2: Criação da Identidade (TM-XXXX-XXXX + Firebase Auth + Firestore)
+    // Passo 1 & 2: Criação da Identidade (User + Tel + E-mail + PIN local + Firebase Auth + Firestore)
     currentStep = 'create_identity_flow';
-    console.log('[1/4] Gerando código e registrando credencial no Firebase Auth...');
-    const identity = await createTalk2TMIdentity(nickname);
+    console.log('[1/4] Registrando conta com e-mail e PIN local no Firebase Auth...');
+    const cleanUser = nickname.replace(/[^a-zA-Z0-9._]/g, '') || 'qa_aceitacao';
+    const regResult = await registerAccountWithEmail({
+      username: cleanUser.length >= 3 ? cleanUser.slice(0, 20) : 'qa_aceitacao',
+      phone: '+244948000000',
+      email: `${cleanUser.toLowerCase()}@example.com`,
+      pin: '654321',
+    });
+    const identity = regResult.identity;
     console.log(`✔ Identidade gerada: ${identity.talk2tmId} (UID: ${identity.uid})`);
-    console.log(`✔ E-mail interno: ${identity.internalEmail}`);
+    console.log(`✔ E-mail da conta: ${identity.internalEmail}`);
 
     // Passo 3: Verificação de users/{uid}
     currentStep = 'verify_users_doc';

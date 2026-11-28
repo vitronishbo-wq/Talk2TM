@@ -204,8 +204,8 @@ export class Talk2TMLockScreen {
 
     this.clearFeedback();
     this.sequence += clean;
-    if (this.sequence.length > 32) {
-      this.sequence = this.sequence.slice(-24);
+    if (this.sequence.length > 256) {
+      this.sequence = this.sequence.slice(-128);
     }
     this.renderPinVisor();
 

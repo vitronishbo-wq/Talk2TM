@@ -129,6 +129,12 @@
           "description": "Identificador público formatado TM-XXXX-XXXX.",
           "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$"
         },
+        "username": {
+          "type": "string",
+          "description": "Nome de utilizador único (ex: Truman01).",
+          "minLength": 3,
+          "maxLength": 30
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -153,6 +159,11 @@
           "minLength": 1,
           "maxLength": 30
         },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30
+        },
         "active": {
           "type": "boolean"
         },
@@ -162,6 +173,38 @@
         }
       },
       "required": ["talk2tmId", "uid", "displayName", "active", "createdAt"]
+    },
+    "UsernameDirectoryEntry": {
+      "title": "UsernameDirectoryEntry",
+      "description": "Índice único por username em minúsculas para garantir unicidade sem expor listagem.",
+      "type": "object",
+      "properties": {
+        "usernameLower": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9._]{3,30}$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "talk2tmId": {
+          "type": "string",
+          "pattern": "^TM-[A-Z0-9]{4}-[A-Z0-9]{4}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["usernameLower", "username", "uid", "talk2tmId", "createdAt"]
     },
     "Conversation": {
       "title": "Conversation",
@@ -521,6 +564,10 @@
     "/userProfiles/{talk2tmId}": {
       "schema": "UserProfile",
       "description": "Índice público de perfis ativos para busca por Talk2TM ID."
+    },
+    "/usernames/{usernameLower}": {
+      "schema": "UsernameDirectoryEntry",
+      "description": "Índice único de nomes de utilizador sem listagem pública."
     },
     "/conversations/{conversationId}": {
       "schema": "Conversation",

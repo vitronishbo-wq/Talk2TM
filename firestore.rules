@@ -284,13 +284,14 @@ service cloud.firestore {
       allow list: if false;
       allow create: if isUser(uid) &&
                        request.resource.data.keys().hasAll(['uid', 'talk2tmId', 'createdAt']) &&
-                       request.resource.data.keys().hasOnly(['uid', 'talk2tmId', 'createdAt', 'phoneHash', 'phoneMasked']) &&
+                       request.resource.data.keys().hasOnly(['uid', 'talk2tmId', 'createdAt', 'phoneHash', 'phoneMasked', 'username']) &&
                        request.resource.data.uid == request.auth.uid &&
                        isValidTalk2tmId(request.resource.data.talk2tmId) &&
                        request.resource.data.createdAt is string &&
                        request.resource.data.createdAt.size() >= 1 &&
                        (!('phoneHash' in request.resource.data) || isValidPhoneHash(request.resource.data.phoneHash)) &&
-                       (!('phoneMasked' in request.resource.data) || (request.resource.data.phoneMasked is string && request.resource.data.phoneMasked.size() >= 3 && request.resource.data.phoneMasked.size() <= 30));
+                       (!('phoneMasked' in request.resource.data) || (request.resource.data.phoneMasked is string && request.resource.data.phoneMasked.size() >= 3 && request.resource.data.phoneMasked.size() <= 30)) &&
+                       (!('username' in request.resource.data) || (request.resource.data.username is string && request.resource.data.username.size() >= 3 && request.resource.data.username.size() <= 30));
       allow update: if isUser(uid) &&
                        !isProtectedLegacyUid(uid) &&
                        request.resource.data.uid == resource.data.uid &&
@@ -298,6 +299,7 @@ service cloud.firestore {
                        request.resource.data.createdAt == resource.data.createdAt &&
                        request.resource.data.get('phoneHash', null) == resource.data.get('phoneHash', null) &&
                        request.resource.data.get('phoneMasked', null) == resource.data.get('phoneMasked', null) &&
+                       request.resource.data.get('username', null) == resource.data.get('username', null) &&
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accountStatus', 'deletionRequestedAt']) &&
                        request.resource.data.accountStatus == 'deleting' &&
                        request.resource.data.deletionRequestedAt is string &&
@@ -313,12 +315,13 @@ service cloud.firestore {
       allow create: if isAuthenticated() &&
                        isValidTalk2tmId(talk2tmId) &&
                        request.resource.data.keys().hasAll(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt']) &&
-                       request.resource.data.keys().hasOnly(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt', 'plan']) &&
+                       request.resource.data.keys().hasOnly(['talk2tmId', 'uid', 'displayName', 'active', 'createdAt', 'plan', 'username']) &&
                        request.resource.data.uid == request.auth.uid &&
                        request.resource.data.talk2tmId == talk2tmId &&
                        request.resource.data.displayName is string &&
                        request.resource.data.displayName.size() >= 1 &&
                        request.resource.data.displayName.size() <= 30 &&
+                       (!('username' in request.resource.data) || (request.resource.data.username is string && request.resource.data.username.size() >= 3 && request.resource.data.username.size() <= 30)) &&
                        request.resource.data.active is bool &&
                        request.resource.data.active == true &&
                        (!('plan' in request.resource.data) || (
@@ -335,6 +338,7 @@ service cloud.firestore {
                        request.resource.data.uid == resource.data.uid &&
                        request.resource.data.talk2tmId == resource.data.talk2tmId &&
                        request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.get('username', null) == resource.data.get('username', null) &&
                        (
                          (
                            resource.data.uid == request.auth.uid &&
@@ -417,6 +421,35 @@ service cloud.firestore {
                        );
       allow delete: if isAuthenticated() &&
                        isValidPhoneHash(phoneHash) &&
+                       resource != null &&
+                       resource.data.uid == request.auth.uid &&
+                       isAccountDeletionInProgress(request.auth.uid);
+    }
+
+    // 2c. usernames/{usernameLower} — Unicidade de nome de utilizador sem listagem pública
+    match /usernames/{usernameLower} {
+      allow get: if isAuthenticated() && usernameLower is string && usernameLower.matches('^[a-z0-9._]{3,30}$');
+      allow list: if false;
+      allow create: if isAuthenticated() &&
+                       usernameLower is string &&
+                       usernameLower.matches('^[a-z0-9._]{3,30}$') &&
+                       request.resource.data.keys().hasAll(['usernameLower', 'username', 'uid', 'talk2tmId', 'createdAt']) &&
+                       request.resource.data.keys().hasOnly(['usernameLower', 'username', 'uid', 'talk2tmId', 'createdAt']) &&
+                       request.resource.data.usernameLower == usernameLower &&
+                       request.resource.data.username is string &&
+                       request.resource.data.username.size() >= 3 &&
+                       request.resource.data.username.size() <= 30 &&
+                       request.resource.data.username.lower() == usernameLower &&
+                       request.resource.data.uid == request.auth.uid &&
+                       isValidTalk2tmId(request.resource.data.talk2tmId) &&
+                       request.resource.data.createdAt is string &&
+                       request.resource.data.createdAt.size() >= 1 &&
+                       exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.talk2tmId == request.resource.data.talk2tmId;
+      allow update: if false;
+      allow delete: if isAuthenticated() &&
+                       usernameLower is string &&
+                       usernameLower.matches('^[a-z0-9._]{3,30}$') &&
                        resource != null &&
                        resource.data.uid == request.auth.uid &&
                        isAccountDeletionInProgress(request.auth.uid);

@@ -37,12 +37,13 @@ export interface Message {
 export interface UserSession {
   userId: string;
   displayName: string;
+  username?: string;
   roomId: string;
   talk2tmId?: string;
   conversationId?: string;
   phoneMasked?: string;
-  recoveryEmail?: string;
-  pendingRecoveryEmail?: string;
+  email?: string;
+  emailVerified?: boolean;
 }
 
 export interface ChatConfig {
@@ -66,6 +67,7 @@ export interface ChatConfig {
 export interface UserAccount {
   uid: string;
   talk2tmId: string;
+  username?: string;
   createdAt: string;
   phoneHash?: string;
   phoneMasked?: string;
@@ -80,6 +82,7 @@ export interface UserProfile {
   talk2tmId: string;
   uid: string;
   displayName: string;
+  username?: string;
   active: boolean;
   createdAt: string;
   plan?: string;
@@ -110,6 +113,17 @@ export interface PhoneDirectoryEntry {
   talk2tmId: string;
   displayName: string;
   active: boolean;
+  createdAt: string;
+}
+
+/**
+ * 2c. usernames/{usernameLower} — Índice único de utilizador (ex: truman01)
+ */
+export interface UsernameDirectoryEntry {
+  usernameLower: string;
+  username: string;
+  uid: string;
+  talk2tmId: string;
   createdAt: string;
 }
 

@@ -158,19 +158,19 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { testRealtimeSyncAtoB } from './firebase/diagnostic';
 import {
   applyLocalResetEpochIfNeeded,
-  associateRecoveryEmailWithPin,
   authenticateVaultIdentity,
+  checkCurrentEmailActivation,
+  completeEmailActivationInApp,
   completePasswordResetInApp,
   deleteOwnAccountCompletely,
   findLocalIdentityByPin,
   getActiveVaultPinLengths,
   getAllLocalIdentities,
   getLocalIdentity,
-  recoverPhoneIdentity,
-  regenerateRecoveryCodeWithPin,
-  registerPhoneIdentity,
+  registerAccountWithEmail,
+  resendEmailActivationLink,
   restoreLocalIdentity,
-  sendPasswordResetForRecoveryEmail,
+  sendRecoveryEmailLink,
   updateLocalPinForAccount,
   verifyInAppPasswordResetCode,
   LocalIdentity,
@@ -265,7 +265,8 @@ export class Talk2TMApp {
   private hubConversations: Conversation[] = [];
   private hubHasRemoteConversationsSnapshot: boolean = false;
   private knownAcceptedInviteIds: Set<string> = new Set();
-  private pendingOnboardingSession: UserSession | null = null;
+  private pendingActivationIdentity: LocalIdentity | null = null;
+  private pendingActivationPin: string | null = null;
   private isCheckingCustomPin: boolean = false;
   private adminOverlayController: { destroy: () => Promise<void> } | null = null;
   private unsubscribeOwnProfile: Unsubscribe | null = null;
@@ -322,23 +323,20 @@ export class Talk2TMApp {
       onCreateIdentity: async (params) => {
         return await this.handleCreateIdentity(params);
       },
-      onFinishOnboarding: async () => {
-        await this.handleFinishOnboarding();
+      onCheckEmailActivation: async () => {
+        return await this.handleCheckEmailActivation();
       },
-      onRecoverIdentity: async (params) => {
-        await this.handleRecoverIdentity(params);
+      onResendActivationEmail: async () => {
+        return await this.handleResendActivationEmail();
+      },
+      onCancelPendingActivation: async () => {
+        await this.handleCancelPendingActivation();
       },
       onSendPasswordResetEmail: async (email: string) => {
-        return await sendPasswordResetForRecoveryEmail(email);
+        return await sendRecoveryEmailLink(email);
       },
       onCompleteInAppPasswordReset: async (params) => {
         await this.handleCompleteInAppPasswordReset(params);
-      },
-      onRegenerateRecoveryCode: async (currentPin: string, customRecoveryCode?: string) => {
-        return await this.handleRegenerateRecoveryCode(currentPin, customRecoveryCode);
-      },
-      onAssociateRecoveryEmail: async (currentPin: string, email: string) => {
-        return await this.handleAssociateRecoveryEmail(currentPin, email);
       },
       onChangeLocalPin: async (currentPin: string, newPin: string) => {
         await this.handleChangeLocalPin(currentPin, newPin);
@@ -469,7 +467,7 @@ export class Talk2TMApp {
       const cleanDisplay = (displayValue || '').trim();
       const cleanSeq = (inputSequence || '').trim();
 
-      if (/^\d{4,8}$/.test(cleanDisplay) && lengths.includes(cleanDisplay.length)) {
+      if (/^\d{6,}$/.test(cleanDisplay) && lengths.includes(cleanDisplay.length)) {
         candidates.push(cleanDisplay);
       }
       for (const len of lengths) {
@@ -1933,11 +1931,43 @@ export class Talk2TMApp {
 
     this.setConnectionState(navigator.onLine ? 'online' : 'offline');
 
-    // Se o utilizador abriu um link nativo de redefinição (?mode=resetPassword&oobCode=...), mostra fluxo direto
+    // Roteamento dedicado dos retornos por e-mail (ativação vs recuperação)
     if (typeof window !== 'undefined' && window.location?.search) {
       const searchParams = new URLSearchParams(window.location.search);
       const mode = searchParams.get('mode');
       const oobCode = searchParams.get('oobCode');
+      const authFlow = searchParams.get('authFlow');
+
+      if (mode === 'verifyEmail' && oobCode) {
+        if (window.history?.replaceState) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        try {
+          await completeEmailActivationInApp(oobCode);
+          this.ui.showLockView();
+          this.ui.showTemporaryNotice(t('activation.confirmedNotice'));
+          return;
+        } catch (err: any) {
+          this.ui.showLockView();
+          this.ui.showTemporaryNotice(
+            err?.message || t('err.activationLinkExpired')
+          );
+          return;
+        }
+      }
+
+      if (authFlow === 'verifyEmail') {
+        if (window.history?.replaceState) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        const status = await checkCurrentEmailActivation().catch(() => ({ verified: false }));
+        this.ui.showLockView();
+        this.ui.showTemporaryNotice(
+          status.verified ? t('activation.confirmedNotice') : t('activation.pendingLinkHint')
+        );
+        return;
+      }
+
       if (mode === 'resetPassword' && oobCode) {
         if (window.history?.replaceState) {
           window.history.replaceState({}, '', window.location.pathname);
@@ -1953,6 +1983,15 @@ export class Talk2TMApp {
           );
           return;
         }
+      }
+
+      if (authFlow === 'resetPassword') {
+        if (window.history?.replaceState) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        this.ui.showRecoveryView();
+        this.ui.showTemporaryNotice(t('recovery.returnCheckHint'));
+        return;
       }
 
       const refCode = extractReferralCodeFromSearch(window.location.search);
@@ -2016,14 +2055,33 @@ export class Talk2TMApp {
    * Abre a UI imediatamente do cache local e autentica/sincroniza o cofre em segundo plano.
    */
   private async unlockWithLocalIdentity(identity: LocalIdentity, pin?: string): Promise<boolean> {
+    const isLegacyAccount = identity.internalEmail.toLowerCase().endsWith('@talk2tm.internal');
+    if (!isLegacyAccount && !identity.emailVerified) {
+      const authRes = await authenticateVaultIdentity(identity, pin).catch(() => null);
+      if (authRes && authRes.identity.emailVerified) {
+        identity = authRes.identity;
+      } else {
+        const pending = authRes?.identity || identity;
+        this.pendingActivationIdentity = pending;
+        this.pendingActivationPin = pin || null;
+        this.stopBackgroundMonitor();
+        this.ui.showPendingActivationView(
+          pending.internalEmail,
+          pending.username || pending.displayName
+        );
+        return true;
+      }
+    }
+
     const session: UserSession = {
       userId: identity.uid,
       displayName: identity.displayName,
+      username: identity.username,
       roomId: '',
       talk2tmId: identity.talk2tmId,
       phoneMasked: identity.phoneMasked,
-      recoveryEmail: identity.recoveryEmail,
-      pendingRecoveryEmail: identity.pendingRecoveryEmail,
+      email: isLegacyAccount ? undefined : identity.internalEmail,
+      emailVerified: isLegacyAccount ? true : Boolean(identity.emailVerified),
     };
 
     this.currentSession = session;
@@ -2054,12 +2112,18 @@ export class Talk2TMApp {
           session.displayName = authRes.displayName;
           changed = true;
         }
-        if (authRes.identity.recoveryEmail !== session.recoveryEmail) {
-          session.recoveryEmail = authRes.identity.recoveryEmail;
+        if (authRes.identity.username && authRes.identity.username !== session.username) {
+          session.username = authRes.identity.username;
           changed = true;
         }
-        if (authRes.identity.pendingRecoveryEmail !== session.pendingRecoveryEmail) {
-          session.pendingRecoveryEmail = authRes.identity.pendingRecoveryEmail;
+        const syncedEmail = isLegacyAccount ? undefined : authRes.identity.internalEmail;
+        if (syncedEmail !== session.email) {
+          session.email = syncedEmail;
+          changed = true;
+        }
+        const syncedVerified = isLegacyAccount ? true : Boolean(authRes.identity.emailVerified);
+        if (syncedVerified !== session.emailVerified) {
+          session.emailVerified = syncedVerified;
           changed = true;
         }
         if (changed) {
@@ -2090,12 +2154,18 @@ export class Talk2TMApp {
           session.displayName = authRes.displayName;
           changed = true;
         }
-        if (authRes.identity.recoveryEmail !== session.recoveryEmail) {
-          session.recoveryEmail = authRes.identity.recoveryEmail;
+        if (authRes.identity.username && authRes.identity.username !== session.username) {
+          session.username = authRes.identity.username;
           changed = true;
         }
-        if (authRes.identity.pendingRecoveryEmail !== session.pendingRecoveryEmail) {
-          session.pendingRecoveryEmail = authRes.identity.pendingRecoveryEmail;
+        const syncedEmail = isLegacyAccount ? undefined : authRes.identity.internalEmail;
+        if (syncedEmail !== session.email) {
+          session.email = syncedEmail;
+          changed = true;
+        }
+        const syncedVerified = isLegacyAccount ? true : Boolean(authRes.identity.emailVerified);
+        if (syncedVerified !== session.emailVerified) {
+          session.emailVerified = syncedVerified;
           changed = true;
         }
         if (changed) {
@@ -2115,17 +2185,16 @@ export class Talk2TMApp {
   }
 
   /**
-   * Cadastro Zero Custos (4 campos + Chave Pessoal de Recuperação escolhida ou gerada + e-mail opcional):
-   * Cria identidade e prepara sessão para entrar imediatamente.
+   * Cadastro único (User + Tel + E-mail + PIN numérico local):
+   * Cria identidade, envia link de ativação e aguarda confirmação antes de liberar o Hub.
    */
   public async handleCreateIdentity(params: {
-    displayName: string;
+    username: string;
     phone: string;
+    email: string;
     pin: string;
-    recoveryCode?: string;
-    recoveryEmail?: string;
-  }): Promise<{ talk2tmId: string; recoveryCode: string; e164Phone: string }> {
-    const result = await registerPhoneIdentity(params);
+  }): Promise<{ talk2tmId: string; e164Phone: string; email: string; emailVerified: boolean }> {
+    const result = await registerAccountWithEmail(params);
 
     const pendingRef = getPendingReferralCode();
     if (pendingRef) {
@@ -2137,92 +2206,57 @@ export class Talk2TMApp {
       clearPendingReferralCode();
     }
 
-    this.pendingOnboardingSession = {
-      userId: result.identity.uid,
-      displayName: result.identity.displayName,
-      roomId: '',
-      talk2tmId: result.identity.talk2tmId,
-      phoneMasked: result.identity.phoneMasked,
-      recoveryEmail: result.identity.recoveryEmail,
-      pendingRecoveryEmail: result.identity.pendingRecoveryEmail,
-    };
+    this.pendingActivationIdentity = result.identity;
+    this.pendingActivationPin = params.pin.trim();
 
     return {
       talk2tmId: result.identity.talk2tmId,
-      recoveryCode: result.recoveryCode,
       e164Phone: result.e164Phone,
+      email: result.email,
+      emailVerified: result.emailVerified,
     };
   }
 
-  public async handleFinishOnboarding(): Promise<void> {
-    const session = this.pendingOnboardingSession;
-    this.pendingOnboardingSession = null;
-    if (!session) {
-      const local = getLocalIdentity();
-      if (local) {
-        await this.unlockWithLocalIdentity(local);
-      } else {
-        this.ui.showPassEntryView();
-      }
-      return;
+  public async handleCheckEmailActivation(): Promise<{ verified: boolean }> {
+    const status = await checkCurrentEmailActivation();
+    if (!status.verified) {
+      return { verified: false };
     }
 
-    this.currentSession = session;
-    this.currentRoom = null;
-    saveSession(session);
-    this.stopBackgroundMonitor();
-    this.startSessionTimeout();
-    this.resetInactivityTimer();
-    this.attachUserBlocksSubscription(session.userId);
-    this.syncWeeklyActivityTelemetry(session.userId);
-    await this.openBilateralHub(session);
+    const baseIdentity = this.pendingActivationIdentity || getLocalIdentity();
+    const pin = this.pendingActivationPin || undefined;
+    this.pendingActivationIdentity = null;
+    this.pendingActivationPin = null;
+
+    if (baseIdentity) {
+      await this.unlockWithLocalIdentity({ ...baseIdentity, emailVerified: true }, pin);
+    } else {
+      this.ui.showLockView();
+      this.ui.showTemporaryNotice(t('activation.confirmedNotice'));
+    }
+    return { verified: true };
   }
 
-  public async handleRecoverIdentity(params: {
-    phone?: string;
-    recoveryEmail?: string;
-    recoveryCode: string;
-    newPin: string;
-  }): Promise<void> {
-    const identity = await recoverPhoneIdentity(params);
-    await this.unlockWithLocalIdentity(identity, params.newPin.trim());
+  public async handleResendActivationEmail(): Promise<{ alreadyVerified: boolean; email: string }> {
+    const res = await resendEmailActivationLink();
+    if (res.alreadyVerified) {
+      await this.handleCheckEmailActivation();
+    }
+    return res;
+  }
+
+  public async handleCancelPendingActivation(): Promise<void> {
+    this.pendingActivationIdentity = null;
+    this.pendingActivationPin = null;
+    this.ui.showLockView();
   }
 
   public async handleCompleteInAppPasswordReset(params: {
     oobCode: string;
-    recoveryCode: string;
     newPin: string;
   }): Promise<void> {
     const identity = await completePasswordResetInApp(params);
     await this.unlockWithLocalIdentity(identity, params.newPin.trim());
-  }
-
-  public async handleRegenerateRecoveryCode(currentPin: string, customRecoveryCode?: string): Promise<string> {
-    if (!this.currentSession) {
-      throw new Error(t('app.activeSessionRequired'));
-    }
-    const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
-    const res = await regenerateRecoveryCodeWithPin(uid, currentPin, customRecoveryCode);
-    return res.recoveryCode;
-  }
-
-  public async handleAssociateRecoveryEmail(
-    currentPin: string,
-    email: string
-  ): Promise<{ status: 'already_active' | 'verification_sent'; email: string }> {
-    if (!this.currentSession) {
-      throw new Error(t('app.activeSessionRequired'));
-    }
-    const uid = getCurrentAuthUser()?.uid || this.currentSession.userId;
-    const res = await associateRecoveryEmailWithPin(uid, currentPin, email);
-    if (res.status === 'already_active') {
-      this.currentSession.recoveryEmail = res.email;
-      this.currentSession.pendingRecoveryEmail = undefined;
-    } else {
-      this.currentSession.pendingRecoveryEmail = res.email;
-    }
-    saveSession(this.currentSession);
-    return res;
   }
 
   public async handleChangeLocalPin(currentPin: string, newPin: string): Promise<void> {

@@ -1,31 +1,29 @@
 /**
- * Talk2TM — Gerenciador de Identidade Zero Custos & Cofre Local Criptografado
+ * Talk2TM — Gerenciador de Identidade & Cofre Local Criptografado
  *
  * Responsabilidades:
- * 1. Identidade por telefone normalizado (E.164, padrão +244) + hash SHA-256 para busca exata sem expor número bruto.
+ * 1. Identidade por utilizador único (ex: Truman01), telefone normalizado E.164 (+244 padrão) e e-mail real ativado por link.
  * 2. Geração interna silenciosa de Talk2TM ID (TM-XXXX-XXXX) como vínculo técnico bilateral (nunca exibido ao utilizador).
- * 3. Código de recuperação gratuito (~120 bits de entropia) mostrado uma única vez no cadastro e usado para derivar a senha Auth via PBKDF2-SHA256.
- * 4. Cofre local multi-conta encriptado com AES-256-GCM + PBKDF2(PIN) + hash rápido com sal para desbloqueio direto no teclado numérico da calculadora.
- * 5. Zero armazenamento em Base64/texto simples de PIN, código de recuperação ou credencial Auth.
+ * 3. Senha interna do Firebase Auth de alta entropia (32 caracteres aleatórios) totalmente independente do PIN numérico.
+ * 4. Cofre local multi-conta encriptado com AES-256-GCM + PBKDF2(PIN) + hash rápido com sal para desbloqueio direto pelo PIN (>= 6 dígitos).
+ * 5. Zero armazenamento em Base64/texto simples de PIN ou credencial Auth.
  */
 
-import { PhoneDirectoryEntry, UserProfile, UserAccount } from './types';
+import { PhoneDirectoryEntry, UsernameDirectoryEntry, UserProfile, UserAccount } from './types';
 import {
   getFirebaseDB,
   getFirebaseAuth,
   initFirebase,
   syncAuthState,
-  handleFirestoreError,
-  OperationType,
 } from './firebase/firestore';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
   updateProfile,
-  updatePassword,
+  sendEmailVerification,
+  applyActionCode,
   sendPasswordResetEmail,
-  verifyBeforeUpdateEmail,
   verifyPasswordResetCode,
   confirmPasswordReset,
   EmailAuthProvider,
@@ -38,7 +36,6 @@ import {
   getDoc,
   getDocs,
   updateDoc,
-  deleteDoc,
   collection,
   query,
   where,
@@ -50,7 +47,6 @@ import {
   normalizePhoneNumber,
   maskPhoneNumber,
   hashPhoneNumber,
-  phoneHashToInternalEmail,
 } from './utils/phone';
 import { t } from './i18n';
 import { checkAccountCreationThrottle, recordAccountCreationAttempt } from './safety';
@@ -65,11 +61,11 @@ const PROTECTED_LEGACY_UIDS = new Set(['uid_truman_852456', 'uid_maezinha_135790
 export interface LocalIdentity {
   uid: string;
   talk2tmId: string;
+  username?: string;
   displayName: string;
   internalEmail: string;
-  recoveryEmail?: string;
-  pendingRecoveryEmail?: string;
-  /** Usado apenas por legado/testes unitários de migração; contas Zero-Cost nunca gravam este campo no disco. */
+  emailVerified?: boolean;
+  /** Usado apenas por legado/testes unitários de migração; contas modernas nunca gravam este campo no disco. */
   internalSecret?: string;
   phoneHash?: string;
   phoneMasked?: string;
@@ -86,25 +82,18 @@ interface LocalVaultStore {
   accounts: LocalIdentity[];
 }
 
-export interface RegisterPhoneIdentityParams {
-  displayName: string;
+export interface RegisterAccountParams {
+  username: string;
   phone: string;
+  email: string;
   pin: string;
-  recoveryCode?: string;
-  recoveryEmail?: string;
 }
 
-export interface RegisterPhoneIdentityResult {
+export interface RegisterAccountResult {
   identity: LocalIdentity;
-  recoveryCode: string;
   e164Phone: string;
-}
-
-export interface RecoverPhoneIdentityParams {
-  phone?: string;
-  recoveryEmail?: string;
-  recoveryCode: string;
-  newPin: string;
+  email: string;
+  emailVerified: boolean;
 }
 
 function getWebCrypto(): Crypto {
@@ -166,149 +155,56 @@ export function generateTalk2TMId(): string {
 }
 
 /**
- * Mantido para compatibilidade retroativa com diagnóstico e testes legados.
+ * Gera uma credencial interna de alta entropia (32 caracteres aleatórios) para o Firebase Auth.
+ * Totalmente independente do PIN numérico local do utilizador.
  */
 export function generateInternalSecret(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%';
-  const array = getRandomBytes(16);
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
+  const array = getRandomBytes(32);
   return Array.from(array)
     .map((b) => chars[b % chars.length])
     .join('');
 }
 
 /**
- * Mantido para compatibilidade retroativa com fluxo legado TM-XXXX-XXXX.
+ * Valida o nome de utilizador público (ex: Truman01), 3 a 24 caracteres alfanuméricos, ponto ou underscore.
  */
-export function talk2tmIdToInternalEmail(talk2tmId: string): string {
-  const clean = talk2tmId.toLowerCase().replace(/[^a-z0-9]/g, '_');
-  return `${clean}@talk2tm.internal`;
+export function validateUsername(
+  raw: string
+): { valid: boolean; username: string; usernameLower: string; error?: string } {
+  const trimmed = (raw || '').trim();
+  const usernameLower = trimmed.toLowerCase();
+  if (!trimmed) {
+    return { valid: false, username: '', usernameLower: '', error: t('err.nameRequired') };
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._]{2,23}$/.test(trimmed)) {
+    return {
+      valid: false,
+      username: trimmed,
+      usernameLower,
+      error: t('err.usernameFormat'),
+    };
+  }
+  return { valid: true, username: trimmed, usernameLower };
 }
 
 /**
- * Gera um código de recuperação de alta entropia (24 chars, ~120 bits) sem caracteres ambíguos.
- * Exibido uma única vez ao utilizador; nunca armazenado em texto simples ou Base64.
+ * Valida o e-mail real obrigatório da conta (rejeita vazio e o domínio interno @talk2tm.internal).
  */
-export function generateRecoveryCode(): string {
-  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-  const bytes = getRandomBytes(24);
-  const raw = Array.from(bytes)
-    .map((b) => chars[b % chars.length])
-    .join('');
-  return raw.match(/.{1,4}/g)!.join('-');
-}
-
-export function normalizeRecoveryCode(raw: string): string {
-  return (raw || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '');
-}
-
-const WEAK_RECOVERY_KEYS = new Set([
-  '123456',
-  '654321',
-  '1234567',
-  '12345678',
-  '87654321',
-  '123456789',
-  '012345',
-  '543210',
-  'ABCDEF',
-  'QWERTY',
-  'SENHA1',
-  'PASSWORD',
-  'TALK2TM',
-]);
-
-/**
- * Valida uma chave pessoal de recuperação (mínimo 6 caracteres após normalização),
- * garantindo que não seja idêntica ao PIN da calculadora nem trivialmente previsível.
- */
-export function validateRecoverySecret(
-  rawSecret: string,
-  pin?: string
-): { valid: boolean; normalized: string; error?: string } {
-  const normalized = normalizeRecoveryCode(rawSecret);
-  if (normalized.length < 6) {
-    return {
-      valid: false,
-      normalized,
-      error: t('err.recoveryKeyTooShort'),
-    };
-  }
-  if (normalized.length > 40) {
-    return {
-      valid: false,
-      normalized,
-      error: t('err.recoveryKeyTooLong'),
-    };
-  }
-  if (pin && normalized === pin.trim().toUpperCase()) {
-    return {
-      valid: false,
-      normalized,
-      error: t('err.recoveryKeyEqualsPin'),
-    };
-  }
-  if (/^(.)\1+$/.test(normalized) || WEAK_RECOVERY_KEYS.has(normalized)) {
-    return {
-      valid: false,
-      normalized,
-      error: t('err.recoveryKeyWeak'),
-    };
-  }
-  return { valid: true, normalized };
-}
-
-/**
- * Valida o e-mail de recuperação opcional (nunca obrigatório).
- */
-export function validateOptionalRecoveryEmail(
-  raw?: string
+export function validateAccountEmail(
+  raw: string
 ): { valid: boolean; email?: string; error?: string } {
   const trimmed = (raw || '').trim().toLowerCase();
   if (!trimmed) {
-    return { valid: true, email: undefined };
+    return { valid: false, error: t('err.emailRequired') };
   }
   if (trimmed.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-    return { valid: false, error: t('err.emailInvalidOrBlank') };
+    return { valid: false, error: t('err.invalidEmail') };
   }
   if (trimmed.endsWith('@talk2tm.internal')) {
     return { valid: false, error: t('err.emailPersonalRequired') };
   }
   return { valid: true, email: trimmed };
-}
-
-/**
- * Deriva deterministicamente a senha do Firebase Auth a partir da chave pessoal / código de recuperação + phoneHash.
- * Permite recuperar ou entrar na mesma conta (mesmo UID) em qualquer dispositivo sem SMS, e-mail ou Cloud Functions.
- */
-export async function deriveAuthPassword(recoveryCode: string, phoneHash: string): Promise<string> {
-  const normalizedCode = normalizeRecoveryCode(recoveryCode);
-  if (normalizedCode.length < 6) {
-    throw new Error(t('err.recoveryKeyTooShort'));
-  }
-  const webCrypto = getWebCrypto();
-  const encoder = new TextEncoder();
-  const baseKey = await webCrypto.subtle.importKey(
-    'raw',
-    toArrayBuffer(encoder.encode(normalizedCode)),
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
-  const bits = await webCrypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      hash: 'SHA-256',
-      salt: toArrayBuffer(encoder.encode(`talk2tm:auth:v1:${phoneHash}`)),
-      iterations: 100_000,
-    },
-    baseKey,
-    256
-  );
-  return `T2M$${bytesToHex(new Uint8Array(bits))}`;
 }
 
 /**
@@ -470,7 +366,7 @@ export function getActiveVaultPinLengths(
 ): number[] {
   const lengths = new Set<number>();
   for (const acc of readVaultStore(storage).accounts) {
-    if (typeof acc.pinLength === 'number' && acc.pinLength >= 4 && acc.pinLength <= 8) {
+    if (typeof acc.pinLength === 'number' && acc.pinLength >= 6) {
       lengths.add(acc.pinLength);
     }
   }
@@ -488,10 +384,12 @@ export function upsertLocalIdentity(
     ? {
         uid: identity.uid,
         talk2tmId: identity.talk2tmId,
+        ...(identity.username ? { username: identity.username } : {}),
         displayName: identity.displayName,
         internalEmail: identity.internalEmail,
-        ...(identity.recoveryEmail ? { recoveryEmail: identity.recoveryEmail } : {}),
-        ...(identity.pendingRecoveryEmail ? { pendingRecoveryEmail: identity.pendingRecoveryEmail } : {}),
+        ...(typeof identity.emailVerified === 'boolean'
+          ? { emailVerified: identity.emailVerified }
+          : {}),
         phoneHash: identity.phoneHash,
         phoneMasked: identity.phoneMasked,
         pinLength: identity.pinLength,
@@ -633,8 +531,8 @@ export function applyLocalResetEpochIfNeeded(
 }
 
 /**
- * Valida o PIN numérico de 4 a 8 dígitos, bloqueando códigos reservados do sistema (852456 / 135790)
- * e colisões com outras contas salvas no mesmo dispositivo.
+ * Valida o PIN numérico local com mínimo de 6 dígitos (sem limite superior, aceita ex. 000000 ou 123456),
+ * bloqueando códigos reservados do sistema (852456 / 135790) e colisões no mesmo dispositivo.
  */
 export async function validateLocalPin(
   pin: string,
@@ -643,7 +541,7 @@ export async function validateLocalPin(
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 ): Promise<{ valid: boolean; error?: string }> {
   const clean = (pin || '').trim();
-  if (!/^\d{4,8}$/.test(clean)) {
+  if (!/^\d{6,}$/.test(clean)) {
     return { valid: false, error: t('err.pinFormat') };
   }
   if (RESERVED_SYSTEM_PINS.has(clean)) {
@@ -665,14 +563,14 @@ export async function validateLocalPin(
 }
 
 /**
- * Procura no cofre local uma conta cujo PIN numérico corresponda ao digitado na calculadora ou na tela DEG.
+ * Procura no cofre local uma conta cujo PIN numérico (>= 6 dígitos) corresponda ao digitado.
  */
 export async function findLocalIdentityByPin(
   pin: string,
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 ): Promise<LocalIdentity | null> {
   const clean = (pin || '').trim();
-  if (!/^\d{4,8}$/.test(clean)) return null;
+  if (!/^\d{6,}$/.test(clean)) return null;
 
   const accounts = getAllLocalIdentities(storage);
   for (const acc of accounts) {
@@ -690,21 +588,27 @@ export async function findLocalIdentityByPin(
   return null;
 }
 
+export function getAuthActionContinueUrl(flow: 'verifyEmail' | 'resetPassword'): string {
+  const origin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'https://talk2tm.web.app';
+  return `${origin}/?authFlow=${flow}`;
+}
+
 /**
- * Cadastro Zero Custos (4 campos: Nome, Telefone, PIN, Confirmar PIN):
- * - Normaliza telefone E.164 (padrão +244) e calcula phoneHash SHA-256
- * - Impede duplicação de número no Auth + phoneLookup
- * - Gera recoveryCode (~120 bits) mostrado uma única vez ao utilizador
- * - Deriva senha Auth via PBKDF2-SHA256(recoveryCode, phoneHash)
- * - Cria users/{uid}, userProfiles/{talk2tmId} e phoneLookup/{phoneHash} com rollback em caso de falha
- * - Sela credencial localmente com AES-256-GCM + PIN
+ * Cadastro único:
+ * - User (único, ex: Truman01)
+ * - Tel (E.164 com +244 predefinido)
+ * - E-mail real + envio obrigatório do link de ativação
+ * - PIN numérico local (>= 6 dígitos, sem limite máximo) usado apenas no cofre local (nunca como senha do Firebase Auth)
  */
-export async function registerPhoneIdentity(
-  params: RegisterPhoneIdentityParams
-): Promise<RegisterPhoneIdentityResult> {
-  const cleanName = (params.displayName || '').trim().slice(0, 30);
-  if (!cleanName) {
-    throw new Error(t('err.nameRequired'));
+export async function registerAccountWithEmail(
+  params: RegisterAccountParams
+): Promise<RegisterAccountResult> {
+  const usernameCheck = validateUsername(params.username);
+  if (!usernameCheck.valid) {
+    throw new Error(usernameCheck.error || t('onboarding.errNameRequired'));
   }
 
   const phoneCheck = normalizePhoneNumber(params.phone);
@@ -712,33 +616,23 @@ export async function registerPhoneIdentity(
     throw new Error(phoneCheck.error || t('onboarding.errPhoneInvalid'));
   }
 
+  const emailCheck = validateAccountEmail(params.email);
+  if (!emailCheck.valid || !emailCheck.email) {
+    throw new Error(emailCheck.error || t('onboarding.errEmailInvalid'));
+  }
+
   const pinCheck = await validateLocalPin(params.pin, true);
   if (!pinCheck.valid) {
     throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
   }
 
-  let recoveryCode: string;
-  if (params.recoveryCode && params.recoveryCode.trim()) {
-    const recCheck = validateRecoverySecret(params.recoveryCode, params.pin);
-    if (!recCheck.valid) {
-      throw new Error(recCheck.error || t('onboarding.errSecretInvalid'));
-    }
-    recoveryCode = params.recoveryCode.trim();
-  } else {
-    recoveryCode = generateRecoveryCode();
-  }
-
-  const emailCheck = validateOptionalRecoveryEmail(params.recoveryEmail);
-  if (!emailCheck.valid) {
-    throw new Error(emailCheck.error || t('onboarding.errEmailInvalid'));
-  }
-
   const e164Phone = phoneCheck.e164;
   const phoneHash = await hashPhoneNumber(e164Phone);
   const phoneMasked = maskPhoneNumber(e164Phone);
-  const internalEmail = emailCheck.email || phoneHashToInternalEmail(phoneHash);
+  const cleanEmail = emailCheck.email;
   const talk2tmId = generateTalk2TMId();
-  const authPassword = await deriveAuthPassword(recoveryCode, phoneHash);
+  // Senha interna aleatória de alta entropia — nunca derivada nem igual ao PIN local
+  const authPassword = generateInternalSecret();
 
   await initFirebase();
   const auth = getFirebaseAuth();
@@ -751,15 +645,18 @@ export async function registerPhoneIdentity(
 
   let user: User;
   try {
-    const userCredential = await createUserWithEmailAndPassword(auth, internalEmail, authPassword);
+    const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, authPassword);
     user = userCredential.user;
     recordAccountCreationAttempt();
   } catch (err: any) {
     if (err?.code === 'auth/email-already-in-use') {
-      if (emailCheck.email) {
-        throw new Error(t('err.emailInUse'));
-      }
-      throw new Error(t('err.phoneInUse'));
+      throw new Error(t('err.emailInUse'));
+    }
+    if (err?.code === 'auth/invalid-email') {
+      throw new Error(t('err.invalidEmail'));
+    }
+    if (err?.code === 'auth/too-many-requests') {
+      throw new Error(t('err.tooManyRequests'));
     }
     throw new Error(err?.message || t('err.createAccountFailed'));
   }
@@ -767,11 +664,17 @@ export async function registerPhoneIdentity(
   syncAuthState(user);
 
   try {
-    await updateProfile(user, { displayName: cleanName }).catch(() => {});
+    await updateProfile(user, { displayName: usernameCheck.username }).catch(() => {});
     await user.getIdToken(true).catch(() => {});
 
-    // Verifica antes se phoneLookup já está ocupado por outra conta (evita escrita parcial)
-    const existingPhoneSnap = await getDoc(doc(db, 'phoneLookup', phoneHash));
+    const [existingUsernameSnap, existingPhoneSnap] = await Promise.all([
+      getDoc(doc(db, 'usernames', usernameCheck.usernameLower)),
+      getDoc(doc(db, 'phoneLookup', phoneHash)),
+    ]);
+
+    if (existingUsernameSnap.exists() && existingUsernameSnap.data()?.uid !== user.uid) {
+      throw new Error(t('err.usernameInUse'));
+    }
     if (existingPhoneSnap.exists() && existingPhoneSnap.data()?.uid !== user.uid) {
       throw new Error(t('err.phoneInUse'));
     }
@@ -781,6 +684,7 @@ export async function registerPhoneIdentity(
     const userAccount: UserAccount = {
       uid: user.uid,
       talk2tmId,
+      username: usernameCheck.username,
       createdAt: now,
       phoneHash,
       phoneMasked,
@@ -790,7 +694,8 @@ export async function registerPhoneIdentity(
     const userProfile: UserProfile = {
       talk2tmId,
       uid: user.uid,
-      displayName: cleanName,
+      username: usernameCheck.username,
+      displayName: usernameCheck.username,
       active: true,
       createdAt: now,
     };
@@ -800,19 +705,34 @@ export async function registerPhoneIdentity(
       phoneHash,
       uid: user.uid,
       talk2tmId,
-      displayName: cleanName,
+      displayName: usernameCheck.username,
       active: true,
       createdAt: now,
     };
     await setDoc(doc(db, 'phoneLookup', phoneHash), directoryEntry);
 
+    const usernameEntry: UsernameDirectoryEntry = {
+      usernameLower: usernameCheck.usernameLower,
+      username: usernameCheck.username,
+      uid: user.uid,
+      talk2tmId,
+      createdAt: now,
+    };
+    await setDoc(doc(db, 'usernames', usernameCheck.usernameLower), usernameEntry);
+
+    // Envia link de ativação da conta (fluxo distinto do link de recuperação)
+    await sendEmailVerification(user, {
+      url: getAuthActionContinueUrl('verifyEmail'),
+    });
+
     const sealed = await sealAuthSecretWithPin(authPassword, params.pin.trim());
     const identity: LocalIdentity = {
       uid: user.uid,
       talk2tmId,
-      displayName: cleanName,
-      internalEmail,
-      ...(emailCheck.email ? { recoveryEmail: emailCheck.email } : {}),
+      username: usernameCheck.username,
+      displayName: usernameCheck.username,
+      internalEmail: cleanEmail,
+      emailVerified: Boolean(user.emailVerified),
       phoneHash,
       phoneMasked,
       pinLength: sealed.pinLength,
@@ -824,9 +744,14 @@ export async function registerPhoneIdentity(
     };
     upsertLocalIdentity(identity, true);
 
-    return { identity, recoveryCode, e164Phone };
+    return {
+      identity,
+      e164Phone,
+      email: cleanEmail,
+      emailVerified: Boolean(user.emailVerified),
+    };
   } catch (err: any) {
-    // Rollback rigoroso: apaga o usuário Auth recém-criado para não deixar número preso sem perfil no Firestore
+    // Rollback rigoroso: apaga utilizador Auth recém-criado para não deixar e-mail/número/user preso
     try {
       await user.delete();
     } catch {
@@ -841,166 +766,122 @@ export async function registerPhoneIdentity(
 }
 
 /**
- * Recuperação / entrada noutro aparelho (100% gratuita):
- * - Via Telefone + Chave Pessoal (ou código gerado)
- * - Ou via E-mail de recuperação opcional (+ Telefone opcional), incluindo compatibilidade
- *   automática após redefinição de senha pelo link nativo do Firebase Auth.
+ * Conclui a ativação de conta por e-mail dentro da app (?mode=verifyEmail&oobCode=...).
  */
-export async function recoverPhoneIdentity(
-  params: RecoverPhoneIdentityParams
-): Promise<LocalIdentity> {
-  const rawPhone = (params.phone || '').trim();
-  const emailCheck = validateOptionalRecoveryEmail(params.recoveryEmail);
-  if (!emailCheck.valid) {
-    throw new Error(emailCheck.error || t('onboarding.errEmailInvalid'));
-  }
-
-  if (!rawPhone && !emailCheck.email) {
-    throw new Error(t('recovery.errMissingPhoneOrEmail'));
-  }
-
-  let phoneHash: string | null = null;
-  let phoneMasked: string | undefined;
-  if (rawPhone) {
-    const phoneCheck = normalizePhoneNumber(rawPhone);
-    if (!phoneCheck.valid || !phoneCheck.e164) {
-      throw new Error(phoneCheck.error || t('onboarding.errPhoneInvalid'));
-    }
-    phoneHash = await hashPhoneNumber(phoneCheck.e164);
-    phoneMasked = maskPhoneNumber(phoneCheck.e164);
-  }
-
-  const rawRecoverySecret = (params.recoveryCode || '').trim();
-  const normalizedCode = normalizeRecoveryCode(rawRecoverySecret);
-  if (normalizedCode.length < 6 && rawRecoverySecret.length < 6) {
-    throw new Error(t('recovery.errSecretMissing'));
-  }
-
-  const existingLocal = getAllLocalIdentities().find(
-    (a) =>
-      (phoneHash && a.phoneHash === phoneHash) ||
-      (emailCheck.email && a.internalEmail.toLowerCase() === emailCheck.email)
-  );
-  const pinCheck = await validateLocalPin(params.newPin, true, existingLocal?.uid);
-  if (!pinCheck.valid) {
-    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
-  }
-
+export async function completeEmailActivationInApp(oobCode?: string): Promise<{
+  verified: boolean;
+  email?: string;
+  uid?: string;
+}> {
   await initFirebase();
   const auth = getFirebaseAuth();
-  const db = getFirebaseDB();
-  if (!auth || !db) {
+  if (!auth) {
     throw new Error(t('err.firebaseUnavailable'));
   }
 
-  const loginEmail = emailCheck.email || phoneHashToInternalEmail(phoneHash!);
-  const derivedPassword =
-    phoneHash && normalizedCode.length >= 6
-      ? await deriveAuthPassword(normalizedCode, phoneHash)
-      : null;
-
-  let user: User | null = null;
-  let usedRawResetPassword = false;
-
-  if (derivedPassword) {
+  if (oobCode) {
     try {
-      const cred = await signInWithEmailAndPassword(auth, loginEmail, derivedPassword);
-      user = cred.user;
-    } catch (err: any) {
-      const isCredErr =
-        err?.code === 'auth/invalid-credential' ||
-        err?.code === 'auth/wrong-password' ||
-        err?.code === 'auth/user-not-found';
-      if (!isCredErr) {
-        throw new Error(err?.message || t('err.recoverAuthFailed'));
-      }
+      await applyActionCode(auth, oobCode);
+    } catch {
+      throw new Error(t('err.activationLinkExpired'));
     }
   }
 
-  // Fallback transparente: se o utilizador acabou de redefinir a senha no link nativo do Firebase Auth,
-  // a senha no Auth está em texto simples; autenticamos com ela e convertemos imediatamente para PBKDF2.
-  if (!user && emailCheck.email && rawRecoverySecret.length >= 6) {
-    try {
-      const cred = await signInWithEmailAndPassword(auth, emailCheck.email, rawRecoverySecret);
-      user = cred.user;
-      usedRawResetPassword = true;
-    } catch (err: any) {
-      const isCredErr =
-        err?.code === 'auth/invalid-credential' ||
-        err?.code === 'auth/wrong-password' ||
-        err?.code === 'auth/user-not-found';
-      if (!isCredErr) {
-        throw new Error(err?.message || t('err.recoverAuthFailed'));
-      }
+  if (auth.currentUser) {
+    await auth.currentUser.reload().catch(() => {});
+    await auth.currentUser.getIdToken(true).catch(() => {});
+    syncAuthState(auth.currentUser);
+  }
+
+  const user = auth.currentUser;
+  const verified = Boolean(oobCode) || Boolean(user?.emailVerified);
+
+  if (verified && user) {
+    const existing = getAllLocalIdentities().find(
+      (a) =>
+        a.uid === user.uid ||
+        (user.email && a.internalEmail.toLowerCase() === user.email.toLowerCase())
+    );
+    if (existing) {
+      upsertLocalIdentity({ ...existing, emailVerified: true }, existing.uid === getLocalIdentity()?.uid);
     }
   }
 
-  if (!user) {
-    if (!rawPhone && emailCheck.email) {
-      throw new Error(t('err.recoverEmailOnlyFailed'));
-    }
-    if (rawPhone && !emailCheck.email) {
-      throw new Error(t('err.recoverPhoneKeyFailed'));
-    }
-    throw new Error(t('err.recoverAllFailed'));
-  }
-
-  syncAuthState(user);
-  await user.getIdToken(true).catch(() => {});
-
-  const userSnap = await getDoc(doc(db, 'users', user.uid));
-  if (!userSnap.exists()) {
-    throw new Error(t('err.accountMetadataMissing'));
-  }
-  const accountData = userSnap.data() as UserAccount;
-  const talk2tmId = accountData.talk2tmId;
-  const resolvedPhoneHash = accountData.phoneHash || phoneHash || undefined;
-
-  if (phoneHash && accountData.phoneHash && accountData.phoneHash !== phoneHash) {
-    await signOut(auth).catch(() => {});
-    syncAuthState(null);
-    throw new Error(t('err.phoneEmailMismatch'));
-  }
-
-  // Se entrou usando a senha redefinida via link do Firebase, promove-a imediatamente para a chave derivada PBKDF2
-  let finalAuthPassword = derivedPassword || rawRecoverySecret;
-  if (usedRawResetPassword && resolvedPhoneHash && normalizedCode.length >= 6) {
-    const upgradedPassword = await deriveAuthPassword(normalizedCode, resolvedPhoneHash);
-    try {
-      await updatePassword(user, upgradedPassword);
-      finalAuthPassword = upgradedPassword;
-    } catch (upgradeErr) {
-      console.warn('Talk2TM: Não foi possível atualizar derivação PBKDF2 após reset:', upgradeErr);
-    }
-  }
-
-  const profileSnap = await getDoc(doc(db, 'userProfiles', talk2tmId));
-  const profileData = profileSnap.exists() ? (profileSnap.data() as UserProfile) : null;
-  const displayName = profileData?.displayName || user.displayName || 'Utilizador';
-  const effectiveAuthEmail = (user.email || loginEmail).toLowerCase();
-  const recoveryEmail = effectiveAuthEmail.endsWith('@talk2tm.internal')
-    ? undefined
-    : effectiveAuthEmail;
-
-  const sealed = await sealAuthSecretWithPin(finalAuthPassword, params.newPin.trim());
-  const identity: LocalIdentity = {
-    uid: user.uid,
-    talk2tmId,
-    displayName,
-    internalEmail: effectiveAuthEmail,
-    ...(recoveryEmail ? { recoveryEmail } : {}),
-    phoneHash: resolvedPhoneHash,
-    phoneMasked: accountData.phoneMasked || phoneMasked,
-    pinLength: sealed.pinLength,
-    pinSalt: sealed.pinSalt,
-    pinFastHash: sealed.pinFastHash,
-    vaultIv: sealed.vaultIv,
-    vaultCiphertext: sealed.vaultCiphertext,
-    createdAt: accountData.createdAt || new Date().toISOString(),
+  return {
+    verified,
+    email: user?.email || undefined,
+    uid: user?.uid || undefined,
   };
+}
 
-  upsertLocalIdentity(identity, true);
-  return identity;
+/**
+ * Recarrega o utilizador Firebase Auth atual para confirmar se o link de ativação já foi clicado.
+ */
+export async function checkCurrentEmailActivation(): Promise<{
+  verified: boolean;
+  email?: string;
+  uid?: string;
+}> {
+  await initFirebase();
+  const auth = getFirebaseAuth();
+  const user = auth?.currentUser;
+  if (!user) {
+    return { verified: false };
+  }
+
+  await user.reload();
+  await user.getIdToken(true).catch(() => {});
+  syncAuthState(user);
+
+  const verified = Boolean(user.emailVerified);
+  if (verified) {
+    const existing = getAllLocalIdentities().find((a) => a.uid === user.uid);
+    if (existing) {
+      upsertLocalIdentity({ ...existing, emailVerified: true }, true);
+    }
+  }
+
+  return {
+    verified,
+    email: user.email || undefined,
+    uid: user.uid,
+  };
+}
+
+/**
+ * Reenvia o link de ativação para o e-mail da conta atualmente pendente.
+ */
+export async function resendEmailActivationLink(): Promise<{
+  alreadyVerified: boolean;
+  email: string;
+}> {
+  await initFirebase();
+  const auth = getFirebaseAuth();
+  const user = auth?.currentUser;
+  if (!user) {
+    throw new Error(t('err.authNonAnonRequired'));
+  }
+
+  await user.reload().catch(() => {});
+  if (user.emailVerified) {
+    const existing = getAllLocalIdentities().find((a) => a.uid === user.uid);
+    if (existing) {
+      upsertLocalIdentity({ ...existing, emailVerified: true }, true);
+    }
+    return { alreadyVerified: true, email: user.email || '' };
+  }
+
+  try {
+    await sendEmailVerification(user, {
+      url: getAuthActionContinueUrl('verifyEmail'),
+    });
+    return { alreadyVerified: false, email: user.email || '' };
+  } catch (err: any) {
+    if (err?.code === 'auth/too-many-requests') {
+      throw new Error(t('err.tooManyRequests'));
+    }
+    throw new Error(err?.message || t('err.sendConfirmEmailFailed'));
+  }
 }
 
 /**
@@ -1028,46 +909,28 @@ export async function authenticateVaultIdentity(
     }
 
     if (secret) {
-      try {
-        const cred = await signInWithEmailAndPassword(auth, currentIdentity.internalEmail, secret);
-        syncAuthState(cred.user);
-      } catch (err: any) {
-        const canRetryPending =
-          Boolean(currentIdentity.pendingRecoveryEmail) &&
-          (err?.code === 'auth/invalid-credential' ||
-            err?.code === 'auth/user-not-found' ||
-            err?.code === 'auth/wrong-password');
-        if (!canRetryPending) {
-          throw err;
-        }
-        const cred = await signInWithEmailAndPassword(
-          auth,
-          currentIdentity.pendingRecoveryEmail!,
-          secret
-        );
-        syncAuthState(cred.user);
-        currentIdentity = {
-          ...currentIdentity,
-          internalEmail: currentIdentity.pendingRecoveryEmail!,
-          recoveryEmail: currentIdentity.pendingRecoveryEmail!,
-          pendingRecoveryEmail: undefined,
-        };
-        upsertLocalIdentity(currentIdentity, true);
-      }
+      const cred = await signInWithEmailAndPassword(auth, currentIdentity.internalEmail, secret);
+      syncAuthState(cred.user);
     }
   } else {
     syncAuthState(auth.currentUser);
   }
 
-  // Sincroniza eventual alteração de e-mail confirmada fora desta sessão (verifyBeforeUpdateEmail)
-  if (auth.currentUser && auth.currentUser.uid === currentIdentity.uid && auth.currentUser.email) {
-    const activeEmail = auth.currentUser.email.toLowerCase();
-    if (activeEmail !== currentIdentity.internalEmail.toLowerCase()) {
+  const isLegacyAccount = currentIdentity.internalEmail.toLowerCase().endsWith('@talk2tm.internal');
+  if (auth.currentUser && auth.currentUser.uid === currentIdentity.uid) {
+    if (!isLegacyAccount && !auth.currentUser.emailVerified && typeof navigator !== 'undefined' && navigator.onLine) {
+      await auth.currentUser.reload().catch(() => {});
+    }
+    const activeEmail = auth.currentUser.email?.toLowerCase();
+    const nextEmailVerified = isLegacyAccount ? true : Boolean(auth.currentUser.emailVerified);
+    if (
+      (activeEmail && activeEmail !== currentIdentity.internalEmail.toLowerCase()) ||
+      currentIdentity.emailVerified !== nextEmailVerified
+    ) {
       currentIdentity = {
         ...currentIdentity,
-        internalEmail: activeEmail,
-        recoveryEmail: activeEmail.endsWith('@talk2tm.internal') ? undefined : activeEmail,
-        pendingRecoveryEmail: undefined,
+        ...(activeEmail ? { internalEmail: activeEmail } : {}),
+        emailVerified: nextEmailVerified,
       };
     }
   }
@@ -1080,9 +943,17 @@ export async function authenticateVaultIdentity(
       const profileSnap = await getDoc(doc(db, 'userProfiles', currentIdentity.talk2tmId));
       if (profileSnap.exists()) {
         const profile = profileSnap.data() as UserProfile;
-        if (profile.displayName && profile.displayName !== currentIdentity.displayName) {
-          latestDisplayName = profile.displayName;
-          currentIdentity = { ...currentIdentity, displayName: latestDisplayName };
+        const nextUsername = profile.username || currentIdentity.username;
+        if (
+          (profile.displayName && profile.displayName !== currentIdentity.displayName) ||
+          (nextUsername && nextUsername !== currentIdentity.username)
+        ) {
+          latestDisplayName = profile.displayName || latestDisplayName;
+          currentIdentity = {
+            ...currentIdentity,
+            displayName: latestDisplayName,
+            ...(nextUsername ? { username: nextUsername } : {}),
+          };
           upsertLocalIdentity(currentIdentity, true);
         }
       }
@@ -1095,68 +966,7 @@ export async function authenticateVaultIdentity(
 }
 
 /**
- * Gera um novo código de recuperação para uma conta já autenticada/presente no aparelho,
- * atualizando a senha no Firebase Auth e re-selando o cofre local sem custos.
- */
-export async function regenerateRecoveryCodeWithPin(
-  uid: string,
-  currentPin: string,
-  customRecoveryCode?: string
-): Promise<{ recoveryCode: string }> {
-  const identity = getAllLocalIdentities().find((a) => a.uid === uid);
-  if (!identity || !identity.phoneHash) {
-    throw new Error(t('err.recoveryChangeUnsupported'));
-  }
-
-  const oldAuthPassword = await unsealAuthSecretWithPin(identity, currentPin.trim());
-  let newRecoveryCode: string;
-  if (customRecoveryCode && customRecoveryCode.trim()) {
-    const check = validateRecoverySecret(customRecoveryCode, currentPin);
-    if (!check.valid) {
-      throw new Error(check.error || t('onboarding.errSecretInvalid'));
-    }
-    newRecoveryCode = customRecoveryCode.trim();
-  } else {
-    newRecoveryCode = generateRecoveryCode();
-  }
-  const newAuthPassword = await deriveAuthPassword(newRecoveryCode, identity.phoneHash);
-
-  await initFirebase();
-  const auth = getFirebaseAuth();
-  if (!auth) {
-    throw new Error(t('err.firebaseUnavailable'));
-  }
-
-  let user = auth.currentUser;
-  if (!user || user.uid !== uid) {
-    const cred = await signInWithEmailAndPassword(auth, identity.internalEmail, oldAuthPassword);
-    user = cred.user;
-    syncAuthState(user);
-  } else {
-    const emailCred = EmailAuthProvider.credential(identity.internalEmail, oldAuthPassword);
-    await reauthenticateWithCredential(user, emailCred);
-  }
-
-  await updatePassword(user, newAuthPassword);
-
-  const sealed = await sealAuthSecretWithPin(newAuthPassword, currentPin.trim(), identity.pinSalt);
-  upsertLocalIdentity(
-    {
-      ...identity,
-      pinLength: sealed.pinLength,
-      pinSalt: sealed.pinSalt,
-      pinFastHash: sealed.pinFastHash,
-      vaultIv: sealed.vaultIv,
-      vaultCiphertext: sealed.vaultCiphertext,
-    },
-    true
-  );
-
-  return { recoveryCode: newRecoveryCode };
-}
-
-/**
- * Altera o PIN numérico local deste aparelho (sem custo de rede).
+ * Altera o PIN numérico local deste aparelho (sem custo de rede e sem alterar o Firebase Auth).
  */
 export async function updateLocalPinForAccount(
   uid: string,
@@ -1189,93 +999,10 @@ export async function updateLocalPinForAccount(
 }
 
 /**
- * Associa ou atualiza o e-mail de recuperação opcional na conta usando apenas o fluxo nativo
- * gratuito do Firebase Auth (verifyBeforeUpdateEmail).
+ * Envia o link de recuperação de acesso exclusivamente para o e-mail associado à conta.
  */
-export async function associateRecoveryEmailWithPin(
-  uid: string,
-  currentPin: string,
-  rawEmail: string
-): Promise<{ status: 'already_active' | 'verification_sent'; email: string }> {
-  const emailCheck = validateOptionalRecoveryEmail(rawEmail);
-  if (!emailCheck.valid || !emailCheck.email) {
-    throw new Error(emailCheck.error || t('connect.emailValidRequired'));
-  }
-
-  const cleanEmail = emailCheck.email;
-  const identity = getAllLocalIdentities().find((a) => a.uid === uid);
-  if (!identity) {
-    throw new Error(t('err.localAccountNotFound'));
-  }
-
-  const authPassword = await unsealAuthSecretWithPin(identity, currentPin.trim());
-
-  await initFirebase();
-  const auth = getFirebaseAuth();
-  if (!auth) {
-    throw new Error(t('err.firebaseUnavailable'));
-  }
-
-  let user = auth.currentUser;
-  if (!user || user.uid !== uid) {
-    const cred = await signInWithEmailAndPassword(auth, identity.internalEmail, authPassword);
-    user = cred.user;
-    syncAuthState(user);
-  } else {
-    const activeAuthEmail = (user.email || identity.internalEmail).toLowerCase();
-    const emailCred = EmailAuthProvider.credential(activeAuthEmail, authPassword);
-    await reauthenticateWithCredential(user, emailCred);
-  }
-
-  if (user.email && user.email.toLowerCase() === cleanEmail) {
-    upsertLocalIdentity(
-      {
-        ...identity,
-        internalEmail: cleanEmail,
-        recoveryEmail: cleanEmail,
-        pendingRecoveryEmail: undefined,
-      },
-      true
-    );
-    return { status: 'already_active', email: cleanEmail };
-  }
-
-  const continueUrl =
-    typeof window !== 'undefined' && window.location?.origin
-      ? window.location.origin
-      : 'https://talk2tm.web.app';
-
-  try {
-    await verifyBeforeUpdateEmail(user, cleanEmail, { url: continueUrl });
-  } catch (err: any) {
-    if (err?.code === 'auth/email-already-in-use') {
-      throw new Error(t('err.emailAlreadyInUse'));
-    }
-    if (err?.code === 'auth/invalid-email') {
-      throw new Error(t('err.invalidEmail'));
-    }
-    if (err?.code === 'auth/too-many-requests') {
-      throw new Error(t('err.tooManyRequests'));
-    }
-    throw new Error(err?.message || t('err.sendConfirmEmailFailed'));
-  }
-
-  upsertLocalIdentity(
-    {
-      ...identity,
-      pendingRecoveryEmail: cleanEmail,
-    },
-    true
-  );
-
-  return { status: 'verification_sent', email: cleanEmail };
-}
-
-/**
- * Envia o link gratuito nativo do Firebase Auth para redefinição de senha/chave pessoal.
- */
-export async function sendPasswordResetForRecoveryEmail(rawEmail: string): Promise<{ email: string }> {
-  const emailCheck = validateOptionalRecoveryEmail(rawEmail);
+export async function sendRecoveryEmailLink(rawEmail: string): Promise<{ email: string }> {
+  const emailCheck = validateAccountEmail(rawEmail);
   if (!emailCheck.valid || !emailCheck.email) {
     throw new Error(emailCheck.error || t('connect.emailValidRequired'));
   }
@@ -1286,13 +1013,10 @@ export async function sendPasswordResetForRecoveryEmail(rawEmail: string): Promi
     throw new Error(t('err.firebaseUnavailable'));
   }
 
-  const continueUrl =
-    typeof window !== 'undefined' && window.location?.origin
-      ? window.location.origin
-      : 'https://talk2tm.web.app';
-
   try {
-    await sendPasswordResetEmail(auth, emailCheck.email, { url: continueUrl });
+    await sendPasswordResetEmail(auth, emailCheck.email, {
+      url: getAuthActionContinueUrl('resetPassword'),
+    });
     return { email: emailCheck.email };
   } catch (err: any) {
     if (err?.code === 'auth/invalid-email') {
@@ -1306,7 +1030,7 @@ export async function sendPasswordResetForRecoveryEmail(rawEmail: string): Promi
 }
 
 /**
- * Valida o código oobCode de redefinição quando aberto diretamente na aplicação.
+ * Valida o código oobCode de recuperação quando aberto na aplicação.
  */
 export async function verifyInAppPasswordResetCode(oobCode: string): Promise<string> {
   await initFirebase();
@@ -1322,23 +1046,15 @@ export async function verifyInAppPasswordResetCode(oobCode: string): Promise<str
 }
 
 /**
- * Conclui a redefinição nativa (oobCode -> nova Chave Pessoal derivada PBKDF2 -> PIN local).
+ * Conclui a recuperação de acesso via link de e-mail:
+ * - Valida o oobCode e o novo PIN numérico local (>= 6 dígitos)
+ * - Gera internamente uma nova senha Auth aleatória de 32 caracteres (PIN nunca é senha Auth)
+ * - Confirma reset, entra silenciosamente, carrega perfil e sela a nova credencial Auth com o novo PIN
  */
 export async function completePasswordResetInApp(params: {
   oobCode: string;
-  recoveryCode: string;
   newPin: string;
 }): Promise<LocalIdentity> {
-  const recCheck = validateRecoverySecret(params.recoveryCode, params.newPin);
-  if (!recCheck.valid) {
-    throw new Error(recCheck.error || t('onboarding.errSecretInvalid'));
-  }
-
-  const pinCheck = await validateLocalPin(params.newPin, true);
-  if (!pinCheck.valid) {
-    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
-  }
-
   await initFirebase();
   const auth = getFirebaseAuth();
   const db = getFirebaseDB();
@@ -1346,11 +1062,21 @@ export async function completePasswordResetInApp(params: {
     throw new Error(t('err.firebaseUnavailable'));
   }
 
-  const rawSecret = params.recoveryCode.trim();
   const email = await verifyInAppPasswordResetCode(params.oobCode);
-  await confirmPasswordReset(auth, params.oobCode, rawSecret);
+  const cleanEmail = email.trim().toLowerCase();
+  const existingLocal = getAllLocalIdentities().find(
+    (a) => a.internalEmail.toLowerCase() === cleanEmail
+  );
 
-  const cred = await signInWithEmailAndPassword(auth, email, rawSecret);
+  const pinCheck = await validateLocalPin(params.newPin, true, existingLocal?.uid);
+  if (!pinCheck.valid) {
+    throw new Error(pinCheck.error || t('onboarding.errPinInvalid'));
+  }
+
+  const newAuthPassword = generateInternalSecret();
+  await confirmPasswordReset(auth, params.oobCode, newAuthPassword);
+
+  const cred = await signInWithEmailAndPassword(auth, cleanEmail, newAuthPassword);
   const user = cred.user;
   syncAuthState(user);
   await user.getIdToken(true).catch(() => {});
@@ -1362,24 +1088,19 @@ export async function completePasswordResetInApp(params: {
   const accountData = userSnap.data() as UserAccount;
   const talk2tmId = accountData.talk2tmId;
 
-  let finalAuthPassword = rawSecret;
-  if (accountData.phoneHash) {
-    finalAuthPassword = await deriveAuthPassword(recCheck.normalized, accountData.phoneHash);
-    await updatePassword(user, finalAuthPassword).catch(() => {});
-  }
-
   const profileSnap = await getDoc(doc(db, 'userProfiles', talk2tmId));
   const profileData = profileSnap.exists() ? (profileSnap.data() as UserProfile) : null;
-  const displayName = profileData?.displayName || user.displayName || 'Utilizador';
-  const cleanEmail = email.toLowerCase();
+  const username = accountData.username || profileData?.username || user.displayName || undefined;
+  const displayName = profileData?.displayName || username || user.displayName || 'Utilizador';
 
-  const sealed = await sealAuthSecretWithPin(finalAuthPassword, params.newPin.trim());
+  const sealed = await sealAuthSecretWithPin(newAuthPassword, params.newPin.trim());
   const identity: LocalIdentity = {
     uid: user.uid,
     talk2tmId,
+    ...(username ? { username } : {}),
     displayName,
     internalEmail: cleanEmail,
-    ...(cleanEmail.endsWith('@talk2tm.internal') ? {} : { recoveryEmail: cleanEmail }),
+    emailVerified: Boolean(user.emailVerified),
     phoneHash: accountData.phoneHash,
     phoneMasked: accountData.phoneMasked,
     pinLength: sealed.pinLength,
@@ -1391,81 +1112,6 @@ export async function completePasswordResetInApp(params: {
   };
 
   upsertLocalIdentity(identity, true);
-  return identity;
-}
-
-/**
- * Compatibilidade retroativa (diagnóstico / fluxos sem telefone).
- */
-export async function createTalk2TMIdentity(displayName: string): Promise<LocalIdentity> {
-  const cleanName = displayName.trim().slice(0, 30);
-  if (!cleanName) {
-    throw new Error(t('err.displayNameRequired'));
-  }
-
-  await initFirebase();
-  const talk2tmId = generateTalk2TMId();
-  const internalEmail = talk2tmIdToInternalEmail(talk2tmId);
-  const internalSecret = generateInternalSecret();
-  const auth = getFirebaseAuth();
-  const db = getFirebaseDB();
-
-  if (!auth || !db) {
-    throw new Error(t('err.firebaseUnavailable'));
-  }
-
-  const userCredential = await createUserWithEmailAndPassword(auth, internalEmail, internalSecret);
-  const user = userCredential.user;
-  syncAuthState(user);
-
-  try {
-    await updateProfile(user, { displayName: cleanName });
-  } catch {
-    // Não bloqueia caso falhe
-  }
-
-  try {
-    await user.getIdToken(true);
-  } catch {
-    // Segue mesmo se refresh falhar em ambiente emulado
-  }
-
-  const now = new Date().toISOString();
-
-  const userAccount: UserAccount = {
-    uid: user.uid,
-    talk2tmId,
-    createdAt: now,
-  };
-  try {
-    await setDoc(doc(db, 'users', user.uid), userAccount);
-  } catch (err) {
-    handleFirestoreError(err, OperationType.CREATE, `users/${user.uid}`);
-  }
-
-  const userProfile: UserProfile = {
-    talk2tmId,
-    uid: user.uid,
-    displayName: cleanName,
-    active: true,
-    createdAt: now,
-  };
-  try {
-    await setDoc(doc(db, 'userProfiles', talk2tmId), userProfile);
-  } catch (err) {
-    handleFirestoreError(err, OperationType.CREATE, `userProfiles/${talk2tmId}`);
-  }
-
-  const identity: LocalIdentity = {
-    uid: user.uid,
-    talk2tmId,
-    displayName: cleanName,
-    internalEmail,
-    internalSecret,
-    createdAt: now,
-  };
-  saveLocalIdentity(identity);
-
   return identity;
 }
 
@@ -1482,13 +1128,17 @@ export async function restoreLocalIdentity(): Promise<LocalIdentity | null> {
 
   if (auth.currentUser && auth.currentUser.uid === identity.uid) {
     syncAuthState(auth.currentUser);
-    if (auth.currentUser.email && auth.currentUser.email.toLowerCase() !== identity.internalEmail.toLowerCase()) {
-      const activeEmail = auth.currentUser.email.toLowerCase();
+    const activeEmail = auth.currentUser.email?.toLowerCase();
+    const isLegacy = identity.internalEmail.toLowerCase().endsWith('@talk2tm.internal');
+    const nextEmailVerified = isLegacy ? true : Boolean(auth.currentUser.emailVerified);
+    if (
+      (activeEmail && activeEmail !== identity.internalEmail.toLowerCase()) ||
+      identity.emailVerified !== nextEmailVerified
+    ) {
       const updated: LocalIdentity = {
         ...identity,
-        internalEmail: activeEmail,
-        recoveryEmail: activeEmail.endsWith('@talk2tm.internal') ? undefined : activeEmail,
-        pendingRecoveryEmail: undefined,
+        ...(activeEmail ? { internalEmail: activeEmail } : {}),
+        emailVerified: nextEmailVerified,
       };
       upsertLocalIdentity(updated, true);
       return updated;
@@ -1703,17 +1353,8 @@ export async function deleteOwnAccountCompletely(params: {
 
   let user = auth.currentUser;
   if (!user || user.uid !== uid) {
-    try {
-      const cred = await signInWithEmailAndPassword(auth, identity.internalEmail, authPassword);
-      user = cred.user;
-    } catch (err) {
-      if (identity.pendingRecoveryEmail) {
-        const cred = await signInWithEmailAndPassword(auth, identity.pendingRecoveryEmail, authPassword);
-        user = cred.user;
-      } else {
-        throw err;
-      }
-    }
+    const cred = await signInWithEmailAndPassword(auth, identity.internalEmail, authPassword);
+    user = cred.user;
     syncAuthState(user);
   } else {
     const activeEmail = (user.email || identity.internalEmail).toLowerCase();
@@ -1728,6 +1369,7 @@ export async function deleteOwnAccountCompletely(params: {
   const accountData = userSnap.exists() ? (userSnap.data() as UserAccount) : null;
   const talk2tmId = accountData?.talk2tmId || identity.talk2tmId;
   const phoneHash = accountData?.phoneHash || identity.phoneHash;
+  const usernameLower = (accountData?.username || identity.username || '').trim().toLowerCase();
 
   const nowIso = new Date().toISOString();
   if (userSnap.exists() && accountData?.accountStatus !== 'deleting') {
@@ -1825,7 +1467,7 @@ export async function deleteOwnAccountCompletely(params: {
   // Executa todas as deleções de relacionamento e histórico antes da remoção final da raiz da conta
   await commitBatchDeletionsInChunks(db, batchDeleteRefs);
 
-  // 7. Deleção final atômica de userRateLimits, datingProfiles, referralStats, referralAttributions, phoneLookup, userProfiles e users/{uid}
+  // 7. Deleção final atômica de userRateLimits, datingProfiles, referralStats, referralAttributions, usernames, phoneLookup, userProfiles e users/{uid}
   const finalBatch = writeBatch(db);
   const optionalRefs: DocumentReference[] = [
     doc(db, 'userRateLimits', uid),
@@ -1833,6 +1475,7 @@ export async function deleteOwnAccountCompletely(params: {
     doc(db, 'referralStats', uid),
     doc(db, 'referralAttributions', uid),
     doc(db, 'growthTelemetry', uid),
+    ...(usernameLower ? [doc(db, 'usernames', usernameLower)] : []),
     ...(phoneHash ? [doc(db, 'phoneLookup', phoneHash)] : []),
     ...(talk2tmId ? [doc(db, 'userProfiles', talk2tmId)] : []),
   ];

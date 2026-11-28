@@ -3378,3 +3378,76 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Folhas Comerciais Leves (Recomendar a um amigo & Confirmação de Bloqueio) */
+.ttm-commercial-sheet {
+  max-width: 360px;
+  border-radius: 20px;
+  padding: 24px 20px 20px 20px;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65);
+}
+
+.ttm-sheet-emblem {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(244, 63, 94, 0.14);
+  border: 1px solid rgba(244, 63, 94, 0.36);
+  color: var(--accent-coral);
+  margin-bottom: 2px;
+}
+
+.ttm-sheet-emblem.is-safe {
+  background: rgba(63, 185, 80, 0.14);
+  border-color: rgba(63, 185, 80, 0.36);
+  color: #3fb950;
+}
+
+.ttm-sheet-title {
+  font-family: var(--font-sans);
+  font-size: 19px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.25;
+}
+
+.ttm-sheet-desc {
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  max-width: 300px;
+}
+
+.ttm-sheet-actions {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ttm-sheet-actions .ttm-btn {
+  width: 100%;
+  min-height: 46px;
+  border-radius: 12px;
+}
+
+.ttm-sheet-dismiss {
+  align-self: center;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.ttm-commercial-sheet > .ttm-btn {
+  width: 100%;
+  min-height: 46px;
+  border-radius: 12px;
+  margin-top: 4px;
+}
